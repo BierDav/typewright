@@ -15,6 +15,7 @@ struct TypewrightApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Appearance.apply(UserDefaults.standard.string(forKey: "appearance") ?? "")
+        BuiltinCompiler.warmUp()
         Task { await CompilerManager.shared.setUp() }
         Opener.shared.restoreSession()
     }

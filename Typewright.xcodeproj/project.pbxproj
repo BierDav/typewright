@@ -108,6 +108,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 2574141B8C47CA52C04203C5 /* Build configuration list for PBXNativeTarget "Typewright" */;
 			buildPhases = (
+				7B3C1E2A9F4D5A6B8C0D1E2F /* Build Typst Bridge */,
 				6627C163E29BE60581C113D2 /* Sources */,
 				EEFFD40D6BA5C30BFBBE3F78 /* Resources */,
 			);
@@ -176,6 +177,25 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		7B3C1E2A9F4D5A6B8C0D1E2F /* Build Typst Bridge */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Build Typst Bridge";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/libtypst_bridge.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/scripts/build-typst-bridge.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		3771755932E6E5D1ACCC2F0A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -212,13 +232,16 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = G5K3D2J5Y9;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.Typewright;
 				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TypstBridge/include";
 			};
 			name = Release;
 		};
@@ -235,6 +258,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.TypewrightTests;
 				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TypstBridge/include";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Typewright.app/Contents/MacOS/Typewright";
 			};
 			name = Release;
@@ -315,13 +339,16 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = G5K3D2J5Y9;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.Typewright;
 				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TypstBridge/include";
 			};
 			name = Debug;
 		};
@@ -338,6 +365,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.TypewrightTests;
 				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TypstBridge/include";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Typewright.app/Contents/MacOS/Typewright";
 			};
 			name = Debug;

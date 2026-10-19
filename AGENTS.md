@@ -14,7 +14,8 @@ Native macOS Typst editor (SwiftUI + AppKit, macOS 26+, Liquid Glass). Edist is 
 - `Typewright.xcodeproj` uses folder-synchronized groups: files added under `Sources/Typewright` or `Tests/TypewrightTests` are picked up automatically, no pbxproj edits.
 - `Sources/Typewright/App` app entry, window management (`Opener`, `MainWindowController`), home screen, templates.
 - `Sources/Typewright/Workspace` project model (files, autosave, compile scheduling) and project UI.
-- `Sources/Typewright/Compiler` typst download/selection (`CompilerManager`), process runner, diagnostics parsing.
+- `Sources/Typewright/Compiler` built-in compiler (`BuiltinCompiler`), external typst download/selection (`CompilerManager`), `typst watch` driver, diagnostics parsing.
+- `TypstBridge/` Rust static library linking typst in process; its `World` serves unsaved buffers from memory. Built by `scripts/build-typst-bridge.sh` as an Xcode build phase (needs `cargo`).
 - `Sources/Typewright/Editor` NSTextView based editor, highlighting, line numbers.
 - `Sources/Typewright/Preview` PDFKit preview (shown as the inspector pane).
 - `scripts/` icon generation, release build, version calculation, cask generation.
@@ -32,6 +33,8 @@ Native macOS Typst editor (SwiftUI + AppKit, macOS 26+, Liquid Glass). Edist is 
 - Settings use `NSTabViewController` (toolbar style); the SwiftUI `Settings` scene rebuilds its toolbar on tab switches.
 - Never create objects with side effects in a view `init` or `@State` default; SwiftUI re-inits views constantly.
 - `NSViewRepresentable`s inside split views must implement `sizeThatFits`, or changing fitting sizes crash AppKit's constraint pass.
+- The built-in typst version is pinned in `TypstBridge/Cargo.toml` (`typst = "=x.y.z"`); bump all typst crates together.
+- External compilers only see the disk: edits are saved on every keystroke and `typst watch` recompiles. The built-in compiler reads buffers and autosaves every 30 s.
 - The typst CLI is downloaded to `~/Library/Application Support/Typewright/compilers/<version>/typst`.
 
 ## Releases

@@ -53,7 +53,7 @@ struct PreviewPane: View {
             case .pdf: PDFViewHost(controller: preview)
             case .html: WebViewHost(controller: htmlPreview)
             }
-            if compilers.activeBinary == nil {
+            if compilers.active == nil {
                 SetupCompilerView()
             } else if workspace.previewFile == nil {
                 placeholder("No Typst file", "Create a .typ file to see a preview.")
@@ -69,7 +69,7 @@ struct PreviewPane: View {
         .background(SidebarMaterial())
         // Overlay so the bar never drives the pane's size.
         .overlay(alignment: .bottom) {
-            FloatingBar(isVisible: hovering && compilers.activeBinary != nil && workspace.previewFile != nil) { bar }
+            FloatingBar(isVisible: hovering && compilers.active != nil && workspace.previewFile != nil) { bar }
         }
         .onHover { hovering = $0 }
         .onChange(of: workspace.document) { _, doc in preview.show(doc) }
@@ -216,8 +216,8 @@ struct SetupCompilerView: View {
             Image(systemName: "shippingbox")
                 .font(.system(size: 40))
                 .foregroundStyle(.secondary)
-            Text("Set up the Typst compiler").font(.title2.bold())
-            Text("Typewright downloads the official Typst compiler to render your preview.")
+            Text("Selected Typst compiler is missing").font(.title2.bold())
+            Text("Download it, or switch back to the faster built-in compiler.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             if let latest = compilers.latestRelease {
@@ -233,6 +233,8 @@ struct SetupCompilerView: View {
             } else {
                 ProgressView().controlSize(.small)
             }
+            Button("Use built-in Typst \(BuiltinCompiler.version)") { compilers.selection = CompilerManager.builtin }
+                .buttonStyle(.link)
             if let system = compilers.systemBinary {
                 Button("Use installed typst (\(system.path))") { compilers.selection = CompilerManager.system }
                     .buttonStyle(.link)

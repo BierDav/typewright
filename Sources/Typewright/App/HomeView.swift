@@ -192,7 +192,7 @@ struct StatusBar: View {
             } else if let error = compilers.lastError {
                 Text(error).foregroundStyle(.red).lineLimit(1)
             } else {
-                Text(compilers.activeBinary == nil ? "No Typst compiler installed" : compilers.activeDescription)
+                Text(compilers.active == nil ? "No Typst compiler installed" : compilers.activeDescription)
             }
         }
         .font(.caption)

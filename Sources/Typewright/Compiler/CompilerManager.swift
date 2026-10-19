@@ -7,11 +7,18 @@ struct TypstRelease: Codable, Hashable, Identifiable {
     var id: String { version }
 }
 
-/// Downloads, stores and selects typst CLI binaries.
+/// Where compiles run: in process, or through a typst CLI binary.
+enum ActiveCompiler: Equatable {
+    case builtin
+    case binary(URL)
+}
+
+/// Selects the built-in compiler or a downloaded or system typst CLI.
 @MainActor @Observable
 final class CompilerManager {
     static let shared = CompilerManager()
 
+    static let builtin = "builtin"
     static let automatic = "automatic"
     static let system = "system"
 
@@ -31,7 +38,7 @@ final class CompilerManager {
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         directory = support.appendingPathComponent("Typewright/compilers", isDirectory: true)
-        selection = UserDefaults.standard.string(forKey: "compilerSelection") ?? Self.automatic
+        selection = UserDefaults.standard.string(forKey: "compilerSelection") ?? Self.builtin
         systemBinary = ["/opt/homebrew/bin/typst", "/usr/local/bin/typst"]
             .map(URL.init(fileURLWithPath:))
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
@@ -41,9 +48,15 @@ final class CompilerManager {
 
     var latestRelease: TypstRelease? { releases.first }
 
-    /// Binary used for compiling, if any is available.
+    var active: ActiveCompiler? {
+        if selection == Self.builtin { return .builtin }
+        return activeBinary.map(ActiveCompiler.binary)
+    }
+
+    /// External binary used for compiling, if one is selected and available.
     var activeBinary: URL? {
         switch selection {
+        case Self.builtin: return nil
         case Self.system: return systemBinary
         case Self.automatic:
             guard let newest = installed.first else { return nil }
@@ -55,6 +68,7 @@ final class CompilerManager {
 
     var activeDescription: String {
         switch selection {
+        case Self.builtin: return "Typst \(BuiltinCompiler.version)"
         case Self.system: return "System typst"
         case Self.automatic: return installed.first.map { "Typst \($0)" } ?? "No compiler"
         default: return "Typst \(selection)"

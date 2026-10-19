@@ -54,6 +54,7 @@ struct GeneralSettings: View {
 
             Section {
                 Picker("Use", selection: $compilers.selection) {
+                    Text("Built-in (Typst \(BuiltinCompiler.version))").tag(CompilerManager.builtin)
                     Text("Newest installed").tag(CompilerManager.automatic)
                     if compilers.systemBinary != nil {
                         Text("System typst").tag(CompilerManager.system)
@@ -77,6 +78,10 @@ struct GeneralSettings: View {
             } footer: {
                 if let error = compilers.lastError {
                     Text(error).foregroundStyle(.red)
+                } else if compilers.active != .builtin {
+                    Label("External compilers are slower: every keystroke is saved to disk and recompiled by a separate typst process.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
                 } else {
                     Text("Compilers are downloaded from github.com/typst/typst.")
                         .foregroundStyle(.secondary)

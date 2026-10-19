@@ -57,13 +57,11 @@ final class Workspace {
     private var compileTask: Task<Void, Never>?
     /// Bumped when the previewed file or format changes, so in-flight results are dropped.
     private var generation = 0
-    private var outputCount = 0
     private var compileRunning = false
     private var compileQueued = false
-    private let runner = TypstRunner()
     private let exportRunner = TypstRunner()
-    private let outputDir: URL
-    @ObservationIgnored private let shadow: ShadowRoot
+    @ObservationIgnored private let builtin: BuiltinCompiler
+    @ObservationIgnored private var watcher: TypstWatcher?
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?
     @ObservationIgnored private var editorStates: [URL: EditorState] = [:]
     @ObservationIgnored private var previewStates: [URL: PreviewState] = [:]
@@ -74,10 +72,7 @@ final class Workspace {
         var isDir: ObjCBool = false
         FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
         root = isDir.boolValue ? url : url.deletingLastPathComponent()
-        outputDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Typewright-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
-        shadow = ShadowRoot(root: root, in: outputDir)
+        builtin = BuiltinCompiler(root: root)
         renderMode = UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf
 
         let saved = ProjectStore.state(for: root)
@@ -119,8 +114,8 @@ final class Workspace {
 
     func reloadTree() {
         tree = Self.scan(root, depth: 0)
-        // New, removed or renamed files must show up in the compile mirror too.
-        shadow.reset()
+        // New, removed or renamed files must reach the built-in compiler too.
+        builtin.reset()
     }
 
     func select(_ url: URL) {
@@ -195,10 +190,6 @@ final class Workspace {
 
     func persist() {
         capturePreviewState()
-        let prefix = root.path + "/"
-        func relative(_ url: URL) -> String? {
-            url.path.hasPrefix(prefix) ? String(url.path.dropFirst(prefix.count)) : nil
-        }
         var state = ProjectState()
         state.selected = selectedFile.flatMap(relative)
         state.preview = previewFile.flatMap(relative)
@@ -300,13 +291,18 @@ final class Workspace {
         guard let url = selectedFile else { return }
         text = newText
         buffers[url] = newText
+        // External compilers only see the disk, so every edit is saved right away.
+        if case .binary = CompilerManager.shared.active {
+            try? newText.write(to: url, atomically: true, encoding: .utf8)
+            return
+        }
         dirty.insert(url)
         scheduleAutosave()
         // HTML skips layout, so it can keep up with every keystroke.
         scheduleCompile(delay: renderMode == .html ? 0 : 0.25)
     }
 
-    /// Edits only reach disk every 30 s and on file, window or app switches; compiles read the buffers.
+    /// Edits only reach disk every 30 s and on file, window or app switches; the built-in compiler reads the buffers.
     private func scheduleAutosave() {
         guard autosaveTask == nil else { return }
         autosaveTask = Task { [weak self] in
@@ -343,39 +339,74 @@ final class Workspace {
             return
         }
         compileRunning = true
-        isCompiling = true
         repeat {
             compileQueued = false
             await compileOnce()
         } while compileQueued
         compileRunning = false
-        isCompiling = false
     }
 
     private func invalidateCompile() {
         generation += 1
-        runner.cancel()
-    }
-
-    /// Points the compile mirror at the current buffers and returns the main file and root to compile.
-    private func prepareMirror(main: URL) -> (main: URL, root: URL)? {
-        shadow.sync(buffers: buffers.filter { dirty.contains($0.key) }, main: main)
-        return shadow.url(for: main).map { ($0, shadow.shadow) }
     }
 
     private func compileOnce() async {
-        guard let previewFile, let binary = CompilerManager.shared.activeBinary,
-              let mirror = prepareMirror(main: previewFile) else { return }
-        let (main, root) = mirror
+        guard let previewFile, let compiler = CompilerManager.shared.active else {
+            stopWatcher()
+            return
+        }
+        switch compiler {
+        case .builtin:
+            stopWatcher()
+            await compileBuiltin(main: previewFile)
+        case .binary(let binary):
+            flushSaves()
+            startWatcher(binary: binary, main: previewFile)
+        }
+    }
+
+    private func compileBuiltin(main: URL) async {
+        guard let rel = relative(main) else { return }
         let current = generation
         let mode = renderMode
-        outputCount += 1
-        let output = outputDir.appendingPathComponent("preview-\(outputCount).\(mode.rawValue)")
-
-        let result = await runner.compile(binary: binary, main: main, root: root, output: output, format: mode)
-        try? FileManager.default.removeItem(at: output)
+        isCompiling = true
+        let result = await builtin.compile(main: rel, buffers: relativeBuffers(), format: mode)
+        isCompiling = false
         guard current == generation else { return }
+        apply(result, mode: mode)
+    }
 
+    /// Keeps one `typst watch` per previewed file and format; it recompiles on its own when files are saved.
+    private func startWatcher(binary: URL, main: URL) {
+        let mode = renderMode
+        if let watcher, watcher.binary == binary, watcher.main == main, watcher.format == mode { return }
+        stopWatcher()
+        var started: TypstWatcher?
+        let watcher = TypstWatcher(
+            binary: binary, main: main, root: root, format: mode,
+            onCompiling: { [weak self] in
+                guard let self, self.watcher === started else { return }
+                self.isCompiling = true
+            },
+            onResult: { [weak self] result in
+                guard let self, self.watcher === started else { return }
+                self.isCompiling = false
+                self.apply(result, mode: mode)
+            }
+        )
+        started = watcher
+        self.watcher = watcher
+        watcher.start()
+    }
+
+    private func stopWatcher() {
+        guard let watcher else { return }
+        watcher.stop()
+        self.watcher = nil
+        isCompiling = false
+    }
+
+    private func apply(_ result: CompileResult, mode: RenderMode) {
         diagnostics = result.diagnostics
         lastDuration = result.duration
         failureLog = result.output == nil && result.diagnostics.isEmpty && !result.log.isEmpty ? result.log : nil
@@ -393,11 +424,21 @@ final class Workspace {
         if renderMode == .pdf, let document, !isCompiling, !diagnostics.contains(where: { $0.severity == .error }) {
             return document.write(to: url) ? nil : "Could not write \(url.lastPathComponent)."
         }
-        guard let previewFile, let binary = CompilerManager.shared.activeBinary,
-              let mirror = prepareMirror(main: previewFile) else { return "No compiler available." }
-        let (main, root) = mirror
-        let result = await exportRunner.compile(binary: binary, main: main, root: root, output: url)
-        if result.output != nil { return nil }
+        guard let previewFile, let compiler = CompilerManager.shared.active else { return "No compiler available." }
+        let result: CompileResult
+        switch compiler {
+        case .builtin:
+            guard let rel = relative(previewFile) else { return "The file is outside the project." }
+            result = await builtin.compile(main: rel, buffers: relativeBuffers(), format: .pdf)
+            if let data = result.output {
+                do { try data.write(to: url) } catch { return error.localizedDescription }
+                return nil
+            }
+        case .binary(let binary):
+            flushSaves()
+            result = await exportRunner.compile(binary: binary, main: previewFile, root: root, output: url)
+            if result.output != nil { return nil }
+        }
         let errors = result.diagnostics.filter { $0.severity == .error }
         return errors.isEmpty ? result.log : errors.map { "\($0.path):\($0.line): \($0.message)" }.joined(separator: "\n")
     }
@@ -407,9 +448,8 @@ final class Workspace {
         persistTask?.cancel()
         persist()
         compileTask?.cancel()
-        runner.cancel()
+        stopWatcher()
         exportRunner.cancel()
-        try? FileManager.default.removeItem(at: outputDir)
     }
 
     // MARK: - Helpers
@@ -418,6 +458,17 @@ final class Workspace {
         let main = root.appendingPathComponent("main.typ")
         if FileManager.default.fileExists(atPath: main.path) { return main }
         return Self.flatten(tree).first { $0.isTypst }?.url
+    }
+
+    private func relative(_ url: URL) -> String? {
+        let prefix = root.path + "/"
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : nil
+    }
+
+    /// Open buffers keyed by path relative to the root; they win over the disk contents.
+    private func relativeBuffers() -> [String: String] {
+        Dictionary(buffers.compactMap { url, text in relative(url).map { ($0, text) } }) { a, _ in a }
     }
 
     private static func read(_ url: URL) -> String? {

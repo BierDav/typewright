@@ -39,7 +39,7 @@ struct ProjectView: View {
         .onAppear {
             workspace.scheduleCompile(delay: 0)
         }
-        .onChange(of: compilers.activeBinary) { workspace.scheduleCompile(delay: 0) }
+        .onChange(of: compilers.active) { workspace.scheduleCompile(delay: 0) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             workspace.refreshFromDisk()
         }
