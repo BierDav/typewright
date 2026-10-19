@@ -12,7 +12,8 @@ range="HEAD"
 [ "$last" != "v0.0.0" ] && range="$last..HEAD"
 if [ "$major" = "true" ]; then
   x=$((x + 1)); y=0; z=0
-elif git log --format=%s "$range" | grep -qE '^feat(\(.+\))?!?:'; then
+# grep -q would stop reading early; with pipefail the cut-off git log then fails the test.
+elif git log --format=%s "$range" | grep -E '^feat(\(.+\))?!?:' >/dev/null; then
   y=$((y + 1)); z=0
 else
   z=$((z + 1))
