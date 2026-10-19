@@ -1,0 +1,8 @@
+module IrohBridge {
+    header "IrohBridge.h"
+    link "iroh_bridge"
+    link framework "SystemConfiguration"
+    link framework "Security"
+    link framework "CoreFoundation"
+    export *
+}
