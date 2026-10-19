@@ -236,6 +236,8 @@ private struct SpacesPane: View {
                         forget(url)
                     } onToggleSync: {
                         toggleSync(url)
+                    } onRemoveEverywhere: {
+                        if let id = sync.spaceID(for: url) { removeEverywhere(id, name: url.lastPathComponent) }
                     } onDrag: { offset in
                         drag = (url, offset)
                     } onDrop: {
@@ -266,7 +268,11 @@ private struct SpacesPane: View {
                         .padding(.top, 10)
                         .padding(.bottom, 2)
                     ForEach(sync.elsewhere) { space in
-                        ElsewhereSpaceRow(name: space.name) { download(space) }
+                        ElsewhereSpaceRow(name: space.name) {
+                            download(space)
+                        } onRemove: {
+                            removeEverywhere(space.id, name: space.name)
+                        }
                     }
                 }
             }
@@ -403,6 +409,18 @@ private struct SpacesPane: View {
         }
     }
 
+    /// Every device stops syncing the space; their files stay where they are.
+    private func removeEverywhere(_ id: String, name: String) {
+        let alert = NSAlert()
+        alert.messageText = "Remove “\(name)” from all devices?"
+        alert.informativeText = "Your devices stop syncing this space. Their copies of the files stay where they are."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        withAnimation(.smooth(duration: 0.2)) { sync.removeEverywhere(id) }
+    }
+
     /// Asks where the space's folder goes, then opens it while its files arrive.
     private func download(_ space: AccountSpace) {
         let panel = NSOpenPanel()
@@ -434,6 +452,7 @@ private struct SpaceRow: View {
     let onOpen: () -> Void
     let onForget: () -> Void
     let onToggleSync: () -> Void
+    let onRemoveEverywhere: () -> Void
     let onDrag: (CGFloat) -> Void
     let onDrop: () -> Void
     @State private var hovered = false
@@ -500,7 +519,8 @@ private struct SpaceRow: View {
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             Button("Copy Path") { copyPath(url) }
             Divider()
-            Button(isSynced ? "Stop Syncing Across Devices" : "Sync Across Devices", action: onToggleSync)
+            Button(isSynced ? "Stop Syncing on This Mac" : "Sync Across Devices", action: onToggleSync)
+            if isSynced { Button("Remove From All Devices…", action: onRemoveEverywhere) }
             Divider()
             Button("Forget Space", action: onForget)
         }
@@ -550,6 +570,7 @@ private struct OpenSpaceRow: View {
 private struct ElsewhereSpaceRow: View {
     let name: String
     let action: () -> Void
+    let onRemove: () -> Void
     @State private var hovered = false
 
     var body: some View {
@@ -570,6 +591,11 @@ private struct ElsewhereSpaceRow: View {
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .help("Download “\(name)” from your other devices")
+        .contextMenu {
+            Button("Download…", action: action)
+            Divider()
+            Button("Remove From All Devices…", action: onRemove)
+        }
     }
 }
 

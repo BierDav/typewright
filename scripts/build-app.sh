@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Builds a universal, ad-hoc signed Typewright.app and zips it into dist/.
+# Builds a universal Typewright.app and zips it into dist/.
+# Signed with Developer ID and the passkey entitlement when TYPEWRIGHT_SIGN_IDENTITY and
+# TYPEWRIGHT_PROVISIONING_PROFILE (a .provisionprofile path) are set, ad-hoc otherwise (no passkeys, no sync).
+# Notarized when TYPEWRIGHT_NOTARY_APPLE_ID, TYPEWRIGHT_NOTARY_PASSWORD and TYPEWRIGHT_NOTARY_TEAM are set too.
 # Usage: build-app.sh <version> [build-number]
 set -euo pipefail
 version=$1
@@ -15,8 +18,31 @@ xcodebuild -project "$root/macApp/Typewright.xcodeproj" -scheme Typewright -conf
 
 mkdir -p "$root/dist"
 app="$dd/Build/Products/Release/Typewright.app"
-codesign --force --deep --sign - --options runtime "$app"
 zip="$root/dist/Typewright-$version.zip"
 rm -f "$zip"
+
+if [ -n "${TYPEWRIGHT_SIGN_IDENTITY:-}" ] && [ -n "${TYPEWRIGHT_PROVISIONING_PROFILE:-}" ]; then
+  team=$(security cms -D -i "$TYPEWRIGHT_PROVISIONING_PROFILE" | plutil -extract TeamIdentifier.0 raw -)
+  bundle=$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")
+  domain=$(plutil -extract TypewrightPasskeyDomain raw "$app/Contents/Info.plist")
+  entitlements=$(mktemp -t typewright).plist
+  sed "s/\$(TYPEWRIGHT_PASSKEY_DOMAIN)/$domain/" "$root/macApp/Resources/Passkeys.entitlements" > "$entitlements"
+  # Restricted entitlements only count with the profile's app and team identifiers alongside.
+  plutil -insert com.apple.application-identifier -string "$team.$bundle" "$entitlements"
+  plutil -insert com.apple.developer.team-identifier -string "$team" "$entitlements"
+  cp "$TYPEWRIGHT_PROVISIONING_PROFILE" "$app/Contents/embedded.provisionprofile"
+  codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$TYPEWRIGHT_SIGN_IDENTITY" "$app"
+  if [ -n "${TYPEWRIGHT_NOTARY_APPLE_ID:-}" ]; then
+    ditto -c -k --keepParent "$app" "$zip"
+    xcrun notarytool submit "$zip" --apple-id "$TYPEWRIGHT_NOTARY_APPLE_ID" --password "$TYPEWRIGHT_NOTARY_PASSWORD" \
+      --team-id "$TYPEWRIGHT_NOTARY_TEAM" --wait >&2
+    xcrun stapler staple "$app" >&2
+    rm -f "$zip"
+  fi
+else
+  echo "warning: ad-hoc signing; passkeys and sync won't work in this build" >&2
+  codesign --force --deep --sign - --options runtime "$app"
+fi
+
 ditto -c -k --keepParent "$app" "$zip"
 shasum -a 256 "$zip" | cut -d' ' -f1

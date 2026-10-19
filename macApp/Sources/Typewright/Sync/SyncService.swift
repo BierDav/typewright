@@ -7,6 +7,35 @@ import TypewrightCore
 struct AccountSpace: Identifiable, Hashable {
     let id: String
     let name: String
+    /// Devices syncing it.
+    var members: [String] = []
+}
+
+/// What `liveSync` reports about a file being edited on several devices.
+struct LiveResult: Decodable {
+    struct Edit: Decodable {
+        let location: Int
+        let length: Int
+        let text: String
+    }
+
+    struct Adopted: Decodable {
+        let base: String
+        let theirs: String
+    }
+
+    struct Cursor: Decodable {
+        let device: String
+        let name: String
+        let location: Int
+        let length: Int
+    }
+
+    var edits: [Edit] = []
+    var adopted: Adopted?
+    var cursors: [Cursor] = []
+    var peers = 0
+    var undone = false
 }
 
 /// Syncs the spaces the user picked across all devices of their account: `irohBridge` moves the
@@ -19,6 +48,12 @@ final class SyncService {
     static let willChangeFiles = Notification.Name("SyncWillChangeFiles")
     /// Posted with the space root after sync wrote, merged or trashed files.
     static let didChangeFiles = Notification.Name("SyncDidChangeFiles")
+    /// Posted with the space root and the `path` in `userInfo` when another device edited an open file.
+    static let liveDidChange = Notification.Name("SyncLiveDidChange")
+    /// Posted when spaces start or stop syncing here, or the node starts or stops.
+    static let syncedSpacesDidChange = Notification.Name("SyncSyncedSpacesDidChange")
+    /// Live files above this size sync on save only.
+    static let liveLimit = 512 * 1024
 
     private(set) var deviceID: String?
     /// Devices of the account this one is connected to right now.
@@ -39,8 +74,10 @@ final class SyncService {
     }
 
     var isRunning: Bool { node != nil }
-    /// Account spaces that aren't on this device.
-    var elsewhere: [AccountSpace] { accountSpaces.filter { spaces[$0.id] == nil } }
+    /// Account spaces that another device syncs and this one doesn't.
+    var elsewhere: [AccountSpace] {
+        accountSpaces.filter { space in spaces[space.id] == nil && space.members.contains { $0 != deviceID } }
+    }
 
     @ObservationIgnored private var node: OpaquePointer?
     @ObservationIgnored private var dataDir: URL?
@@ -55,6 +92,8 @@ final class SyncService {
     @ObservationIgnored private var nextRequest: Int64 = 1
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private let scanner = FolderScanner()
+    /// `space/path` of files open here and on another device; file sync leaves them to the live session.
+    @ObservationIgnored private var livePaths: Set<String> = []
     @ObservationIgnored private let defaults: UserDefaults
 
     private static let spacesKey = "syncedSpaces"
@@ -120,6 +159,7 @@ final class SyncService {
         deviceID = String(cString: raw)
         tws_string_free(raw)
         for (id, root) in spaces { open(id, root: root) }
+        NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
     }
 
     func stop() {
@@ -136,7 +176,9 @@ final class SyncService {
         devices = []
         accountSpaces = []
         deviceID = nil
+        livePaths = []
         Task.detached { tws_stop(node) }
+        NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
     }
 
     // MARK: - Spaces
@@ -148,12 +190,27 @@ final class SyncService {
         remember(id, root: root)
         tws_share_space(node, id, root.lastPathComponent)
         open(id, root: root, announce: false)
+        NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
     }
 
     /// Stops syncing here; the files stay and the other devices keep syncing.
+    /// Once no device syncs the space anymore, it leaves the account.
     func stopSyncing(_ root: URL) {
         guard let id = spaceID(for: root) else { return }
         if let node { tws_close_space(node, id) }
+        forget(id)
+    }
+
+    /// Stops syncing a space on every device; each keeps its files.
+    func removeEverywhere(_ id: String) {
+        guard let node else { return }
+        tws_remove_space(node, id)
+        accountSpaces.removeAll { $0.id == id }
+        forget(id)
+    }
+
+    private func forget(_ id: String) {
+        defer { NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil) }
         watchers[id] = nil
         engines[id] = nil
         spaces[id] = nil
@@ -237,6 +294,7 @@ final class SyncService {
         var peers: [String]?
         var devices: [String]?
         var spaces: [Space]?
+        var removed: [String]?
         var space: String?
         var entries: [Entry]?
         var path: String?
@@ -249,6 +307,7 @@ final class SyncService {
         struct Space: Decodable {
             let id: String
             let name: String?
+            let members: [String]?
         }
 
         struct Entry: Decodable {
@@ -266,8 +325,16 @@ final class SyncService {
             connected = Set(event.peers ?? [])
             devices = event.devices ?? []
         case "spaces":
-            accountSpaces = (event.spaces ?? []).map { AccountSpace(id: $0.id, name: $0.name ?? "Space") }
+            accountSpaces = (event.spaces ?? []).map { AccountSpace(id: $0.id, name: $0.name ?? "Space", members: $0.members ?? []) }
                 .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            // Removed from all devices elsewhere: stop here too, keeping the files.
+            for id in event.removed ?? [] where spaces[id] != nil {
+                if let node { tws_close_space(node, id) }
+                forget(id)
+            }
+        case "live":
+            guard let id = event.space, let path = event.path, let root = spaces[id] else { return }
+            NotificationCenter.default.post(name: Self.liveDidChange, object: root, userInfo: ["path": path])
         case "entries":
             guard let id = event.space else { return }
             for entry in event.entries ?? [] {
@@ -308,11 +375,40 @@ final class SyncService {
         let path = entry.path
         let local = await Task.detached { scanner.file(root, path: path) }.value
         let ignore = ignores[id] ?? IgnoreRules()
+        // The live session already has this version's edits; writing it could undo newer ones.
+        if livePaths.contains(id + "/" + path), !entry.deleted, local != nil {
+            engine.accepted(path: path, hash: entry.hash)
+            scheduleSave()
+            return
+        }
         let actions = engine.remote(entry: entry, local: local, ignore: ignore) { candidate in
             KotlinBoolean(bool: FileManager.default.fileExists(atPath: root.appendingPathComponent(candidate).path))
         }
         for action in actions { await perform(action, space: id) }
         if !actions.isEmpty { scheduleSave() }
+    }
+
+    // MARK: - Live editing
+
+    func liveOpen(root: URL, path: String, text: String) {
+        guard let node, let id = spaceID(for: root) else { return }
+        tws_live_open(node, id, path, text, Host.current().localizedName ?? "Mac")
+    }
+
+    func liveClose(root: URL, path: String) {
+        guard let node, let id = spaceID(for: root) else { return }
+        livePaths.remove(id + "/" + path)
+        tws_live_close(node, id, path)
+    }
+
+    /// `step` 1 undoes and 2 redoes this device's last edit of the file.
+    func liveSync(root: URL, path: String, text: String, selection: NSRange, step: Int32 = 0) -> LiveResult? {
+        guard let node, let id = spaceID(for: root) else { return nil }
+        let raw = tws_live_sync(node, id, path, text, UInt32(clamping: selection.location), UInt32(clamping: selection.length), step)
+        defer { tws_string_free(raw) }
+        guard let result = try? JSONDecoder().decode(LiveResult.self, from: Data(String(cString: raw).utf8)) else { return nil }
+        if result.peers > 0 { livePaths.insert(id + "/" + path) } else { livePaths.remove(id + "/" + path) }
+        return result
     }
 
     // MARK: - Actions

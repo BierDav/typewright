@@ -70,6 +70,8 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored let filePreview = PreviewController()
     /// Shows a selected image file.
     @ObservationIgnored let imagePreview = ImagePreviewController()
+    /// Shares the shown file with the account's other devices while they have it open too.
+    let live: LiveEditing
     private var buffers: [URL: String] = [:]
     private var dirty: Set<URL> = []
 
@@ -103,6 +105,7 @@ final class Workspace: EditorLanguage {
         root = Self.root(of: url)
         let isDir = root == url
         builtin = BuiltinCompiler(root: root)
+        live = LiveEditing(root: root)
         renderMode = UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf
 
         let saved = SpaceStore.state(for: root)
@@ -128,6 +131,13 @@ final class Workspace: EditorLanguage {
             previewFile = resolve(state.preview)
         }
         restorePreviews(for: previewFile)
+        live.currentText = { [weak self] in self?.text ?? "" }
+        live.replaceText = { [weak self] new in
+            guard let self, let url = self.selectedFile else { return }
+            self.updateBuffer(url, text: new)
+            self.reloadEditorIfNeeded()
+        }
+        startLive()
         fontObserver = NotificationCenter.default.addObserver(forName: FontLibrary.didChange, object: nil, queue: .main) {
             [weak self] _ in
             MainActor.assumeIsolated {
@@ -147,6 +157,12 @@ final class Workspace: EditorLanguage {
             NotificationCenter.default.addObserver(forName: SyncService.didChangeFiles, object: nil, queue: .main) { [weak self] note in
                 guard (note.object as? URL)?.standardizedFileURL == root else { return }
                 MainActor.assumeIsolated { self?.refreshFromDisk() }
+            },
+            NotificationCenter.default.addObserver(forName: SyncService.syncedSpacesDidChange, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.live.close()
+                    self?.startLive()
+                }
             },
         ]
         languageObserver = NotificationCenter.default.addObserver(forName: LanguageServerManager.didChange, object: nil,
@@ -241,6 +257,13 @@ final class Workspace: EditorLanguage {
         if kind == .typst { languageClient()?.open(url, text: text) }
         revision += 1
         schedulePersist()
+        startLive()
+    }
+
+    /// Live editing covers the shown text file of a synced space; it's (re)started on selection and sync changes.
+    func startLive() {
+        guard selectedKind?.isEditable == true, let file = selectedFile else { return live.close() }
+        live.open(relative(file), text: text)
     }
 
     func reveal(_ diagnostic: Diagnostic) {
@@ -277,6 +300,7 @@ final class Workspace: EditorLanguage {
     }
 
     func editorStateDidChange(_ state: EditorState) {
+        live.selectionDidChange(NSRange(location: state.selection, length: state.length))
         guard let url = selectedFile, editorStates[url] != state else { return }
         editorStates[url] = state
         schedulePersist()
@@ -377,6 +401,7 @@ final class Workspace: EditorLanguage {
             text = disk
             buffers[selected] = disk
             revision += 1
+            live.textDidChange()
         }
         if let selected = selectedFile, selectedKind == .pdf {
             filePreview.show(PDFDocument(url: selected))
@@ -534,6 +559,7 @@ final class Workspace: EditorLanguage {
         guard let url = selectedFile else { return }
         text = newText
         buffers[url] = newText
+        self.live.textDidChange()
         if selectedKind == .typst { languageClient()?.change(url, text: newText) }
         // External compilers only see the disk, so every edit is saved right away.
         if case .binary = CompilerManager.shared.active {
@@ -583,6 +609,7 @@ final class Workspace: EditorLanguage {
         if url == selectedFile {
             text = new
             editorNeedsReload = true
+            self.live.textDidChange()
         }
         if FileKind(url: url) == .typst { languageClient()?.change(url, text: new) }
         if case .binary = CompilerManager.shared.active {
@@ -632,8 +659,26 @@ final class Workspace: EditorLanguage {
     }
 
     func completions(at offset: Int) async -> [CompletionItem] {
-        guard let file = selectedFile, selectedKind == .typst, let client = languageClient() else { return [] }
-        return await client.completions(in: file, text: text as NSString, at: offset)
+        guard let file = selectedFile, selectedKind == .typst else { return [] }
+        let packages = packageCompletions(at: offset)
+        guard let client = languageClient() else { return packages }
+        let items = await client.completions(in: file, text: text as NSString, at: offset)
+        let labels = Set(items.map(\.label))
+        return items + packages.filter { !labels.contains($0.label) }
+    }
+
+    /// tinymist only knows `@preview`; local namespaces and downloaded packages come from the package folders.
+    private func packageCompletions(at offset: Int) -> [CompletionItem] {
+        let start = Int(PackageSpecs.shared.specStart(text: text, offset: Int32(offset)))
+        guard start >= 0 else { return [] }
+        let library = PackageLibrary.shared
+        let specs = library.namespaces.flatMap(\.packages).map(\.spec) + library.downloaded.map(\.spec)
+        let typed = (text as NSString).substring(with: NSRange(location: start, length: offset - start))
+        let range = NSRange(location: start, length: offset - start)
+        return PackageSpecs.shared.candidates(typed: typed, specs: specs).map { spec in
+            CompletionItem(label: spec, detail: spec.hasPrefix("@preview/") ? "Downloaded" : "Local package", kind: .file,
+                           filterText: spec, sortText: spec, newText: spec, isSnippet: false, range: range)
+        }
     }
 
     func hover(at offset: Int) async -> (markdown: String, range: NSRange?)? {
@@ -1020,6 +1065,7 @@ final class Workspace: EditorLanguage {
         if let languageObserver { NotificationCenter.default.removeObserver(languageObserver) }
         if let packageObserver { NotificationCenter.default.removeObserver(packageObserver) }
         syncObservers.forEach(NotificationCenter.default.removeObserver)
+        live.stop()
         language?.stop()
         language = nil
     }

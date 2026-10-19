@@ -252,6 +252,8 @@ struct SidebarView: View {
             }
         } else if node.kind.isOpenable {
             withAnimation(.smooth(duration: 0.3)) { workspace.select(node.url) }
+            // The row's drag gesture sees every click, so a double click is read off the mouse-up.
+            if node.isPreviewable, (NSApp.currentEvent?.clickCount ?? 1) >= 2 { workspace.setPreview(node.url) }
         }
     }
 }

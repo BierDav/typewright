@@ -5,7 +5,7 @@
 /// Syncs space folders between the devices of one account; see `irohBridge/src/lib.rs`.
 typedef struct TWSyncNode TWSyncNode;
 
-/// Receives JSON events on arbitrary threads: `status`, `spaces`, `entries`, `remote`, `published`, `exported`, `error`.
+/// Receives JSON events on arbitrary threads: `status`, `spaces`, `entries`, `remote`, `published`, `exported`, `live`, `error`.
 typedef void (*TWSyncEventCallback)(void *_Nullable context, const char *_Nonnull event);
 
 /// Starts syncing for the account; `account` is 32 bytes. NULL (after an `error` event) if it can't start.
@@ -19,10 +19,21 @@ char *_Nonnull tws_device_id(const TWSyncNode *_Nonnull node);
 void tws_share_space(const TWSyncNode *_Nonnull node, const char *_Nonnull space, const char *_Nonnull name);
 /// Starts syncing a space listed by the account; answers with an `entries` event.
 void tws_open_space(const TWSyncNode *_Nonnull node, const char *_Nonnull space);
-/// Stops syncing a space on this device; the other devices keep it.
+/// Stops syncing a space on this device; the other devices keep it. A space nobody syncs leaves the account.
 void tws_close_space(const TWSyncNode *_Nonnull node, const char *_Nonnull space);
+/// Stops syncing a space on every device of the account; the files stay everywhere.
+void tws_remove_space(const TWSyncNode *_Nonnull node, const char *_Nonnull space);
 /// Re-sends the space's entries as an `entries` event.
 void tws_list_space(const TWSyncNode *_Nonnull node, const char *_Nonnull space);
+
+/// Starts live editing of a file shown in an editor; `name` labels this device's cursor elsewhere.
+void tws_live_open(const TWSyncNode *_Nonnull node, const char *_Nonnull space, const char *_Nonnull path,
+                   const char *_Nonnull text, const char *_Nonnull name);
+void tws_live_close(const TWSyncNode *_Nonnull node, const char *_Nonnull space, const char *_Nonnull path);
+/// Hands over the editor's text and selection (UTF-16) and returns JSON with remote `edits`, an `adopted`
+/// session to merge into, the other `cursors` and `peers`. `step` 1 undoes, 2 redoes. Free with `tws_string_free`.
+char *_Nonnull tws_live_sync(const TWSyncNode *_Nonnull node, const char *_Nonnull space, const char *_Nonnull path,
+                             const char *_Nonnull text, uint32_t location, uint32_t length, int32_t step);
 
 /// Imports `file` as the space's `path`; answers with a `published` event.
 void tws_publish(const TWSyncNode *_Nonnull node, const char *_Nonnull space, const char *_Nonnull path,

@@ -205,7 +205,8 @@ struct SpaceView: View {
                     topInset: Self.fadeHeight - 10,
                     onChange: workspace.textDidChange,
                     onStateChange: workspace.editorStateDidChange,
-                    language: workspace.selectedKind == .typst ? workspace : nil
+                    language: workspace.selectedKind == .typst ? workspace : nil,
+                    live: workspace.live
                 )
                 .overlay(alignment: .bottomTrailing) {
                     if workspace.previewFile != nil { issuesButton }
@@ -225,6 +226,10 @@ struct SpaceView: View {
             Divider()
             HStack(spacing: 12) {
                 Text("\(workspace.wordCount) words")
+                if !workspace.live.participants.isEmpty {
+                    Label(workspace.live.participants.joined(separator: ", "), systemImage: "person.2.fill")
+                        .help("Also editing this file")
+                }
                 Spacer()
                 if let previewed = workspace.previewFile {
                     Label(previewed.lastPathComponent, systemImage: "eye").help("Previewed file")
@@ -293,20 +298,27 @@ struct IssuesView: View {
                     .foregroundStyle(.secondary)
                     .padding()
             } else {
+                // Messages are selectable for copying, so only the icon and location jump to the issue.
                 List(diagnostics) { d in
-                    Button { onSelect(d) } label: {
-                        HStack(alignment: .top) {
+                    HStack(alignment: .top) {
+                        Button { onSelect(d) } label: {
                             Image(systemName: d.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
                                 .foregroundStyle(d.severity == .error ? .red : .yellow)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(d.message)
+                        }
+                        .buttonStyle(.plain)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(d.message)
+                                .textSelection(.enabled)
+                            Button { onSelect(d) } label: {
                                 Text("\(d.path):\(d.line):\(d.column)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
+                            .buttonStyle(.plain)
+                            .pointerStyle(.link)
+                            .help("Go to the issue")
                         }
                     }
-                    .buttonStyle(.plain)
                 }
                 .frame(width: 420, height: 260)
             }

@@ -38,8 +38,36 @@ jobs:
       - name: Test
         run: xcodebuild -project macApp/Typewright.xcodeproj -scheme Typewright -derivedDataPath .build CODE_SIGN_IDENTITY=- test
 
+      # Passkeys (and so sync) need a Developer ID signature with the associated-domains entitlement.
+      - name: Import signing identity
+        env:
+          CERTIFICATE: ${{ secrets.DEVELOPER_ID_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          PROFILE: ${{ secrets.PROVISIONING_PROFILE }}
+          SIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_IDENTITY }}
+        run: |
+          if [ -z "$CERTIFICATE" ] || [ -z "$PROFILE" ]; then
+            echo "::warning::No signing secrets; this release can't use passkeys or sync."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "" "$keychain"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          echo "$PROFILE" | base64 --decode > "$RUNNER_TEMP/Typewright.provisionprofile"
+          echo "TYPEWRIGHT_SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo "TYPEWRIGHT_PROVISIONING_PROFILE=$RUNNER_TEMP/Typewright.provisionprofile" >> "$GITHUB_ENV"
+
       - name: Build
         id: build
+        env:
+          TYPEWRIGHT_NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          TYPEWRIGHT_NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          TYPEWRIGHT_NOTARY_TEAM: ${{ secrets.NOTARY_TEAM_ID }}
         run: echo "sha=$(scripts/build-app.sh '${{ steps.version.outputs.version }}' '${{ github.run_number }}' | tail -1)" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub release

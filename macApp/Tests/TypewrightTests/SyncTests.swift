@@ -119,4 +119,94 @@ final class SyncNetworkTests: XCTestCase {
             !FileManager.default.fileExists(atPath: rootA.appendingPathComponent("figures/plot.pdf").path)
         }
     }
+
+    /// Shares a one-file space from a new device `a` and joins it on `b`.
+    private func sharedSpace(_ text: String) async throws -> (SyncService, URL, SyncService, URL) {
+        let account = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+        let a = try await device("a", account: account)
+        let b = try await device("b", account: account)
+        let rootA = dir.appendingPathComponent("A/Notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: rootA, withIntermediateDirectories: true)
+        try text.write(to: rootA.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
+        a.share(rootA)
+        try await eventually("space listed on b") { !b.elsewhere.isEmpty }
+        let parentB = dir.appendingPathComponent("B", isDirectory: true)
+        try FileManager.default.createDirectory(at: parentB, withIntermediateDirectories: true)
+        let rootB = try XCTUnwrap(b.join(b.elsewhere[0], in: parentB))
+        try await eventually("file on b") { read(rootB.appendingPathComponent("main.typ")) == text }
+        return (a, rootA, b, rootB)
+    }
+
+    /// An editor's side of a live session, as `LiveEditing` does it.
+    @MainActor private final class Editor {
+        let service: SyncService
+        let root: URL
+        var text: String
+        var selection = NSRange(location: 0, length: 0)
+        var cursors: [LiveResult.Cursor] = []
+
+        init(_ service: SyncService, _ root: URL, _ text: String) {
+            self.service = service
+            self.root = root
+            self.text = text
+            service.liveOpen(root: root, path: "main.typ", text: text)
+        }
+
+        func sync() {
+            guard let result = service.liveSync(root: root, path: "main.typ", text: text, selection: selection) else { return }
+            if let adopted = result.adopted {
+                let merged = TextMerge.shared.merge3(base: adopted.base, local: text, remote: adopted.theirs)
+                text = merged.conflicts == 0 ? merged.text : adopted.theirs
+                return sync()
+            }
+            let buffer = NSMutableString(string: text)
+            for edit in result.edits {
+                buffer.replaceCharacters(in: NSRange(location: edit.location, length: edit.length), with: edit.text)
+            }
+            text = buffer as String
+            cursors = result.cursors
+        }
+    }
+
+    func testEditsLiveWithCursors() async throws {
+        let (a, rootA, b, rootB) = try await sharedSpace("hello\n")
+        let editorA = Editor(a, rootA, "hello\n")
+        let editorB = Editor(b, rootB, "hello\n")
+        try await eventually("sessions meet") {
+            editorA.sync()
+            editorB.sync()
+            return !editorA.cursors.isEmpty && !editorB.cursors.isEmpty
+        }
+
+        editorA.text = "hello world\n"
+        editorA.selection = NSRange(location: 11, length: 0)
+        let start = Date()
+        editorA.sync()
+        try await eventually("edit on b", timeout: 10) {
+            editorB.sync()
+            return editorB.text == "hello world\n" && editorB.cursors.first?.location == 11
+        }
+        print("live edit arrived after \(Int(Date().timeIntervalSince(start) * 1000)) ms")
+
+        // Typing at once on both sides merges without losing either.
+        editorA.text = "Oh, hello world\n"
+        editorB.text = "hello world!\n"
+        editorA.sync()
+        editorB.sync()
+        try await eventually("both edits on both", timeout: 10) {
+            editorA.sync()
+            editorB.sync()
+            return editorA.text == "Oh, hello world!\n" && editorB.text == editorA.text
+        }
+    }
+
+    func testSpacesNobodySyncsLeaveTheAccount() async throws {
+        let (a, rootA, b, rootB) = try await sharedSpace("x\n")
+        b.stopSyncing(rootB)
+        // A still syncs it, so b can join again.
+        try await eventually("listed on b") { b.elsewhere.count == 1 }
+        a.stopSyncing(rootA)
+        try await eventually("gone on b") { b.elsewhere.isEmpty }
+        XCTAssertTrue(a.elsewhere.isEmpty)
+    }
 }

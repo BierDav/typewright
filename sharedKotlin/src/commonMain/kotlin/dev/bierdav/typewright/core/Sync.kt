@@ -153,6 +153,14 @@ class SpaceSync(var lfsThreshold: Double = SyncPolicy.DEFAULT_LFS_THRESHOLD) {
         base[path] = remoteHash
     }
 
+    /**
+     * A remote version that a live editing session already holds; the file isn't written, and the
+     * next scan publishes this device's copy, which converges with it.
+     */
+    fun accepted(path: String, hash: String) {
+        base[path] = hash
+    }
+
     /** A `Write` finished; `ok` false leaves the path as it was. */
     fun wrote(path: String, hash: String, ok: Boolean) {
         if (writing[path] == hash) writing.remove(path)

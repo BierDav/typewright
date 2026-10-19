@@ -5,30 +5,27 @@ import SwiftUI
 struct DeviceSettings: View {
     @Bindable private var identity = SyncIdentity.shared
     @Bindable private var sync = SyncService.shared
-    @State private var recoveryInput = ""
+    @State private var accountName = ""
 
     var body: some View {
         Form {
             Section {
                 if let fingerprint = identity.fingerprint {
+                    if let name = identity.name, !name.isEmpty { LabeledContent("Passkey", value: name) }
                     LabeledContent("Account", value: fingerprint)
-                    LabeledContent("Signed in with", value: identity.kind == .passkey ? "Passkey" : "Recovery key")
-                    if let key = identity.recoveryKey {
-                        LabeledContent("Recovery key") {
-                            Text(key).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                        }
-                    }
                     LabeledContent("") {
                         Button("Sign Out", role: .destructive) { identity.signOut() }
                     }
                 } else {
+                    TextField("Name", text: $accountName, prompt: Text("you@example.com"))
                     LabeledContent("Passkey") {
                         HStack {
-                            Button("Create…") { Task { await identity.createPasskey() } }
+                            Button("Create…") { Task { await identity.createPasskey(name: accountName) } }
+                                .disabled(accountName.trimmingCharacters(in: .whitespaces).isEmpty)
                             Button("Sign In…") { Task { await identity.signInWithPasskey() } }
                         }
-                        .disabled(SyncIdentity.passkeyDomain == nil || identity.isWorking)
                     }
+                    .disabled(SyncIdentity.passkeyDomain == nil || identity.isWorking)
                 }
             } header: {
                 Text("Account")
@@ -36,29 +33,10 @@ struct DeviceSettings: View {
                 if let error = identity.error {
                     Text(error).foregroundStyle(.red)
                 } else if identity.account == nil, SyncIdentity.passkeyDomain == nil {
-                    Text("Passkeys aren't set up in this build; use a recovery key on each Mac instead.")
+                    Text("This build can't use passkeys, so syncing is off. Release builds signed by the developer can.")
                         .foregroundStyle(.secondary)
                 } else if identity.account == nil {
-                    Text("Sign in with the same passkey on each Mac; iCloud Keychain brings it along. Synced spaces then show up on all of them, with nothing to exchange.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if identity.account == nil {
-                Section {
-                    LabeledContent("New account") {
-                        Button("Generate Key") { _ = identity.generateRecoveryKey() }
-                    }
-                    HStack {
-                        TextField("Key from another Mac", text: $recoveryInput)
-                            .font(.system(.body, design: .monospaced))
-                        Button("Use") { identity.useRecoveryKey(recoveryInput) }
-                            .disabled(recoveryInput.isEmpty)
-                    }
-                } header: {
-                    Text("Recovery Key")
-                } footer: {
-                    Text("Without passkeys, devices share an account through a key you copy over once.")
+                    Text("Create a passkey once, then sign in with it on each Mac; iCloud Keychain brings it along. Synced spaces then show up on all of them, with nothing to exchange.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -82,12 +60,16 @@ struct DeviceSettings: View {
                 }
 
                 Section {
-                    ForEach(sync.spaces.sorted { $0.value.lastPathComponent < $1.value.lastPathComponent }, id: \.key) { _, root in
+                    ForEach(sync.spaces.sorted { $0.value.lastPathComponent < $1.value.lastPathComponent }, id: \.key) { id, root in
                         LabeledContent {
                             HStack {
                                 Button { NSWorkspace.shared.activateFileViewerSelecting([root]) } label: { Image(systemName: "folder") }
                                     .buttonStyle(.borderless)
-                                Button("Stop Syncing") { sync.stopSyncing(root) }
+                                Menu("Stop Syncing") {
+                                    Button("On This Mac") { sync.stopSyncing(root) }
+                                    Button("On All Devices") { sync.removeEverywhere(id) }
+                                }
+                                .fixedSize()
                             }
                         } label: {
                             Text(root.lastPathComponent)

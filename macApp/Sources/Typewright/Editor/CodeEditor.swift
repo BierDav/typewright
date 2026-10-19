@@ -81,6 +81,10 @@ final class TypstTextView: NSTextView {
     var brackets: [NSRange] = [] {
         didSet { if brackets != oldValue { needsDisplay = true } }
     }
+    /// Carets and selections of other devices editing the same file.
+    var remoteCursors: [RemoteCursor] = [] {
+        didSet { if remoteCursors != oldValue { needsDisplay = true } }
+    }
 
     // MARK: Gliding caret
 
@@ -283,6 +287,7 @@ final class TypstTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawRemoteCursors(in: dirtyRect)
         for literal in swatches {
             guard let rect = swatchRect(for: literal), rect.intersects(dirtyRect) else { continue }
             let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
@@ -294,6 +299,34 @@ final class TypstTextView: NSTextView {
             NSColor.separatorColor.setStroke()
             path.lineWidth = 1
             path.stroke()
+        }
+    }
+
+    /// Each device's selection tinted in its color, a caret and its name above it.
+    private func drawRemoteCursors(in dirtyRect: NSRect) {
+        guard let lm = layoutManager, let container = textContainer else { return }
+        let length = (string as NSString).length
+        let label = NSFont.systemFont(ofSize: 9, weight: .semibold)
+        for cursor in remoteCursors where NSMaxRange(cursor.range) <= length {
+            let color = cursor.color
+            if cursor.range.length > 0 {
+                color.withAlphaComponent(0.2).setFill()
+                let glyphs = lm.glyphRange(forCharacterRange: cursor.range, actualCharacterRange: nil)
+                lm.enumerateEnclosingRects(forGlyphRange: glyphs, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                                           in: container) { rect, _ in
+                    rect.offsetBy(dx: self.textContainerOrigin.x, dy: self.textContainerOrigin.y).fill()
+                }
+            }
+            guard let caret = caretRect(at: NSMaxRange(cursor.range)) else { continue }
+            let bar = NSRect(x: caret.minX, y: caret.minY, width: 2, height: caret.height)
+            guard bar.insetBy(dx: -150, dy: -20).intersects(dirtyRect) else { continue }
+            color.setFill()
+            bar.fill()
+            let name = NSAttributedString(string: cursor.name, attributes: [.font: label, .foregroundColor: NSColor.white])
+            let size = name.size()
+            let tag = NSRect(x: caret.minX, y: caret.minY - size.height - 1, width: size.width + 8, height: size.height + 1)
+            NSBezierPath(roundedRect: tag, xRadius: 3, yRadius: 3).fill()
+            name.draw(at: NSPoint(x: tag.minX + 4, y: tag.minY + 0.5))
         }
     }
 
@@ -607,6 +640,8 @@ struct CodeEditor: NSViewRepresentable {
     let onStateChange: (EditorState) -> Void
     /// Completions, docs, navigation, formatting and renaming; nil turns them off.
     var language: (any EditorLanguage)?
+    /// Edits and cursors of other devices with the same file open.
+    var live: LiveEditing?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -697,11 +732,19 @@ struct CodeEditor: NSViewRepresentable {
         tv.onExtractVariable = highlights ? { [weak c] in c?.extractVariable() } : nil
         tv.onInlineVariable = highlights ? { [weak c] in c?.inlineVariable() } : nil
         tv.onExtractFunction = highlights ? { [weak c] in c?.extractFunction(toScope: $0) } : nil
-        tv.onUndo = { [weak c] in c?.undoRename() ?? false }
+        // While other devices edit along, undo takes back only this device's edits.
+        tv.onUndo = { [weak c] in c?.undoRename() == true || c?.live?.undo(redo: false) == true }
         tv.onQuickFix = { [weak c] in c?.showQuickFixes(at: $0) }
         tv.hasQuickFixes = { [weak c] in !(c?.quickFixes(at: $0).isEmpty ?? true) }
         c.hover?.fixesProvider = language.map { l in { l.quickFixes(for: $0) } }
-        tv.onRedo = { [weak c] in c?.redoRename() ?? false }
+        tv.onRedo = { [weak c] in c?.redoRename() == true || c?.live?.undo(redo: true) == true }
+        if c.live !== live {
+            c.live?.applyEdits = nil
+            c.live?.showCursors = nil
+            c.live = live
+            live?.applyEdits = { [weak c] in c?.applyRemote($0) ?? false }
+            live?.showCursors = { [weak tv] in tv?.remoteCursors = $0 }
+        }
 
         let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         if c.documentID != documentID || c.font != font {
@@ -834,6 +877,35 @@ struct CodeEditor: NSViewRepresentable {
         var onChange: (String, Bool) -> Void = { _, _ in }
         var onStateChange: (EditorState) -> Void = { _ in }
         var isRestoring = false
+        weak var live: LiveEditing?
+        private var isApplyingRemote = false
+
+        /// Edits from other devices: not undoable here, and the caret keeps its place in the text around them.
+        func applyRemote(_ edits: [LiveResult.Edit]) -> Bool {
+            guard let tv = textView, let storage = tv.textStorage else { return false }
+            // A rename would mirror the remote text into its other ranges.
+            commitRename()
+            var selection = tv.selectedRange()
+            func shift(_ position: Int, _ edit: LiveResult.Edit) -> Int {
+                if position <= edit.location { return position }
+                if position >= edit.location + edit.length { return position + (edit.text as NSString).length - edit.length }
+                return edit.location
+            }
+            tv.undoManager?.disableUndoRegistration()
+            storage.beginEditing()
+            for edit in edits where edit.location + edit.length <= storage.length {
+                storage.replaceCharacters(in: NSRange(location: edit.location, length: edit.length), with: edit.text)
+                let start = shift(selection.location, edit), end = shift(NSMaxRange(selection), edit)
+                selection = NSRange(location: start, length: max(end - start, 0))
+            }
+            storage.endEditing()
+            tv.undoManager?.enableUndoRegistration()
+            isApplyingRemote = true
+            tv.setSelectedRange(selection)
+            textDidChange(Notification(name: NSText.didChangeNotification, object: tv))
+            isApplyingRemote = false
+            return true
+        }
 
         @objc func didScroll() {
             completion?.hide()
@@ -899,7 +971,7 @@ struct CodeEditor: NSViewRepresentable {
                 lastTyped = nil
                 return
             }
-            if completion?.isEditing != true { completion?.textDidChange(typed: lastTyped) }
+            if completion?.isEditing != true, !isApplyingRemote { completion?.textDidChange(typed: lastTyped) }
             lastTyped = nil
         }
 

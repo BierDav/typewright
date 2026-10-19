@@ -4,25 +4,29 @@ import CryptoKit
 import Observation
 import Security
 
-/// The account all of a user's devices share. A synced passkey's PRF output is the same on every
-/// device, so signing in with it is all a new device needs; the derived secret stays in the keychain.
+/// The account all of a user's devices share, backed by a passkey. A synced passkey's PRF output is the
+/// same on every device, so signing in with it is all a new device needs; the derived secret stays in the keychain.
 @MainActor @Observable
 final class SyncIdentity: NSObject {
     static let shared = SyncIdentity()
 
-    enum Kind: String { case passkey, recoveryKey }
-
     /// 32 bytes every key of the account derives from.
     private(set) var account: Data?
-    private(set) var kind: Kind?
+    /// The name the passkey was created with, as the Passwords app shows it.
+    private(set) var name: String?
     private(set) var isWorking = false
     private(set) var error: String?
 
     /// Relying party for the passkey; needs the associated domain entitlement and the domain's
     /// `apple-app-site-association` listing this app under `webcredentials`.
-    static var passkeyDomain: String? {
-        (Bundle.main.object(forInfoDictionaryKey: "TypewrightPasskeyDomain") as? String).flatMap { $0.isEmpty ? nil : $0 }
-    }
+    /// Nil in builds signed without that entitlement, like ad-hoc development builds.
+    static let passkeyDomain: String? = {
+        guard let domain = Bundle.main.object(forInfoDictionaryKey: "TypewrightPasskeyDomain") as? String, !domain.isEmpty,
+              let task = SecTaskCreateFromSelf(nil),
+              let domains = SecTaskCopyValueForEntitlement(task, "com.apple.developer.associated-domains" as CFString, nil) as? [String],
+              domains.contains("webcredentials:" + domain) else { return nil }
+        return domain
+    }()
 
     /// Short, stable name of the account to compare between devices.
     var fingerprint: String? {
@@ -33,6 +37,7 @@ final class SyncIdentity: NSObject {
 
     private static let service = "dev.bierdav.Typewright.sync"
     private static let kindKey = "syncIdentityKind"
+    private static let nameKey = "syncIdentityName"
     /// Fixed so every device gets the same PRF output from the passkey.
     private static let salt = Data(SHA256.hash(data: Data("typewright account v0".utf8)))
 
@@ -41,19 +46,29 @@ final class SyncIdentity: NSObject {
     override private init() {
         super.init()
         account = Self.loadSecret()
-        kind = account == nil ? nil : UserDefaults.standard.string(forKey: Self.kindKey).flatMap(Kind.init)
+        // Passkeys are the only way in now; accounts from recovery keys sign out once.
+        if account != nil, UserDefaults.standard.string(forKey: Self.kindKey) != "passkey" {
+            SecItemDelete(Self.query as CFDictionary)
+            account = nil
+        }
+        name = account == nil ? nil : UserDefaults.standard.string(forKey: Self.nameKey)
     }
 
-    func createPasskey() async {
+    /// Creates the account's passkey, named `name` (like an email address) in the Passwords app.
+    func createPasskey(name: String) async {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         await run {
             let provider = try self.provider()
+            // The name rides along in the user handle, so signing in on another Mac recovers it.
+            let userID = Self.random(16) + Data(name.utf8.prefix(48))
             let request = provider.createCredentialRegistrationRequest(
-                challenge: Self.random(32), name: "Typewright", userID: Self.random(16))
+                challenge: Self.random(32), name: name.isEmpty ? "Typewright" : name, userID: userID)
+            request.displayName = name.isEmpty ? "Typewright" : name
             request.prf = .inputValues(.init(saltInput1: Self.salt))
             let result = try await self.perform(request)
             if let registration = result.credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration,
                let key = registration.prf?.first {
-                return key
+                return (key, name)
             }
             // Some authenticators only evaluate the PRF when signing in.
             return try await self.assert(with: provider)
@@ -64,42 +79,25 @@ final class SyncIdentity: NSObject {
         await run { try await self.assert(with: try self.provider()) }
     }
 
-    /// Without a configured passkey domain: a key to copy to the other devices by hand.
-    func generateRecoveryKey() -> String {
-        let key = Self.random(32)
-        adopt(key, kind: .recoveryKey)
-        return Self.hex(key)
-    }
-
-    func useRecoveryKey(_ text: String) {
-        let hex = text.filter(\.isHexDigit)
-        guard hex.count == 64, let key = Self.data(hex: hex) else {
-            error = "A recovery key has 64 hexadecimal digits."
-            return
-        }
-        adopt(key, kind: .recoveryKey)
-    }
-
-    var recoveryKey: String? { kind == .recoveryKey ? account.map(Self.hex) : nil }
-
     func signOut() {
         SecItemDelete(Self.query as CFDictionary)
         UserDefaults.standard.removeObject(forKey: Self.kindKey)
+        UserDefaults.standard.removeObject(forKey: Self.nameKey)
         account = nil
-        kind = nil
+        name = nil
         SyncService.shared.restart()
     }
 
     // MARK: - Passkeys
 
-    private func run(_ body: @escaping () async throws -> SymmetricKey) async {
+    private func run(_ body: @escaping () async throws -> (SymmetricKey, String)) async {
         isWorking = true
         error = nil
         defer { isWorking = false }
         do {
-            let prf = try await body()
+            let (prf, name) = try await body()
             let secret = HKDF<SHA256>.deriveKey(inputKeyMaterial: prf, info: Data("typewright account v0".utf8), outputByteCount: 32)
-            adopt(secret.withUnsafeBytes { Data($0) }, kind: .passkey)
+            adopt(secret.withUnsafeBytes { Data($0) }, name: name)
         } catch let error as ASAuthorizationError where error.code == .canceled {
             // Dismissed by the user.
         } catch {
@@ -114,7 +112,7 @@ final class SyncIdentity: NSObject {
         return ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: domain)
     }
 
-    private func assert(with provider: ASAuthorizationPlatformPublicKeyCredentialProvider) async throws -> SymmetricKey {
+    private func assert(with provider: ASAuthorizationPlatformPublicKeyCredentialProvider) async throws -> (SymmetricKey, String) {
         let request = provider.createCredentialAssertionRequest(challenge: Self.random(32))
         request.prf = .inputValues(.init(saltInput1: Self.salt))
         let result = try await perform(request)
@@ -122,7 +120,8 @@ final class SyncIdentity: NSObject {
               let key = assertion.prf?.first else {
             throw IdentityError("This passkey can't derive keys (no PRF support).")
         }
-        return key
+        let handle = assertion.userID ?? Data()
+        return (key, handle.count > 16 ? String(decoding: handle.dropFirst(16), as: UTF8.self) : "")
     }
 
     private func perform(_ request: ASAuthorizationRequest) async throws -> ASAuthorization {
@@ -135,15 +134,16 @@ final class SyncIdentity: NSObject {
         }
     }
 
-    private func adopt(_ secret: Data, kind: Kind) {
+    private func adopt(_ secret: Data, name: String) {
         SecItemDelete(Self.query as CFDictionary)
         var item = Self.query
         item[kSecValueData as String] = secret
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         SecItemAdd(item as CFDictionary, nil)
-        UserDefaults.standard.set(kind.rawValue, forKey: Self.kindKey)
+        UserDefaults.standard.set("passkey", forKey: Self.kindKey)
+        UserDefaults.standard.set(name, forKey: Self.nameKey)
         account = secret
-        self.kind = kind
+        self.name = name
         error = nil
         SyncService.shared.restart()
     }
@@ -151,7 +151,10 @@ final class SyncIdentity: NSObject {
     // MARK: - Keychain
 
     private static var query: [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "account"]
+        // The data protection keychain never prompts, unlike the file keychain after each re-signed build;
+        // it needs the signed app's identifier, which builds without passkeys lack anyway.
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "account",
+         kSecUseDataProtectionKeychain as String: true]
     }
 
     private static func loadSecret() -> Data? {
@@ -165,25 +168,6 @@ final class SyncIdentity: NSObject {
 
     private static func random(_ count: Int) -> Data {
         Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-    }
-
-    private static func hex(_ data: Data) -> String {
-        let hex = data.map { String(format: "%02x", $0) }.joined()
-        return stride(from: 0, to: hex.count, by: 8).map { i in
-            String(hex[hex.index(hex.startIndex, offsetBy: i)..<hex.index(hex.startIndex, offsetBy: i + 8)])
-        }.joined(separator: "-")
-    }
-
-    private static func data(hex: String) -> Data? {
-        var data = Data()
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let next = hex.index(index, offsetBy: 2)
-            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
-            data.append(byte)
-            index = next
-        }
-        return data
     }
 }
 

@@ -5,7 +5,8 @@
 //! - a pkarr record lists the account's devices, for dialing,
 //! - an account replica lists the synced spaces (`space/<id>` → `{"name": …}`),
 //! - one replica per space maps relative paths to blob hashes; all devices write as one author,
-//!   so the newest write of a path wins.
+//!   so the newest write of a path wins,
+//! - one gossip topic per space carries live edits and cursors of open files (see `live`).
 //!
 //! Events reach Swift as JSON strings through one callback, on arbitrary threads.
 
@@ -37,12 +38,16 @@ use n0_future::StreamExt;
 use serde_json::json;
 use tokio::runtime::Runtime;
 
+mod live;
+
 /// Content of a path's entry once the file is deleted; empty entries can't mark deletions since
 /// empty files have them too.
 const TOMBSTONE: &[u8] = b"typewright:deleted:v0\0";
 const DIRECTORY_NAME: &str = "_devices";
 /// Records hold at most 1000 bytes; the oldest devices drop out first.
 const MAX_DEVICES: usize = 12;
+/// Live sessions send whole documents when they meet; files larger than this sync on save only.
+const MAX_GOSSIP_MESSAGE: usize = 1 << 20;
 
 pub type EventCallback = extern "C" fn(context: *mut c_void, event: *const c_char);
 
@@ -59,7 +64,10 @@ struct Inner {
     author: AuthorId,
     account: [u8; 32],
     account_doc: Doc,
+    gossip: Gossip,
     spaces: Mutex<HashMap<String, Doc>>,
+    topics: Mutex<HashMap<String, live::Topic>>,
+    live: Mutex<HashMap<(String, String), live::Session>>,
     /// Serializes opening spaces, so each is subscribed once.
     opening: tokio::sync::Mutex<()>,
     neighbors: Mutex<HashSet<EndpointId>>,
@@ -134,11 +142,11 @@ async fn start(data_dir: PathBuf, account: [u8; 32], callback: EventCallback, co
     };
     let endpoint = Endpoint::builder(presets::N0).secret_key(device_key).bind().await?;
     let blobs = FsStore::load(data_dir.join("blobs")).await?;
-    let gossip = Gossip::builder().spawn(endpoint.clone());
+    let gossip = Gossip::builder().max_message_size(MAX_GOSSIP_MESSAGE).spawn(endpoint.clone());
     let docs = Docs::persistent(data_dir.join("docs")).spawn(endpoint.clone(), (*blobs).clone(), gossip.clone()).await?;
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
-        .accept(iroh_gossip::ALPN, gossip)
+        .accept(iroh_gossip::ALPN, gossip.clone())
         .accept(iroh_docs::ALPN, docs.clone())
         .spawn();
 
@@ -155,7 +163,10 @@ async fn start(data_dir: PathBuf, account: [u8; 32], callback: EventCallback, co
         author: author.id(),
         account,
         account_doc,
+        gossip,
         spaces: Mutex::new(HashMap::new()),
+        topics: Mutex::new(HashMap::new()),
+        live: Mutex::new(HashMap::new()),
         opening: tokio::sync::Mutex::new(()),
         neighbors: Mutex::new(HashSet::new()),
         devices: Mutex::new(Vec::new()),
@@ -210,6 +221,7 @@ async fn refresh_directory(inner: &Inner, key: &SecretKey, republish: bool) -> R
         for doc in spaces {
             doc.start_sync(peers.clone()).await?;
         }
+        live::add_peers(inner, peers.iter().map(|addr| addr.id).collect()).await;
     }
     inner.status();
     Ok(())
@@ -244,7 +256,24 @@ fn track(inner: &Inner, peer: EndpointId, up: bool) {
     inner.status();
 }
 
+/// Lists the account's spaces with the devices syncing each (`member/<space>/<device>`), and the
+/// spaces removed from all devices (`removed/<space>`).
 async fn emit_spaces(inner: &Inner) -> Result<()> {
+    let mut members: HashMap<String, Vec<String>> = HashMap::new();
+    let mut removed = Vec::new();
+    let all = inner.account_doc.get_many(Query::single_latest_per_key().build()).await?;
+    tokio::pin!(all);
+    while let Some(entry) = all.next().await {
+        let entry = entry?;
+        let key = String::from_utf8_lossy(entry.key()).to_string();
+        if let Some(rest) = key.strip_prefix("member/") {
+            if let Some((space, device)) = rest.split_once('/') {
+                members.entry(space.to_string()).or_default().push(device.to_string());
+            }
+        } else if let Some(space) = key.strip_prefix("removed/") {
+            removed.push(space.to_string());
+        }
+    }
     let mut spaces = Vec::new();
     let entries = inner.account_doc.get_many(Query::single_latest_per_key().key_prefix("space/").build()).await?;
     tokio::pin!(entries);
@@ -254,11 +283,40 @@ async fn emit_spaces(inner: &Inner) -> Result<()> {
         // Content arrives after the entry; the next ContentReady lists it.
         let Ok(bytes) = inner.blobs.get_bytes(entry.content_hash()).await else { continue };
         let Ok(mut info) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        info["members"] = json!(members.remove(&id).unwrap_or_default());
         info["id"] = json!(id);
         spaces.push(info);
     }
-    inner.emit(json!({"type": "spaces", "spaces": spaces}));
+    inner.emit(json!({"type": "spaces", "spaces": spaces, "removed": removed}));
     Ok(())
+}
+
+fn member_key(inner: &Inner, space: &str) -> String {
+    format!("member/{space}/{}", inner.endpoint.id())
+}
+
+/// Stops syncing here; a space nobody syncs anymore leaves the account.
+async fn leave_space(inner: Arc<Inner>, id: String) -> Result<()> {
+    live::leave(&inner, &id);
+    let doc = inner.spaces.lock().unwrap().remove(&id);
+    if let Some(doc) = doc {
+        doc.leave().await?;
+    }
+    inner.account_doc.del(inner.author, member_key(&inner, &id)).await?;
+    let others = inner.account_doc.get_many(Query::single_latest_per_key().key_prefix(format!("member/{id}/")).build()).await?;
+    tokio::pin!(others);
+    if others.next().await.is_none() {
+        inner.account_doc.del(inner.author, format!("space/{id}")).await?;
+    }
+    Ok(())
+}
+
+/// Takes the space off every device; each keeps its files.
+async fn remove_space(inner: Arc<Inner>, id: String) -> Result<()> {
+    inner.account_doc.set_bytes(inner.author, format!("removed/{id}"), b"1".to_vec()).await?;
+    inner.account_doc.del(inner.author, format!("space/{id}")).await?;
+    inner.account_doc.del(inner.author, format!("member/{id}/")).await?;
+    leave_space(inner, id).await
 }
 
 /// The space's replica, opened, watched and syncing on first use.
@@ -271,6 +329,8 @@ async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Doc> {
     let events = doc.subscribe().await?;
     tokio::spawn(watch_space(inner.clone(), id.to_string(), doc.clone(), events));
     inner.spaces.lock().unwrap().insert(id.to_string(), doc.clone());
+    inner.account_doc.set_bytes(inner.author, member_key(inner, id), b"1".to_vec()).await?;
+    live::join(inner, id).await?;
     let peers = inner.peer_addrs();
     if !peers.is_empty() {
         doc.start_sync(peers).await?;
@@ -345,6 +405,8 @@ async fn list_space(inner: &Arc<Inner>, id: &str) -> Result<()> {
 }
 
 async fn share_space(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
+    // Membership lands before the listing, so no device sees the space without members.
+    inner.account_doc.set_bytes(inner.author, member_key(&inner, &id), b"1".to_vec()).await?;
     let info = serde_json::to_vec(&json!({"name": name}))?;
     inner.account_doc.set_bytes(inner.author, format!("space/{id}"), info).await?;
     open_space(inner, id).await
@@ -476,14 +538,61 @@ pub unsafe extern "C" fn tws_open_space(node: *const TWSyncNode, space: *const c
 pub unsafe extern "C" fn tws_close_space(node: *const TWSyncNode, space: *const c_char) {
     let node = unsafe { &*node };
     let id = unsafe { string(space) };
-    let inner = node.inner.clone();
-    node.spawn("close space", async move {
-        let doc = inner.spaces.lock().unwrap().remove(&id);
-        if let Some(doc) = doc {
-            doc.leave().await?;
-        }
-        Ok(())
-    });
+    node.spawn("close space", leave_space(node.inner.clone(), id));
+}
+
+/// Stops syncing a space on every device of the account; the files stay everywhere.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tws_remove_space(node: *const TWSyncNode, space: *const c_char) {
+    let node = unsafe { &*node };
+    let id = unsafe { string(space) };
+    node.spawn("remove space", remove_space(node.inner.clone(), id));
+}
+
+/// Starts live editing of a file shown in an editor; `name` labels this device's cursor elsewhere.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tws_live_open(
+    node: *const TWSyncNode,
+    space: *const c_char,
+    path: *const c_char,
+    text: *const c_char,
+    name: *const c_char,
+) {
+    let node = unsafe { &*node };
+    let (space, path, text, name) = unsafe { (string(space), string(path), string(text), string(name)) };
+    let _guard = node.runtime.enter();
+    live::open(&node.inner, &space, &path, &text, &name);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tws_live_close(node: *const TWSyncNode, space: *const c_char, path: *const c_char) {
+    let node = unsafe { &*node };
+    let (space, path) = unsafe { (string(space), string(path)) };
+    live::close(&node.inner, &space, &path);
+}
+
+/// Hands over the editor's text and selection (UTF-16) and returns what changed elsewhere as JSON:
+/// `edits` to apply in order, `adopted` texts to merge, the other `cursors` and the `peers` count.
+/// `step` 1 undoes and 2 redoes this device's last edit. Free with `tws_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tws_live_sync(
+    node: *const TWSyncNode,
+    space: *const c_char,
+    path: *const c_char,
+    text: *const c_char,
+    location: u32,
+    length: u32,
+    step: i32,
+) -> *mut c_char {
+    let node = unsafe { &*node };
+    let (space, path, text) = unsafe { (string(space), string(path), string(text)) };
+    let step = match step {
+        1 => live::Step::Undo,
+        2 => live::Step::Redo,
+        _ => live::Step::None,
+    };
+    let result = live::sync(&node.inner, &space, &path, &text, (location, length), step);
+    CString::new(result.to_string()).unwrap_or_default().into_raw()
 }
 
 /// Imports the file at `file` as the space's `path`; answers with a `published` event.
