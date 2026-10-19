@@ -12,14 +12,14 @@ cask "$name" do
   desc "Native Typst editor with live preview"
   homepage "https://github.com/BierDav/typewright"
 
-  depends_on macos: ">= :tahoe"
+  depends_on macos: :tahoe
 $( [ -n "$conflict" ] && echo "  conflicts_with cask: \"$conflict\"" )
 
   app "Typewright.app"
 
   # Ad-hoc signed; clear quarantine so Gatekeeper lets it launch.
-  postflight do
-    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/Typewright.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Typewright.app"]
   end
 
   zap trash: [
