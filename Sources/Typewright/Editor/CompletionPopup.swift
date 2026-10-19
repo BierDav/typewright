@@ -181,6 +181,8 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
             : (item.newText, NSRange(location: (item.newText as NSString).length, length: 0))
         hide()
         isEditing = true
+        // ⌘Z takes back the completion, leaving what was typed.
+        tv.breakUndoCoalescing()
         if tv.shouldChangeText(in: range, replacementString: text) {
             tv.replaceCharacters(in: range, with: text)
             tv.didChangeText()

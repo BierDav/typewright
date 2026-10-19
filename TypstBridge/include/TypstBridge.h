@@ -46,3 +46,25 @@ void tw_world_reset(TWWorld *_Nonnull world);
 
 TWResult tw_world_compile(TWWorld *_Nonnull world, TWFormat format);
 void tw_result_free(TWResult result);
+
+/// Syntax highlighting runs for `text` (markup, or code if `code`): `count` values, three per run of
+/// UTF-16 start, UTF-16 length and tag (low byte) with style flags (bold 1, italic 2, math 4) from bit 8.
+uint32_t *_Nonnull tw_highlight(const uint8_t *_Nullable text, size_t len, bool code, size_t *_Nonnull count);
+void tw_highlight_free(uint32_t *_Nonnull runs, size_t count);
+
+/// Downloads a package like `@preview/cetz:0.3.1` (or the newest `@preview/cetz`) into typst's package cache.
+/// Returns "ok:<spec>" or "error:<message>"; free with `tw_string_free`. Blocks on the network.
+char *_Nonnull tw_package_download(const char *_Nonnull spec);
+void tw_string_free(char *_Nonnull string);
+
+/// Refactors typst markup. The request is JSON `{op, text, start, length, all}` with UTF-16 offsets; `op` is
+/// "candidates" (expressions to extract at the caret or selection), "extract" (into a variable; `all` replaces
+/// every occurrence) or "inline" (the variable at `start`). The response is JSON `{error?, candidates, edits,
+/// names, count}`, edits as `{start, length, text}` in the old text, names as `[start, length]` in the new one.
+/// Free with `tw_string_free`.
+char *_Nonnull tw_refactor(const char *_Nonnull request);
+
+/// GitHub flavored Markdown as HTML, math as MathML and code with syntect classes; free with `tw_string_free`.
+char *_Nonnull tw_markdown_html(const uint8_t *_Nullable text, size_t len);
+/// CSS for the code classes in `tw_markdown_html`, light and dark; free with `tw_string_free`.
+char *_Nonnull tw_markdown_code_css(void);

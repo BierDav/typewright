@@ -14,6 +14,8 @@ struct SymbolUsage {
     func completions(at offset: Int) async -> [CompletionItem]
     /// Navigates, or returns the usages to choose from when `offset` is on a definition.
     func goToDefinition(at offset: Int) async -> [SymbolUsage]
+    /// Web pages for what's at `offset`, like a package's Universe page and repository; ⌘B offers them.
+    func links(at offset: Int) async -> [(title: String, url: URL)]
     func open(_ location: SourceLocation)
     func hover(at offset: Int) async -> (markdown: String, range: NSRange?)?
     func occurrences(at offset: Int) async -> [NSRange]
@@ -26,6 +28,7 @@ struct SymbolUsage {
 
 extension EditorLanguage {
     func quickFixes(for diagnostic: Diagnostic) -> [QuickFix] { [] }
+    func links(at offset: Int) async -> [(title: String, url: URL)] { [] }
 }
 
 final class TypstTextView: NSTextView {
@@ -61,6 +64,10 @@ final class TypstTextView: NSTextView {
         didSet { if renamePrimary != oldValue { needsDisplay = true } }
     }
     var onRename: (() -> Void)?
+    var onExtractVariable: (() -> Void)?
+    /// True picks the scope the function goes into.
+    var onExtractFunction: ((Bool) -> Void)?
+    var onInlineVariable: (() -> Void)?
     var onResign: (() -> Void)?
     var onPointerMoved: ((NSPoint) -> Void)?
     var onPointerExited: (() -> Void)?
@@ -319,7 +326,24 @@ final class TypstTextView: NSTextView {
         let format = NSMenuItem(title: "Format Document", action: #selector(formatDocument(_:)), keyEquivalent: "l")
         format.keyEquivalentModifierMask = [.command, .option]
         format.target = self
-        var entries = [item, rename, format, NSMenuItem.separator()]
+        var entries = [item, rename, format]
+        if onExtractVariable != nil {
+            let extract = NSMenuItem(title: "Extract Variable…", action: #selector(extractVariable(_:)), keyEquivalent: "v")
+            extract.keyEquivalentModifierMask = [.command, .option]
+            extract.target = self
+            let inline = NSMenuItem(title: "Inline Variable", action: #selector(inlineVariable(_:)), keyEquivalent: "n")
+            inline.keyEquivalentModifierMask = [.command, .option]
+            inline.target = self
+            let function = NSMenuItem(title: "Extract Function…", action: #selector(extractFunction(_:)), keyEquivalent: "m")
+            function.keyEquivalentModifierMask = [.command, .option]
+            function.target = self
+            let scoped = NSMenuItem(title: "Extract Function to Scope…", action: #selector(extractFunctionToScope(_:)),
+                                    keyEquivalent: "m")
+            scoped.keyEquivalentModifierMask = [.command, .option, .shift]
+            scoped.target = self
+            entries += [extract, function, scoped, inline]
+        }
+        entries.append(.separator())
         if hasQuickFixes?(index) == true {
             let fix = NSMenuItem(title: "Show Fixes…", action: #selector(showFixes(_:)), keyEquivalent: "\r")
             fix.keyEquivalentModifierMask = .option
@@ -332,6 +356,15 @@ final class TypstTextView: NSTextView {
     }
 
     @objc private func renameSymbol(_ sender: Any?) { onRename?() }
+    @objc private func extractVariable(_ sender: Any?) { onExtractVariable?() }
+    @objc private func inlineVariable(_ sender: Any?) { onInlineVariable?() }
+    @objc private func extractFunction(_ sender: Any?) { onExtractFunction?(false) }
+    @objc private func extractFunctionToScope(_ sender: Any?) { onExtractFunction?(true) }
+
+    /// Where menus and messages about the caret appear, below it.
+    func caretAnchor() -> NSRect {
+        caretRect(at: selectedRange().location) ?? NSRect(x: 0, y: 0, width: 2, height: 16)
+    }
 
     @objc private func showFixes(_ sender: NSMenuItem) {
         if let index = sender.representedObject as? Int { onQuickFix?(index) }
@@ -411,7 +444,103 @@ final class TypstTextView: NSTextView {
             onRename()
             return true
         }
+        // ⌥⌘V extracts a variable, ⌥⌘N inlines one.
+        if flags == [.command, .option], event.keyCode == 9, let onExtractVariable {
+            onExtractVariable()
+            return true
+        }
+        if flags == [.command, .option], event.keyCode == 45, let onInlineVariable {
+            onInlineVariable()
+            return true
+        }
+        // ⌥⌘M extracts a function, ⌥⇧⌘M asks where it goes.
+        if event.keyCode == 46, flags == [.command, .option] || flags == [.command, .option, .shift], let onExtractFunction {
+            onExtractFunction(flags.contains(.shift))
+            return true
+        }
+        // ⌘D duplicates, ⌘⌫ deletes the line, like IntelliJ.
+        if flags == .command, event.keyCode == 2, isEditable {
+            duplicateLine()
+            return true
+        }
+        if flags == .command, event.keyCode == 51, isEditable {
+            deleteLine()
+            return true
+        }
         return super.performKeyEquivalent(with: event)
+    }
+
+    /// Duplicates the selection, or the caret's line when nothing is selected.
+    func duplicateLine() {
+        let s = string as NSString
+        let sel = selectedRange()
+        if sel.length > 0 {
+            let copy = s.substring(with: sel)
+            replace(NSRange(location: NSMaxRange(sel), length: 0), with: copy,
+                    select: NSRange(location: NSMaxRange(sel), length: sel.length), action: "Duplicate")
+            return
+        }
+        var line = s.lineRange(for: sel)
+        let hasBreak = line.length > 0 && s.character(at: NSMaxRange(line) - 1) == 10
+        if hasBreak { line.length -= 1 }
+        let text = s.substring(with: line)
+        replace(NSRange(location: NSMaxRange(line), length: 0), with: "\n" + text,
+                select: NSRange(location: sel.location + line.length + 1, length: 0), action: "Duplicate Line")
+    }
+
+    /// Swaps the lines the selection touches with the line above or below; the selection moves along.
+    func moveLines(up: Bool) {
+        let s = string as NSString
+        let sel = selectedRange()
+        let trimmed = sel.length > 0 && s.character(at: NSMaxRange(sel) - 1) == 10
+        let block = s.lineRange(for: trimmed ? NSRange(location: sel.location, length: sel.length - 1) : sel)
+        guard block.length > 0, up ? block.location > 0 : NSMaxRange(block) < s.length else { return NSSound.beep() }
+        // The last line has no break of its own; borrow the one before it so both halves stay lines.
+        func lines(_ r: NSRange) -> String {
+            let text = s.substring(with: r)
+            return text.hasSuffix("\n") ? String(text.dropLast()) : text
+        }
+        let neighbour = s.lineRange(for: NSRange(location: up ? block.location - 1 : NSMaxRange(block), length: 0))
+        let union = NSUnionRange(block, neighbour)
+        let endsWithBreak = s.substring(with: union).hasSuffix("\n")
+        let moved = lines(block), other = lines(neighbour)
+        let swapped = (up ? moved + "\n" + other : other + "\n" + moved) + (endsWithBreak ? "\n" : "")
+        let shift = up ? -((other as NSString).length + 1) : (other as NSString).length + 1
+        replace(union, with: swapped, select: NSRange(location: sel.location + shift, length: sel.length),
+                action: up ? "Move Line Up" : "Move Line Down")
+    }
+
+    /// Deletes the lines the selection touches, keeping the caret's column on the next line.
+    func deleteLine() {
+        let s = string as NSString
+        let sel = selectedRange()
+        // A selection ending at a line start leaves that line alone.
+        let trimmed = sel.length > 0 && s.character(at: NSMaxRange(sel) - 1) == 10
+        var range = s.lineRange(for: trimmed ? NSRange(location: sel.location, length: sel.length - 1) : sel)
+        guard range.length > 0 || range.location > 0 else { return }
+        let column = sel.location - range.location
+        // The last line takes the break before it, so no empty line is left behind.
+        if NSMaxRange(range) == s.length, s.character(at: NSMaxRange(range) - 1) != 10 || range.length == 0, range.location > 0 {
+            range.location -= 1
+            range.length += 1
+        }
+        let rest = s.replacingCharacters(in: range, with: "") as NSString
+        let start = NSMaxRange(range) == s.length && range.location > 0
+            ? rest.lineRange(for: NSRange(location: min(range.location, rest.length), length: 0)).location
+            : range.location
+        var next = rest.lineRange(for: NSRange(location: min(start, rest.length), length: 0))
+        if next.length > 0, rest.character(at: NSMaxRange(next) - 1) == 10 { next.length -= 1 }
+        replace(range, with: "", select: NSRange(location: start + min(column, next.length), length: 0), action: "Delete Line")
+    }
+
+    private func replace(_ range: NSRange, with text: String, select: NSRange, action: String) {
+        breakUndoCoalescing()
+        guard shouldChangeText(in: range, replacementString: text) else { return }
+        replaceCharacters(in: range, with: text)
+        didChangeText()
+        undoManager?.setActionName(action)
+        setSelectedRange(select)
+        scrollRangeToVisible(select)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -423,6 +552,11 @@ final class TypstTextView: NSTextView {
         }
         if event.modifierFlags.intersection([.command, .option, .control, .shift]) == .shift, event.keyCode == 97, let onRename {
             return onRename()
+        }
+        // ⌥⇧↑ and ⌥⇧↓ move the lines, like IntelliJ.
+        if event.modifierFlags.intersection([.command, .option, .control, .shift]) == [.option, .shift],
+           event.keyCode == 126 || event.keyCode == 125, isEditable {
+            return moveLines(up: event.keyCode == 126)
         }
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control, event.charactersIgnoringModifiers == " ",
            let onComplete {
@@ -461,6 +595,8 @@ struct CodeEditor: NSViewRepresentable {
     var glidingCursor = false
     var find: FindModel?
     let highlights: Bool
+    /// Colours Markdown; `highlights` is for Typst.
+    var markdown = false
     let diagnostics: [Diagnostic]
     let reveal: RevealRequest?
     /// Restored when a new document is shown.
@@ -536,6 +672,7 @@ struct CodeEditor: NSViewRepresentable {
         let c = context.coordinator
         c.onChange = onChange
         c.highlights = highlights
+        c.markdown = markdown
         c.onStateChange = onStateChange
         c.language = language
         c.completion?.provider = language.map { l in { await l.completions(at: $0) } }
@@ -557,6 +694,9 @@ struct CodeEditor: NSViewRepresentable {
         tv.onComplete = language == nil ? nil : { [weak c] in c?.completion?.request(force: true) }
         tv.onFormat = language == nil ? nil : { [weak c] in c?.format() }
         tv.onRename = language == nil ? nil : { [weak c] in c?.startRename() }
+        tv.onExtractVariable = highlights ? { [weak c] in c?.extractVariable() } : nil
+        tv.onInlineVariable = highlights ? { [weak c] in c?.inlineVariable() } : nil
+        tv.onExtractFunction = highlights ? { [weak c] in c?.extractFunction(toScope: $0) } : nil
         tv.onUndo = { [weak c] in c?.undoRename() ?? false }
         tv.onQuickFix = { [weak c] in c?.showQuickFixes(at: $0) }
         tv.hasQuickFixes = { [weak c] in !(c?.quickFixes(at: $0).isEmpty ?? true) }
@@ -688,6 +828,7 @@ struct CodeEditor: NSViewRepresentable {
         var documentID = -1
         var font: NSFont?
         var highlights = true
+        var markdown = false
         var diagnostics: [Diagnostic] = []
         var reveal: RevealRequest?
         var onChange: (String, Bool) -> Void = { _, _ in }
@@ -776,6 +917,8 @@ struct CodeEditor: NSViewRepresentable {
                 for literal in swatches {
                     storage.addAttribute(.kern, value: gap, range: NSRange(location: literal.range.location - 1, length: 1))
                 }
+            } else if markdown {
+                MarkdownHighlighter.apply(to: storage, font: font)
             } else {
                 storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor],
                                       range: NSRange(location: 0, length: storage.length))
@@ -897,6 +1040,20 @@ struct CodeEditor: NSViewRepresentable {
         func goToDefinition(at offset: Int) {
             guard let language else { return }
             Task {
+                let links = await language.links(at: offset)
+                if !links.isEmpty, let tv = textView, let window = tv.window {
+                    let menu = NSMenu()
+                    for link in links {
+                        let item = ClosureMenuItem(title: link.title) { NSWorkspace.shared.open(link.url) }
+                        item.subtitle = link.url.isFileURL ? link.url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+                            : link.url.host() ?? link.url.absoluteString
+                        menu.addItem(item)
+                    }
+                    let caret = tv.firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
+                    let point = tv.convert(window.convertPoint(fromScreen: NSPoint(x: caret.minX, y: caret.minY)), from: nil)
+                    menu.popUp(positioning: nil, at: point, in: tv)
+                    return
+                }
                 let usages = await language.goToDefinition(at: offset)
                 guard let tv = textView, !usages.isEmpty else { return }
                 if usages.count == 1 { return language.open(usages[0].location) }
@@ -940,13 +1097,19 @@ struct CodeEditor: NSViewRepresentable {
             /// Names before each keystroke, for ⌘Z inside the session, and the ones undone, for ⇧⌘Z.
             var undoNames: [String] = []
             var redoNames: [String] = []
+            /// A new variable's spots, renamed right here instead of by the server.
+            let local: [NSRange]?
+            /// Keystrokes stay out of the undo history; registration goes off at the first one, since a group
+            /// still open when it goes off (like the extract's) never closes and swallows the rename.
+            var registrationOff = false
 
-            init(original: String, origin: Int, text: String, ranges: [NSRange], primary: Int) {
+            init(original: String, origin: Int, text: String, ranges: [NSRange], primary: Int, local: Bool = false) {
                 self.original = original
                 self.origin = origin
                 self.text = text
                 self.ranges = ranges
                 self.primary = primary
+                self.local = local ? ranges : nil
             }
         }
 
@@ -977,7 +1140,6 @@ struct CodeEditor: NSViewRepresentable {
                 guard let primary = ranges.firstIndex(of: target.range) else { return NSSound.beep() }
                 tv.breakUndoCoalescing()
                 // The session's keystrokes become one rename step, registered when it's committed.
-                tv.undoManager?.disableUndoRegistration()
                 renameSession = RenameSession(original: target.name, origin: target.range.location, text: before,
                                               ranges: ranges, primary: primary)
                 tv.setSelectedRange(target.range)
@@ -998,6 +1160,10 @@ struct CodeEditor: NSViewRepresentable {
             guard range.location >= p.location, NSMaxRange(range) <= NSMaxRange(p), text?.contains("\n") != true else {
                 NSSound.beep()
                 return false
+            }
+            if !session.registrationOff {
+                session.registrationOff = true
+                textView?.undoManager?.disableUndoRegistration()
             }
             session.pending = (range, (text as NSString?)?.length ?? 0)
             if let tv = textView { session.undoNames.append((tv.string as NSString).substring(with: p)) }
@@ -1046,13 +1212,14 @@ struct CodeEditor: NSViewRepresentable {
             let name = (tv.string as NSString).substring(with: session.ranges[session.primary])
             let caret = tv.selectedRange().location - session.ranges[session.primary].location
             var ranges = session.ranges
-            for i in ranges.indices.reversed() {
+            // Untouched names need no edit, which would otherwise leave an empty undo step.
+            for i in ranges.indices.reversed() where (tv.string as NSString).substring(with: ranges[i]) != session.original {
                 replaceForRename(ranges[i], with: session.original)
                 let d = (session.original as NSString).length - ranges[i].length
                 for j in ranges.indices where j > i { ranges[j].location += d }
             }
             renameSession = nil
-            tv.undoManager?.enableUndoRegistration()
+            if session.registrationOff { tv.undoManager?.enableUndoRegistration() }
             showRenameRanges()
             let p = ranges[session.primary]
             tv.setSelectedRange(NSRange(location: p.location + min(max(caret, 0), p.length), length: 0))
@@ -1102,23 +1269,135 @@ struct CodeEditor: NSViewRepresentable {
 
         /// A new document replaced the text; there's nothing to restore.
         func dropRename() {
-            guard renameSession != nil else { return }
+            guard let session = renameSession else { return }
             renameSession = nil
-            textView?.undoManager?.enableUndoRegistration()
+            if session.registrationOff { textView?.undoManager?.enableUndoRegistration() }
             showRenameRanges()
         }
 
         /// Renames for real through the server, which also updates other files, as one undo step.
         func commitRename() {
-            guard let tv = textView, let language, let session = renameSession, let name = endRename() else { return }
+            guard let tv = textView, let session = renameSession, let name = endRename() else { return }
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, trimmed != session.original else { return }
+            if let local = session.local {
+                return apply(local.map { TextEdit(range: $0, newText: trimmed) }, actionName: "Rename Variable")
+            }
+            guard let language else { return }
             Task {
                 let edits = await language.rename(at: session.origin, to: trimmed)
                 guard tv.string == session.text else { return }
                 if edits.isEmpty { NSSound.beep() }
                 apply(edits, actionName: "Rename Symbol")
             }
+        }
+
+        // MARK: - Extract and inline variable
+
+        /// Asks which expression and how many occurrences, like IntelliJ, then lets the new name be typed.
+        func extractVariable() {
+            guard let tv = textView as? TypstTextView, renameSession == nil else { return }
+            completion?.hide()
+            hover?.hide()
+            let found = Refactor.candidates(in: tv.string, selection: tv.selectedRange())
+            if let error = found.error { return showRefactorMessage(error) }
+            choose(found.candidates.map { (Self.menuTitle($0.text), $0) }, title: "Expressions") { [weak self] in
+                self?.extract($0)
+            }
+        }
+
+        private func extract(_ candidate: Refactor.Candidate) {
+            guard let tv = textView else { return }
+            let text = tv.string
+            let one = Refactor.extract(in: text, range: candidate.range, all: false)
+            if let error = one.error { return showRefactorMessage(error) }
+            guard one.count > 1 else { return finishExtract(one, text: text) }
+            choose([("Replace This Occurrence Only", false), ("Replace All \(one.count) Occurrences", true)],
+                   title: "Occurrences", highlight: true) { [weak self] all in
+                guard let self, tv.string == text else { return }
+                finishExtract(all ? Refactor.extract(in: text, range: candidate.range, all: true) : one, text: text)
+            }
+        }
+
+        /// Moves the selection, or an expression picked at the caret, into a new function; its locals become parameters.
+        func extractFunction(toScope: Bool) {
+            guard let tv = textView as? TypstTextView, renameSession == nil else { return }
+            completion?.hide()
+            hover?.hide()
+            let text = tv.string
+            let selection = tv.selectedRange()
+            let proceed: (NSRange) -> Void = { [weak self] range in
+                guard let self, tv.string == text else { return }
+                guard toScope else {
+                    return finishExtract(Refactor.function(in: text, range: range), text: text, action: "Extract Function")
+                }
+                let scopes = Refactor.scopes(in: text, range: range)
+                if let error = scopes.error { return showRefactorMessage(error) }
+                choose(scopes.candidates.map { ($0.text, $0.start) }, title: "Extract Function To", highlight: true) {
+                    [weak self] scope in
+                    guard let self, tv.string == text else { return }
+                    finishExtract(Refactor.function(in: text, range: range, scope: scope), text: text, action: "Extract Function")
+                }
+            }
+            guard selection.length == 0 else { return proceed(selection) }
+            let found = Refactor.candidates(in: text, selection: selection)
+            if let error = found.error { return showRefactorMessage(error) }
+            choose(found.candidates.map { (Self.menuTitle($0.text), $0.range) }, title: "Expressions", then: proceed)
+        }
+
+        private func finishExtract(_ result: Refactor.Response, text: String, action: String = "Extract Variable") {
+            if let error = result.error { return showRefactorMessage(error) }
+            guard let tv = textView, tv.string == text, !result.edits.isEmpty else { return NSSound.beep() }
+            apply(result.textEdits, actionName: action)
+            let s = tv.string as NSString
+            let ranges = result.nameRanges.filter { NSMaxRange($0) <= s.length }
+            guard let first = ranges.first else { return }
+            let name = s.substring(with: first)
+            guard ranges.allSatisfy({ s.substring(with: $0) == name }) else { return }
+            tv.breakUndoCoalescing()
+            renameSession = RenameSession(original: name, origin: first.location, text: tv.string, ranges: ranges,
+                                          primary: 0, local: true)
+            tv.setSelectedRange(first)
+            tv.scrollRangeToVisible(first)
+            showRenameRanges()
+        }
+
+        /// Replaces every use of the variable at the caret with its value and drops the declaration.
+        func inlineVariable() {
+            guard let tv = textView, renameSession == nil else { return }
+            completion?.hide()
+            hover?.hide()
+            let result = Refactor.inline(in: tv.string, at: tv.selectedRange().location)
+            if let error = result.error { return showRefactorMessage(error) }
+            apply(result.textEdits, actionName: "Inline Variable")
+        }
+
+        private static func menuTitle(_ text: String) -> String {
+            let line = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " ")
+            return line.count > 60 ? String(line.prefix(59)) + "…" : line
+        }
+
+        /// A menu below the caret; a single choice runs right away.
+        private func choose<T>(_ options: [(String, T)], title: String, highlight: Bool = false,
+                               then run: @escaping (T) -> Void) {
+            guard let tv = textView as? TypstTextView, !options.isEmpty else { return }
+            if options.count == 1, !highlight { return run(options[0].1) }
+            let menu = NSMenu(title: title)
+            menu.addItem(NSMenuItem.sectionHeader(title: title))
+            for (label, value) in options {
+                menu.addItem(ClosureMenuItem(title: label) { run(value) })
+            }
+            let rect = tv.caretAnchor()
+            menu.popUp(positioning: nil, at: NSPoint(x: rect.minX, y: rect.maxY + 4), in: tv)
+        }
+
+        private func showRefactorMessage(_ message: String) {
+            guard let tv = textView as? TypstTextView else { return }
+            NSSound.beep()
+            let popover = NSPopover()
+            popover.behavior = .transient
+            popover.contentViewController = NSHostingController(rootView: Text(message).padding(10))
+            popover.show(relativeTo: tv.caretAnchor(), of: tv, preferredEdge: .maxY)
         }
 
         /// Applies edits as one undoable change, keeping the caret and scroll position in place.
@@ -1146,6 +1425,8 @@ struct CodeEditor: NSViewRepresentable {
             let selection = tv.selectedRange()
             let clip = tv.enclosingScrollView?.contentView
             let origin = clip?.bounds.origin
+            // Its own undo step, never merged into the typing before it.
+            tv.breakUndoCoalescing()
             guard tv.shouldChangeText(in: union, replacementString: replacement) else { return }
             tv.replaceCharacters(in: union, with: replacement)
             tv.didChangeText()

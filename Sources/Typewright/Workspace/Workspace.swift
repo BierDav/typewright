@@ -9,6 +9,7 @@ struct FileNode: Identifiable, Hashable {
     var id: URL { url }
     var name: String { url.lastPathComponent }
     var isTypst: Bool { kind == .typst }
+    var isPreviewable: Bool { Workspace.isPreviewable(url) }
 }
 
 struct RevealRequest: Equatable {
@@ -40,6 +41,9 @@ final class Workspace: EditorLanguage {
     var renderMode: RenderMode {
         didSet {
             UserDefaults.standard.set(renderMode.rawValue, forKey: "renderMode")
+            // The new format opens where the old one was.
+            capturePreviewState(mode: oldValue)
+            restorePreviews(for: previewFile)
             invalidateCompile()
             scheduleCompile(delay: 0)
         }
@@ -47,6 +51,8 @@ final class Workspace: EditorLanguage {
     private(set) var document: PDFDocument?
     private(set) var html: String?
     private(set) var svgPages: [String]?
+    /// The previewed Markdown file as HTML.
+    private(set) var markdownHTML: String?
     private(set) var diagnostics: [Diagnostic] = []
     /// Compiler output when compilation failed without diagnostics.
     private(set) var failureLog: String?
@@ -58,8 +64,11 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored let preview = PreviewController()
     @ObservationIgnored let htmlPreview = HTMLPreviewController()
     @ObservationIgnored let svgPreview = SVGPreviewController()
+    @ObservationIgnored let markdownPreview = HTMLPreviewController(markdown: true)
     /// Shows a selected PDF file instead of the compiled document.
     @ObservationIgnored let filePreview = PreviewController()
+    /// Shows a selected image file.
+    @ObservationIgnored let imagePreview = ImagePreviewController()
     private var buffers: [URL: String] = [:]
     private var dirty: Set<URL> = []
 
@@ -76,9 +85,8 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?
     @ObservationIgnored private var editorStates: [URL: EditorState] = [:]
     @ObservationIgnored private var previewStates: [URL: PreviewState] = [:]
-    /// HTML and SVG preview positions per previewed file.
-    @ObservationIgnored private var htmlStates: [URL: WebPreviewState] = [:]
-    @ObservationIgnored private var svgStates: [URL: WebPreviewState] = [:]
+    /// Where each previewed file was left, shared by its formats.
+    @ObservationIgnored private var positions: [URL: DocumentPosition] = [:]
     @ObservationIgnored private var persistTask: Task<Void, Never>?
     @ObservationIgnored private var isClosed = false
     /// Font folders passed to every compiler, see `FontLibrary`.
@@ -86,6 +94,7 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored private var fontObserver: (any NSObjectProtocol)?
     @ObservationIgnored private var language: LanguageClient?
     @ObservationIgnored private var languageObserver: (any NSObjectProtocol)?
+    @ObservationIgnored private var packageObserver: (any NSObjectProtocol)?
 
     init(url: URL) {
         let url = url.standardizedFileURL
@@ -106,8 +115,7 @@ final class Workspace: EditorLanguage {
         }
         editorStates = Dictionary(state.editors.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
         previewStates = Dictionary(state.previews.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
-        htmlStates = Dictionary(state.htmlPreviews.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
-        svgStates = Dictionary(state.svgPreviews.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
+        positions = Dictionary(state.positions.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
         expanded = Set(state.expanded.compactMap(resolve))
         let initial = isDir ? resolve(state.selected) ?? defaultMain() : url
         if let initial { select(initial) }
@@ -117,8 +125,7 @@ final class Workspace: EditorLanguage {
         } else {
             previewFile = resolve(state.preview)
         }
-        preview.pendingRestore = previewFile.flatMap { previewStates[$0] }
-        restoreWebPreviews(for: previewFile)
+        restorePreviews(for: previewFile)
         fontObserver = NotificationCenter.default.addObserver(forName: FontLibrary.didChange, object: nil, queue: .main) {
             [weak self] _ in
             MainActor.assumeIsolated {
@@ -131,11 +138,27 @@ final class Workspace: EditorLanguage {
                                                                   queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.restartLanguageServer() }
         }
+        packageObserver = NotificationCenter.default.addObserver(forName: PackageLibrary.didChange, object: nil,
+                                                                 queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                // Failed imports are cached until the package shows up.
+                self?.builtin.reset()
+                self?.restartWatcher()
+                self?.scheduleCompile(delay: 0)
+            }
+        }
     }
+
+    /// Whether the previewed file is Markdown, which renders without a compiler.
+    var previewIsMarkdown: Bool { previewFile.map(MarkdownRenderer.isMarkdown) ?? false }
+
+    /// Typst and Markdown files can be previewed.
+    nonisolated static func isPreviewable(_ url: URL) -> Bool { url.pathExtension == "typ" || MarkdownRenderer.isMarkdown(url) }
 
     /// Whether the compiled output for the current render mode is available.
     var hasOutput: Bool {
-        switch renderMode {
+        if previewIsMarkdown { return markdownHTML != nil }
+        return switch renderMode {
         case .pdf: document != nil
         case .html: html != nil
         case .svg: svgPages != nil
@@ -199,6 +222,7 @@ final class Workspace: EditorLanguage {
             filePreview.pendingRestore = previewStates[url] ?? PreviewState()
             filePreview.show(PDFDocument(url: url), keepingPosition: false)
         }
+        if kind == .image { imagePreview.show(url) }
         if kind == .typst { languageClient()?.open(url, text: text) }
         revision += 1
         schedulePersist()
@@ -221,11 +245,11 @@ final class Workspace: EditorLanguage {
         document = nil
         html = nil
         svgPages = nil
+        markdownHTML = nil
         failureLog = nil
         diagnostics = []
         lastDuration = nil
-        preview.pendingRestore = url.flatMap { previewStates[$0] }
-        restoreWebPreviews(for: url)
+        restorePreviews(for: url)
         invalidateCompile()
         scheduleCompile(delay: 0)
         schedulePersist()
@@ -258,20 +282,50 @@ final class Workspace: EditorLanguage {
         schedulePersist()
     }
 
-    private func capturePreviewState() {
+    /// Remembers where the preview in `mode` (by default the current one) shows the previewed file.
+    private func capturePreviewState(mode: RenderMode? = nil) {
         guard let main = previewFile else { return }
-        // Only formats that show this file's output; the others still hold another file's or nothing.
-        if html != nil, htmlPreview.pendingRestore == nil { htmlStates[main] = htmlPreview.state() }
-        if svgPages != nil, svgPreview.pendingRestore == nil { svgStates[main] = svgPreview.state() }
-        guard document != nil, preview.view.document === document, let state = preview.state() else { return }
-        previewStates[main] = state
+        var position = positions[main] ?? DocumentPosition()
+        if previewIsMarkdown {
+            guard markdownHTML != nil, markdownPreview.pendingRestore == nil else { return }
+            position.flow = markdownPreview.position().flow
+            positions[main] = position
+            return
+        }
+        // Only a preview that already shows this file's output, and isn't about to jump elsewhere, knows where it is.
+        switch mode ?? renderMode {
+        case .pdf:
+            guard document != nil, preview.view.document === document, preview.pendingPosition == nil,
+                  let shown = preview.position() else { return }
+            position.page = shown.page
+            position.zoom = shown.zoom
+        case .svg:
+            guard svgPages != nil, svgPreview.pendingRestore == nil else { return }
+            let shown = svgPreview.position()
+            position.page = shown.page
+            position.zoom = shown.zoom
+        case .html:
+            guard html != nil, htmlPreview.pendingRestore == nil else { return }
+            let shown = htmlPreview.position()
+            if htmlPreview.paged {
+                position.page = shown.page
+                position.zoom = shown.zoom
+            } else {
+                position.flow = shown.flow
+            }
+        }
+        positions[main] = position
     }
 
-    /// The HTML and SVG previews jump to where `url` was left once its output arrives; new files start at the top.
-    private func restoreWebPreviews(for url: URL?) {
+    /// Every preview jumps to where `url` was left once its output arrives; new files start at the top.
+    private func restorePreviews(for url: URL?) {
         guard let url else { return }
-        htmlPreview.pendingRestore = htmlStates[url] ?? WebPreviewState(zoom: 1)
-        svgPreview.pendingRestore = svgStates[url] ?? WebPreviewState()
+        let position = positions[url] ?? DocumentPosition()
+        preview.pendingRestore = nil
+        preview.pendingPosition = position
+        htmlPreview.pendingRestore = position
+        svgPreview.pendingRestore = position
+        markdownPreview.pendingRestore = position
     }
 
     private func schedulePersist() {
@@ -292,8 +346,7 @@ final class Workspace: EditorLanguage {
         state.split = split
         for (url, s) in editorStates { if let key = relative(url) { state.editors[key] = s } }
         for (url, s) in previewStates { if let key = relative(url) { state.previews[key] = s } }
-        for (url, s) in htmlStates { if let key = relative(url) { state.htmlPreviews[key] = s } }
-        for (url, s) in svgStates { if let key = relative(url) { state.svgPreviews[key] = s } }
+        for (url, s) in positions { if let key = relative(url) { state.positions[key] = s } }
         state.expanded = expanded.compactMap(relative).sorted()
         SpaceStore.save(state, for: root)
     }
@@ -408,8 +461,7 @@ final class Workspace: EditorLanguage {
         dirty = dirty.filter { !gone($0) }
         editorStates = editorStates.filter { !gone($0.key) }
         previewStates = previewStates.filter { !gone($0.key) }
-        htmlStates = htmlStates.filter { !gone($0.key) }
-        svgStates = svgStates.filter { !gone($0.key) }
+        positions = positions.filter { !gone($0.key) }
         expanded = expanded.filter { !gone($0) }
         reloadTree()
         if let file = previewFile, gone(file) { setPreview(nil) }
@@ -442,8 +494,7 @@ final class Workspace: EditorLanguage {
         buffers = remap(buffers)
         editorStates = remap(editorStates)
         previewStates = remap(previewStates)
-        htmlStates = remap(htmlStates)
-        svgStates = remap(svgStates)
+        positions = remap(positions)
         selectedFile = selectedFile.map(moved)
         expanded = Set(expanded.map(moved))
         if let file = previewFile, moved(file) != file {
@@ -479,12 +530,13 @@ final class Workspace: EditorLanguage {
         // External compilers only see the disk, so every edit is saved right away.
         if case .binary = CompilerManager.shared.active {
             try? newText.write(to: url, atomically: true, encoding: .utf8)
+            if previewIsMarkdown { scheduleCompile(delay: 0) }
             return
         }
         dirty.insert(url)
         scheduleAutosave()
         // HTML skips layout and SVG only swaps changed pages, so both keep up with every keystroke.
-        scheduleCompile(delay: renderMode == .pdf && !live ? 0.25 : 0)
+        scheduleCompile(delay: renderMode == .pdf && !previewIsMarkdown && !live ? 0.25 : 0)
     }
 
     /// Edits only reach disk every 30 s and on file, window or app switches; the built-in compiler reads the buffers.
@@ -525,11 +577,12 @@ final class Workspace: EditorLanguage {
         if FileKind(url: url) == .typst { languageClient()?.change(url, text: new) }
         if case .binary = CompilerManager.shared.active {
             try? new.write(to: url, atomically: true, encoding: .utf8)
+            if previewIsMarkdown { scheduleCompile(delay: 0) }
             return
         }
         dirty.insert(url)
         scheduleAutosave()
-        scheduleCompile(delay: renderMode == .pdf && !live ? 0.25 : 0)
+        scheduleCompile(delay: renderMode == .pdf && !previewIsMarkdown && !live ? 0.25 : 0)
     }
 
     /// Applies server edits (LSP JSON) to a file other than the shown one.
@@ -574,8 +627,73 @@ final class Workspace: EditorLanguage {
     }
 
     func hover(at offset: Int) async -> (markdown: String, range: NSRange?)? {
-        guard let file = selectedFile, selectedKind == .typst, let client = languageClient() else { return nil }
-        return await client.hover(in: file, text: text as NSString, at: offset)
+        guard let file = selectedFile, selectedKind == .typst else { return nil }
+        let docs = await languageClient()?.hover(in: file, text: text as NSString, at: offset)
+        // A path to an image shows the image above the docs.
+        guard let (url, range) = imageReference(at: offset) else { return docs }
+        let image = "![](\(url.absoluteString))"
+        return (docs.map { image + "\n\n" + $0.markdown } ?? image, range)
+    }
+
+    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "tiff", "bmp"]
+
+    /// The image file a string literal at `offset` names, resolved like typst does.
+    private func imageReference(at offset: Int) -> (URL, NSRange)? {
+        guard let file = selectedFile, let range = Self.stringLiteralRange(at: offset, in: text as NSString) else { return nil }
+        let string = (text as NSString).substring(with: range)
+        guard Self.imageExtensions.contains((string as NSString).pathExtension.lowercased()) else { return nil }
+        let url = resolvePath(string, from: file)
+        return FileManager.default.fileExists(atPath: url.path) ? (url, range) : nil
+    }
+
+    private func resolvePath(_ string: String, from file: URL) -> URL {
+        let base = string.hasPrefix("/") ? root : file.deletingLastPathComponent()
+        return base.appendingPathComponent(string.hasPrefix("/") ? String(string.dropFirst()) : string).standardizedFileURL
+    }
+
+    private static let packageSpec = try! NSRegularExpression(pattern: #"^@([\w-]+)/([\w-]+)(?::([\w.-]+))?$"#)
+
+    /// For a package import like `"@preview/cetz:0.3.1"`: its Universe page, repository and files.
+    func links(at offset: Int) async -> [(title: String, url: URL)] {
+        guard selectedKind == .typst, let range = Self.stringLiteralRange(at: offset, in: text as NSString) else { return [] }
+        let spec = (text as NSString).substring(with: range)
+        guard let m = Self.packageSpec.firstMatch(in: spec, range: NSRange(location: 0, length: (spec as NSString).length)) else {
+            return []
+        }
+        func group(_ i: Int) -> String? {
+            let r = m.range(at: i)
+            return r.location == NSNotFound ? nil : (spec as NSString).substring(with: r)
+        }
+        guard let namespace = group(1), let name = group(2) else { return [] }
+        let library = PackageLibrary.shared
+        func folder() -> URL? {
+            let base = (namespace == "preview" ? library.cacheDirectory : library.dataDirectory)
+                .appending(path: "\(namespace)/\(name)", directoryHint: .isDirectory)
+            let version = group(3) ?? (try? FileManager.default.contentsOfDirectory(atPath: base.path))?
+                .sorted { $0.localizedStandardCompare($1) == .orderedDescending }.first
+            return version.map { base.appending(path: $0, directoryHint: .isDirectory) }
+                .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        }
+        var links: [(title: String, url: URL)] = []
+        if namespace == "preview", let universe = URL(string: "https://typst.app/universe/package/\(name)") {
+            links.append(("Open on Typst Universe", universe))
+        }
+        // The repository is in the package's manifest; fetch the package if it isn't here yet.
+        var local = folder()
+        if local == nil, namespace == "preview", await library.download(spec) { local = folder() }
+        if let local {
+            let manifest = (try? String(contentsOf: local.appending(path: "typst.toml"), encoding: .utf8)) ?? ""
+            for (key, title) in [("repository", "Open Repository"), ("homepage", "Open Homepage")] {
+                let pattern = "(?m)^\\s*\(key)\\s*=\\s*\"([^\"]+)\""
+                if let r = manifest.range(of: pattern, options: .regularExpression),
+                   let value = manifest[r].split(separator: "\"").dropFirst().first, let url = URL(string: String(value)),
+                   !links.contains(where: { $0.url == url }) {
+                    links.append((title, url))
+                }
+            }
+            links.append(("Show Package Files", local))
+        }
+        return links
     }
 
     func occurrences(at offset: Int) async -> [NSRange] {
@@ -623,6 +741,16 @@ final class Workspace: EditorLanguage {
     func goToDefinition(at offset: Int) async -> [SymbolUsage] {
         guard let file = selectedFile, selectedKind == .typst else { return [] }
         let source = text as NSString
+        // An import item's definition is in the package; its uses here are what's worth seeing.
+        if Refactor.symbol(in: text, at: offset)?.kind == "import" {
+            let usages = Refactor.usages(in: text, at: offset).compactMap { range -> SymbolUsage? in
+                let line = source.substring(to: range.location).reduce(0) { $1 == "\n" ? $0 + 1 : $0 }
+                let start = source.lineRange(for: NSRange(location: range.location, length: 0)).location
+                return usage(SourceLocation(url: file, line: line, character: range.location - start, length: range.length))
+            }
+            if usages.isEmpty { NSSound.beep() }
+            return usages
+        }
         if let client = languageClient(), let target = await client.definition(in: file, text: source, at: offset) {
             let range = target.range(in: source)
             if target.url == file, NSLocationInRange(offset, range) || NSMaxRange(range) == offset {
@@ -662,6 +790,40 @@ final class Workspace: EditorLanguage {
         reveal = RevealRequest(line: location.line + 1, column: location.character + 1)
     }
 
+    private static let pathLiteral = try! NSRegularExpression(pattern: #""((?:\\.|[^"\\\n])+)""#)
+
+    /// String literals in the space's Typst files that point at `target`, like imports, includes and images.
+    func fileUsages(of target: URL) -> [SymbolUsage] {
+        let target = target.standardizedFileURL
+        var found: [SymbolUsage] = []
+        for node in Self.flatten(tree) where node.isTypst {
+            guard let text = (buffers[node.url] ?? Self.read(node.url)) as NSString? else { continue }
+            let dir = node.url.deletingLastPathComponent()
+            // Lines are counted as the matches go, so each file is scanned once.
+            var line = 0, scanned = 0
+            for m in Self.pathLiteral.matches(in: text as String, range: NSRange(location: 0, length: text.length)) {
+                let path = text.substring(with: m.range(at: 1))
+                let url = path.hasPrefix("/") ? root.appendingPathComponent(String(path.dropFirst()))
+                    : dir.appendingPathComponent(path)
+                guard url.standardizedFileURL == target else { continue }
+                let range = m.range(at: 1)
+                let lineStart = text.lineRange(for: NSRange(location: range.location, length: 0)).location
+                for i in scanned..<lineStart where text.character(at: i) == 10 { line += 1 }
+                scanned = lineStart
+                let location = SourceLocation(url: node.url, line: line, character: range.location - lineStart, length: range.length)
+                if let usage = usage(location) { found.append(usage) }
+            }
+        }
+        return found
+    }
+
+    /// Opens a usage with its range selected.
+    func reveal(_ usage: SymbolUsage) {
+        let l = usage.location
+        select(l.url)
+        reveal = RevealRequest(line: l.line + 1, column: l.character + 1, length: l.endCharacter - l.character)
+    }
+
     /// A usage with its line's text, for the usages menu.
     private func usage(_ location: SourceLocation) -> SymbolUsage? {
         guard location.url.path.hasPrefix(root.path + "/") else { return nil }
@@ -680,6 +842,11 @@ final class Workspace: EditorLanguage {
 
     /// Contents of the string literal around `offset` on its line.
     private static func stringLiteral(at offset: Int, in text: NSString) -> String? {
+        stringLiteralRange(at: offset, in: text).map(text.substring(with:))
+    }
+
+    /// Range of the contents of the string literal around `offset` on its line.
+    private static func stringLiteralRange(at offset: Int, in text: NSString) -> NSRange? {
         let line = text.lineRange(for: NSRange(location: min(offset, text.length), length: 0))
         var start: Int?
         var index = line.location
@@ -688,7 +855,7 @@ final class Workspace: EditorLanguage {
             if c == 92 { index += 2; continue } // backslash escapes
             if c == 34 {
                 if let s = start {
-                    if offset >= s, offset <= index { return text.substring(with: NSRange(location: s, length: index - s)) }
+                    if offset >= s, offset <= index { return NSRange(location: s, length: index - s) }
                     start = nil
                 } else {
                     start = index + 1
@@ -729,6 +896,10 @@ final class Workspace: EditorLanguage {
     }
 
     private func compileOnce() async {
+        if let previewFile, previewIsMarkdown {
+            stopWatcher()
+            return await renderMarkdown(previewFile)
+        }
         guard let previewFile, let compiler = CompilerManager.shared.active else {
             stopWatcher()
             return
@@ -746,6 +917,16 @@ final class Workspace: EditorLanguage {
             }
             startWatcher(binary: binary, main: previewFile)
         }
+    }
+
+    private func renderMarkdown(_ url: URL) async {
+        let current = generation
+        let source = bufferText(url) ?? ""
+        let start = Date()
+        let html = await Task.detached { MarkdownRenderer.html(source) }.value
+        guard current == generation else { return }
+        markdownHTML = html
+        lastDuration = Date().timeIntervalSince(start)
     }
 
     private func compileBuiltin(main: URL) async {
@@ -845,6 +1026,7 @@ final class Workspace: EditorLanguage {
         exportRunner.cancel()
         if let fontObserver { NotificationCenter.default.removeObserver(fontObserver) }
         if let languageObserver { NotificationCenter.default.removeObserver(languageObserver) }
+        if let packageObserver { NotificationCenter.default.removeObserver(packageObserver) }
         language?.stop()
         language = nil
     }

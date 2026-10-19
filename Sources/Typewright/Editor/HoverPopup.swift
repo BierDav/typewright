@@ -107,7 +107,7 @@ final class HoverController {
 
         // Long docs get three times the room, as far as the screen allows.
         let screenWidth = tv.window?.screen?.visibleFrame.width ?? 1600
-        let width = HoverContent.isLarge(docs?.markdown) ? min(HoverContent.baseWidth * 3, screenWidth - 40) : HoverContent.baseWidth
+        let width = HoverContent.isLarge(docs?.markdown) ? min(HoverContent.baseWidth * 2.4, screenWidth - 40) : HoverContent.baseWidth
         var placedAbove = false
         weak var placedPanel: NSPanel?
         let content = HoverContent(errors: errors.map(\.diagnostic), markdown: docs?.markdown, width: width,
@@ -247,7 +247,7 @@ private struct HoverContent: View {
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 320)
+                .frame(maxHeight: 640)
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -267,6 +267,8 @@ enum MarkdownBlock: Equatable {
     case heading(String)
     case rule
     case paragraph(String)
+    /// A line that is only `![](url)`.
+    case image(URL)
 
     static func parse(_ markdown: String) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
@@ -291,6 +293,10 @@ enum MarkdownBlock: Equatable {
                 }
             } else if code != nil {
                 code?.append(line)
+            } else if trimmed.hasPrefix("![]("), trimmed.hasSuffix(")"),
+                      let url = URL(string: String(trimmed.dropFirst(4).dropLast())) {
+                flush()
+                blocks.append(.image(url))
             } else if trimmed == "---" || trimmed == "***" {
                 flush()
                 blocks.append(.rule)
@@ -306,6 +312,31 @@ enum MarkdownBlock: Equatable {
         if let code { blocks.append(.code(code.joined(separator: "\n"), language: language)) }
         flush()
         return blocks
+    }
+}
+
+/// An image with its pixel size, fitted into the popup.
+private struct ImageThumbnail: View {
+    let url: URL
+
+    var body: some View {
+        if let image = NSImage(contentsOf: url) {
+            let rep = image.representations.first
+            let pixels = rep.map { CGSize(width: $0.pixelsWide, height: $0.pixelsHigh) } ?? image.size
+            VStack(alignment: .leading, spacing: 4) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: min(image.size.width, .infinity), maxHeight: min(image.size.height, 280))
+                    .frame(maxWidth: .infinity)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                Text(pixels.width > 0 ? "\(url.lastPathComponent) · \(Int(pixels.width)) × \(Int(pixels.height))" : url.lastPathComponent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Label(url.lastPathComponent, systemImage: "photo").foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -332,6 +363,8 @@ private struct MarkdownView: View {
                     Text(Self.inline(text))
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
+                case .image(let url):
+                    ImageThumbnail(url: url)
                 }
             }
         }

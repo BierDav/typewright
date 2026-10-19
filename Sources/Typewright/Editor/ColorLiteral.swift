@@ -1,9 +1,9 @@
 import AppKit
 
-/// A Typst color written in the source, like `rgb("#ff4136")`, `rgb(255, 65, 54)`, `luma(40%)` or `red`.
+/// A Typst color written in the source, like `rgb("#ff4136")`, `rgb("ff4136")`, `rgb(255, 65, 54)`, `luma(40%)` or `red`.
 struct ColorLiteral: Equatable {
     enum Format: Equatable {
-        case hex(uppercase: Bool, alpha: Bool, short: Bool = false)
+        case hex(uppercase: Bool, alpha: Bool, short: Bool = false, hash: Bool = true)
         case components(percent: Bool, alpha: Bool)
         case luma(percent: Bool)
         case named
@@ -13,7 +13,7 @@ struct ColorLiteral: Equatable {
     let color: NSColor
     let format: Format
 
-    private static let hex = try! NSRegularExpression(pattern: ##"\brgb\(\s*"#([0-9a-fA-F]{3,8})"\s*\)"##)
+    private static let hex = try! NSRegularExpression(pattern: ##"\brgb\(\s*"(#?)([0-9a-fA-F]{3,8})"\s*\)"##)
     private static let number = #"\s*(\d+(?:\.\d+)?%?)\s*"#
     private static let components = try! NSRegularExpression(
         pattern: #"\brgb\("# + number + "," + number + "," + number + "(?:," + number + #")?\)"#)
@@ -40,7 +40,7 @@ struct ColorLiteral: Equatable {
         }
 
         for m in hex.matches(in: text, range: full) {
-            guard let digits = group(m, 1), [3, 4, 6, 8].contains(digits.count) else { continue }
+            guard let digits = group(m, 2), [3, 4, 6, 8].contains(digits.count) else { continue }
             let expanded = digits.count <= 4 ? digits.map { "\($0)\($0)" }.joined() : digits
             guard let value = UInt64(expanded, radix: 16) else { continue }
             let alpha = expanded.count == 8
@@ -48,7 +48,8 @@ struct ColorLiteral: Equatable {
             let color = srgb(Double((rgb >> 16) & 0xff) / 255, Double((rgb >> 8) & 0xff) / 255, Double(rgb & 0xff) / 255,
                              alpha ? Double(value & 0xff) / 255 : 1)
             let uppercase = digits.contains { $0.isLetter && $0.isUppercase }
-            found.append(ColorLiteral(range: m.range, color: color, format: .hex(uppercase: uppercase, alpha: alpha, short: digits.count <= 4)))
+            let format = Format.hex(uppercase: uppercase, alpha: alpha, short: digits.count <= 4, hash: group(m, 1) == "#")
+            found.append(ColorLiteral(range: m.range, color: color, format: format))
         }
         for m in components.matches(in: text, range: full) {
             let parts = (1...4).compactMap { group(m, $0) }
@@ -86,15 +87,16 @@ struct ColorLiteral: Equatable {
             return "rgb(\(parts.joined(separator: ", ")))"
         }
         var bytes = [r, g, b].map(byte)
-        if case .hex(_, true, _) = format { bytes.append(byte(a)) } else if !opaque { bytes.append(byte(a)) }
+        if case .hex(_, true, _, _) = format { bytes.append(byte(a)) } else if !opaque { bytes.append(byte(a)) }
         var hex: String
         // `#f80` stays short while every byte is a doubled digit.
-        if case .hex(_, _, true) = format, bytes.allSatisfy({ $0 % 17 == 0 }) {
+        if case .hex(_, _, true, _) = format, bytes.allSatisfy({ $0 % 17 == 0 }) {
             hex = bytes.map { String($0 / 17, radix: 16) }.joined()
         } else {
             hex = bytes.map { String(format: "%02x", $0) }.joined()
         }
-        if case .hex(true, _, _) = format { hex = hex.uppercased() }
+        if case .hex(true, _, _, _) = format { hex = hex.uppercased() }
+        if case .hex(_, _, _, false) = format { return "rgb(\"\(hex)\")" }
         return "rgb(\"#\(hex)\")"
     }
 

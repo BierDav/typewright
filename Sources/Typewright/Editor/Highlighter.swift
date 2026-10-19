@@ -1,25 +1,72 @@
 import AppKit
 import SwiftUI
+import TypstBridge
 
-/// Regex based Typst syntax colouring.
+/// Typst syntax colouring from typst's own parser, in IntelliJ's palette.
 enum Highlighter {
-    private static func re(_ p: String, _ o: NSRegularExpression.Options = []) -> NSRegularExpression {
-        try! NSRegularExpression(pattern: p, options: o)
+    /// Mirrors `HlTag` in the bridge.
+    enum Tag: UInt32 {
+        case plain, comment, punctuation, escape, strong, emph, link, raw, label, ref, heading, listMarker, listTerm
+        case mathDelimiter, mathOperator, keyword, `operator`, number, string, function, interpolated, error, param, unit
     }
 
-    private static let heading = re(#"^[ \t]*=+[ \t].*$"#, .anchorsMatchLines)
-    private static let hashIdent = re(#"#[A-Za-z_][\w-]*"#)
-    private static let keyword = re(#"#(let|set|show|import|include|if|else|for|while|return|break|continue|context)\b"#)
-    private static let call = re(#"\b[A-Za-z_][\w-]*(?=\()"#)
-    private static let math = re(#"\$(?:\\.|[^$\\])*\$"#)
-    private static let label = re(#"<[\w:.-]+>|@[\w:.-]+"#)
-    private static let emphasis = re(#"(?<![\w*])\*[^*\n]+\*(?![\w*])"#)
-    // Comments, strings and raw text compete; the earliest match wins.
-    private static let lexical = re(#"(?<!:)//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\\n])*"|```[\s\S]*?```|`[^`\n]*`"#)
+    struct Run {
+        let range: NSRange
+        let tag: Tag
+        let bold: Bool
+        let italic: Bool
+        let math: Bool
+    }
 
-    // In code mode (`typc`) keywords and values stand without a `#`.
-    private static let codeKeyword = re(#"\b(let|set|show|import|include|if|else|for|in|while|return|break|continue|context|not|and|or)\b"#)
-    private static let codeValue = re(#"\b(none|auto|true|false)\b|\b\d+(\.\d+)?(pt|em|cm|mm|in|%|fr|deg|rad)?\b"#)
+    /// Light and dark variants, after IntelliJ's Light and Dark themes.
+    private static func color(_ light: UInt32, _ dark: UInt32) -> NSColor {
+        func make(_ hex: UInt32) -> NSColor {
+            NSColor(srgbRed: CGFloat(hex >> 16 & 0xff) / 255, green: CGFloat(hex >> 8 & 0xff) / 255,
+                    blue: CGFloat(hex & 0xff) / 255, alpha: 1)
+        }
+        return NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? make(dark) : make(light) }
+    }
+
+    static let keywordColor = color(0x0033B3, 0xCF8E6D)
+    static let stringColor = color(0x067D17, 0x6AAB73)
+    static let numberColor = color(0x00838F, 0x2AACB8)
+    static let unitColor = numberColor.withAlphaComponent(0.65)
+    static let functionColor = color(0x00627A, 0x56A8F5)
+    static let paramColor = color(0x871094, 0xC77DBB)
+    static let labelColor = color(0x9E880D, 0xB3AE60)
+    static let commentColor = color(0x8C8C8C, 0x7A7E85)
+    static let mathColor = color(0x0E7C86, 0x5FB8C2)
+
+    static func color(for tag: Tag) -> NSColor? { foreground(tag) }
+
+    private static func foreground(_ tag: Tag) -> NSColor? {
+        switch tag {
+        case .keyword, .escape, .listMarker, .heading, .mathDelimiter, .mathOperator: keywordColor
+        case .string, .raw: stringColor
+        case .number: numberColor
+        case .unit: unitColor
+        case .function, .interpolated: functionColor
+        case .param: paramColor
+        case .label, .ref: labelColor
+        case .comment: commentColor
+        case .link: .linkColor
+        case .plain, .punctuation, .operator, .strong, .emph, .listTerm, .error: nil
+        }
+    }
+
+    /// Runs with a style; unstyled text in between is left out.
+    static func runs(in text: String, code: Bool = false) -> [Run] {
+        var text = text
+        var count = 0
+        let values = text.withUTF8 { tw_highlight($0.baseAddress, $0.count, code, &count) }
+        defer { tw_highlight_free(values, count) }
+        return stride(from: 0, to: count - 2, by: 3).map { i in
+            let packed = values[i + 2]
+            return Run(range: NSRange(location: Int(values[i]), length: Int(values[i + 1])),
+                       tag: Tag(rawValue: packed & 0xff) ?? .plain,
+                       bold: packed >> 8 & 1 != 0, italic: packed >> 8 & 2 != 0, math: packed >> 8 & 4 != 0)
+        }
+    }
 
     /// Highlighted text for SwiftUI, e.g. code samples in the docs popup.
     static func highlighted(_ text: String, code: Bool, size: CGFloat) -> AttributedString {
@@ -30,8 +77,10 @@ enum Highlighter {
         storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) { attrs, range, _ in
             var part = AttributedString(storage.attributedSubstring(from: range).string)
             if let color = attrs[.foregroundColor] as? NSColor { part.foregroundColor = Color(nsColor: color) }
-            if let f = attrs[.font] as? NSFont, f.fontDescriptor.symbolicTraits.contains(.bold) {
-                part.inlinePresentationIntent = .stronglyEmphasized
+            if let f = attrs[.font] as? NSFont {
+                let traits = f.fontDescriptor.symbolicTraits
+                if traits.contains(.bold) { part.inlinePresentationIntent = .stronglyEmphasized }
+                if traits.contains(.italic) { part.inlinePresentationIntent = (part.inlinePresentationIntent ?? []).union(.emphasized) }
             }
             result += part
         }
@@ -40,36 +89,24 @@ enum Highlighter {
 
     static func apply(to storage: NSTextStorage, font: NSFont, code: Bool = false) {
         let full = NSRange(location: 0, length: storage.length)
-        let string = storage.string
-        let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        let fonts = NSFontManager.shared
+        let bold = fonts.convert(font, toHaveTrait: .boldFontMask)
+        let italic = fonts.convert(font, toHaveTrait: .italicFontMask)
+        let boldItalic = fonts.convert(bold, toHaveTrait: .italicFontMask)
 
         storage.beginEditing()
         storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor], range: full)
-
-        func color(_ regex: NSRegularExpression, _ attrs: [NSAttributedString.Key: Any]) {
-            regex.enumerateMatches(in: string, range: full) { m, _, _ in
-                if let r = m?.range { storage.addAttributes(attrs, range: r) }
+        for run in runs(in: storage.string, code: code) where NSMaxRange(run.range) <= full.length {
+            var attrs: [NSAttributedString.Key: Any] = [:]
+            let isItalic = run.italic || run.tag == .comment
+            if run.bold || isItalic { attrs[.font] = run.bold && isItalic ? boldItalic : run.bold ? bold : italic }
+            if let color = foreground(run.tag) {
+                attrs[.foregroundColor] = color
+            } else if run.math {
+                attrs[.foregroundColor] = mathColor
             }
-        }
-
-        color(heading, [.font: bold, .foregroundColor: NSColor.systemBlue])
-        color(emphasis, [.font: bold])
-        color(call, [.foregroundColor: NSColor.systemBlue])
-        color(hashIdent, [.foregroundColor: NSColor.systemBlue])
-        color(keyword, [.foregroundColor: NSColor.systemPink])
-        color(label, [.foregroundColor: NSColor.systemPurple])
-        color(math, [.foregroundColor: NSColor.systemTeal])
-        if code {
-            color(codeValue, [.foregroundColor: NSColor.systemOrange])
-            color(codeKeyword, [.foregroundColor: NSColor.systemPink])
-        }
-
-        lexical.enumerateMatches(in: string, range: full) { m, _, _ in
-            guard let r = m?.range else { return }
-            let token = (string as NSString).substring(with: NSRange(location: r.location, length: min(2, r.length)))
-            let c: NSColor = token.hasPrefix("/") ? .secondaryLabelColor
-                : token.hasPrefix("\"") ? .systemGreen : .systemOrange
-            storage.addAttributes([.foregroundColor: c, .font: font], range: r)
+            if run.tag == .link { attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+            if !attrs.isEmpty { storage.addAttributes(attrs, range: run.range) }
         }
         storage.endEditing()
     }

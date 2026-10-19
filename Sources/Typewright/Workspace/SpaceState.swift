@@ -15,11 +15,14 @@ struct PreviewState: Codable, Equatable {
     var y = 0.0
 }
 
-/// Scroll position (0 = top, 1 = bottom) and zoom of a previewed file in the HTML or SVG preview.
-struct WebPreviewState: Codable, Equatable {
-    var scroll = 0.0
-    /// nil fits the width where the preview can.
+/// Where a previewed file is shown; PDF, SVG and A4 HTML share it, so switching formats keeps the spot.
+struct DocumentPosition: Codable, Equatable {
+    /// Page index plus the fraction of that page above the view's top edge.
+    var page = 0.0
+    /// Points per screen point; nil fits the page width.
     var zoom: Double?
+    /// Scroll (0 = top, 1 = bottom) of reflowing HTML and Markdown, which have no pages.
+    var flow = 0.0
 }
 
 /// UI state of one space; file keys are paths relative to the space folder.
@@ -29,8 +32,7 @@ struct SpaceState: Codable {
     var split = 0.5
     var editors: [String: EditorState] = [:]
     var previews: [String: PreviewState] = [:]
-    var htmlPreviews: [String: WebPreviewState] = [:]
-    var svgPreviews: [String: WebPreviewState] = [:]
+    var positions: [String: DocumentPosition] = [:]
     var expanded: [String] = []
 
     init() {}
@@ -44,8 +46,7 @@ struct SpaceState: Codable {
         editors = try c.decodeIfPresent([String: EditorState].self, forKey: .editors) ?? [:]
         previews = try c.decodeIfPresent([String: PreviewState].self, forKey: .previews) ?? [:]
         expanded = try c.decodeIfPresent([String].self, forKey: .expanded) ?? []
-        htmlPreviews = try c.decodeIfPresent([String: WebPreviewState].self, forKey: .htmlPreviews) ?? [:]
-        svgPreviews = try c.decodeIfPresent([String: WebPreviewState].self, forKey: .svgPreviews) ?? [:]
+        positions = try c.decodeIfPresent([String: DocumentPosition].self, forKey: .positions) ?? [:]
     }
 }
 

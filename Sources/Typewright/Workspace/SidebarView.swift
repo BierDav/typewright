@@ -173,7 +173,7 @@ struct SidebarView: View {
             items.append(.divider)
             items.append(.init("Rename Folder…", "pencil") { renaming = node.url })
         } else {
-            if node.isTypst {
+            if node.isPreviewable {
                 let previewed = node.url == workspace.previewFile
                 items.append(.init(previewed ? "Hide Preview" : "Preview", previewed ? "eye.slash" : "eye") {
                     workspace.togglePreview(node.url)
@@ -648,7 +648,7 @@ private struct FileRow: View {
             if isFolder && !isRenaming && (hovered || menuOpen) {
                 ZenMenuButton(systemName: "ellipsis", onOpenChange: { menuOpen = $0 }, items: menuItems)
                     .help("More")
-            } else if node.isTypst && !isRenaming && (hovered || isPreviewed) {
+            } else if node.isPreviewable && !isRenaming && (hovered || isPreviewed) {
                 Button(action: onTogglePreview) {
                     ZenIcon(systemName: isPreviewed ? "eye.fill" : "eye", active: isPreviewed)
                 }
@@ -706,12 +706,17 @@ private struct FileRow: View {
             Image(systemName: "t.square.fill")
                 .foregroundStyle(Self.typstColor)
                 .frame(width: 16)
+        } else if MarkdownRenderer.isMarkdown(node.url) {
+            Image(systemName: "m.square.fill")
+                .foregroundStyle(Self.markdownColor)
+                .frame(width: 16)
         } else {
             Image(systemName: icon).frame(width: 16)
         }
     }
 
     static let typstColor = Color(red: 0.14, green: 0.62, blue: 0.68)
+    static let markdownColor = Color(red: 0.35, green: 0.47, blue: 0.85)
 
     private var fill: Double {
         if isSelected { return 0.12 }
@@ -733,6 +738,7 @@ private struct FileRow: View {
         case .pdf: return "doc.richtext"
         case .font: return "textformat"
         case .document: return Self.documentIcon(node.url.pathExtension.lowercased())
+        case .image: return "photo"
         case .text, .binary:
             switch node.url.pathExtension.lowercased() {
             case "png", "jpg", "jpeg", "gif", "svg", "webp", "heic", "tiff": return "photo"

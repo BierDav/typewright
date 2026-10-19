@@ -17,8 +17,8 @@ struct WindowOverlayView: View {
                     .transition(.opacity)
                 Group {
                     switch overlay {
-                    case .palette:
-                        CommandPalette(state: state, workspace: workspace, onClose: close)
+                    case .palette(let page):
+                        CommandPalette(state: state, workspace: workspace, startPage: page, onClose: close)
                     case .search(let allSpaces):
                         SpaceSearchView(state: state, workspace: workspace,
                                         allSpaces: allSpaces ?? (workspace == nil || state.spacesProgress > 0.5), onClose: close)
@@ -86,6 +86,7 @@ struct PalettePage {
 struct CommandPalette: View {
     let state: WindowState
     let workspace: Workspace?
+    var startPage: String?
     let onClose: () -> Void
     @State private var query = ""
     @State private var selection = 0
@@ -138,6 +139,9 @@ struct CommandPalette: View {
             selection = 0
         }
         .task {
+            if let startPage, case .page(let next)? = rootItems.first(where: { $0.id == startPage })?.action {
+                pages = [next]
+            }
             // The editor holds on to first responder until it's released; then the field can take focus.
             NSApp.keyWindow?.makeFirstResponder(nil)
             try? await Task.sleep(for: .milliseconds(30))
@@ -376,18 +380,25 @@ struct CommandPalette: View {
                                          section: "File", keywords: ["format code", "prettify", "typstyle", "reformat"],
                                          action: .run { ws.formatSelected() }))
             }
-            if ws.selectedKind == .typst {
+            if Workspace.isPreviewable(file) {
                 let previewed = ws.previewFile == file
                 items.append(PaletteItem(id: "preview", title: previewed ? "Hide Preview" : "Preview \(name)",
                                          icon: previewed ? "eye.slash" : "eye", section: "File",
                                          action: .run { ws.togglePreview(file) }))
             }
+            if ws.selectedKind == .typst, let tv = ws.find.textView {
+                items += refactorItems(tv)
+            }
+            items.append(PaletteItem(id: "file.usages", title: "Find Usages of \(name)", icon: "arrow.triangle.branch",
+                                     section: "File", keywords: ["references", "imports", "includes", "where used"],
+                                     action: .page(PalettePage(title: "Usages of \(name)", placeholder: "Filter usages…",
+                                                               kind: .list { usageItems(of: file, ws) }))))
             items.append(PaletteItem(id: "file.rename", title: "Rename \(name)…", icon: "pencil", section: "File",
                                      action: .page(PalettePage(title: "Rename \(name)", placeholder: "New name",
                                                                kind: .input(initial: name) { new in
                                          withAnimation(.smooth(duration: 0.25)) { ws.rename(file, to: new) }
                                      }))))
-            items.append(PaletteItem(id: "file.move", title: "Move \(name) to…", icon: "folder.badge.gearshape", section: "File",
+            items.append(PaletteItem(id: "file.move", title: "Move \(name) to…", icon: "folder.badge.gearshape", shortcut: "⌥⌘I", section: "File",
                                      action: .page(PalettePage(title: "Move \(name)", placeholder: "Choose a folder…",
                                                                kind: .list { moveTargets(file, ws) }))))
             items.append(PaletteItem(id: "file.trash", title: "Move \(name) to Trash", icon: "trash", section: "File",
@@ -416,10 +427,56 @@ struct CommandPalette: View {
         items += Workspace.flatten(ws.tree).filter { $0.children == nil }.map { node in
             let dir = (ws.relativePath(of: node.url) as NSString).deletingLastPathComponent
             return PaletteItem(id: "file:\(node.url.path)", title: node.name, subtitle: dir.isEmpty ? nil : dir,
-                               icon: node.isTypst ? "t.square" : node.kind == .font ? "textformat" : "doc", section: "Files",
+                               icon: node.isTypst ? "t.square" : MarkdownRenderer.isMarkdown(node.url) ? "m.square"
+                                   : node.kind == .font ? "textformat" : node.kind == .image ? "photo" : "doc", section: "Files",
                                searchOnly: true, action: .run { withAnimation(.smooth(duration: 0.3)) { ws.select(node.url) } })
         }
         return items
+    }
+
+    /// Refactorings at the caret; they run in the editor once the palette is gone.
+    private func refactorItems(_ tv: TypstTextView) -> [PaletteItem] {
+        var items: [PaletteItem] = []
+        let symbol = Refactor.symbol(in: tv.string, at: tv.selectedRange().location)
+        if let symbol, let rename = tv.onRename {
+            let what = symbol.kind == "function" ? "Function" : "Variable"
+            items.append(PaletteItem(id: "refactor.rename", title: "Rename \(what) \(symbol.name)…", icon: "pencil.line",
+                                     shortcut: "⇧F6", section: "Refactor", keywords: ["rename symbol", "refactor"],
+                                     action: .run(rename)))
+        }
+        if let extract = tv.onExtractVariable {
+            items.append(PaletteItem(id: "refactor.variable", title: "Extract Variable…", icon: "arrow.up.right.square",
+                                     shortcut: "⌥⌘V", section: "Refactor", keywords: ["introduce variable", "refactor"],
+                                     action: .run(extract)))
+        }
+        if let function = tv.onExtractFunction {
+            items.append(PaletteItem(id: "refactor.function", title: "Extract Function…", icon: "function",
+                                     shortcut: "⌥⌘M", section: "Refactor", keywords: ["extract method", "refactor"],
+                                     action: .run { function(false) }))
+            items.append(PaletteItem(id: "refactor.function.scope", title: "Extract Function to Scope…", icon: "function",
+                                     shortcut: "⌥⇧⌘M", section: "Refactor", keywords: ["extract method", "refactor"],
+                                     action: .run { function(true) }))
+        }
+        if symbol?.kind == "variable", let symbol, let inline = tv.onInlineVariable {
+            items.append(PaletteItem(id: "refactor.inline", title: "Inline Variable \(symbol.name)", icon: "arrow.down.left.square",
+                                     shortcut: "⌥⌘N", section: "Refactor", keywords: ["refactor"], action: .run(inline)))
+        }
+        return items
+    }
+
+    /// Places that import, include or load the file.
+    private func usageItems(of file: URL, _ ws: Workspace) -> [PaletteItem] {
+        let usages = ws.fileUsages(of: file)
+        guard !usages.isEmpty else {
+            return [PaletteItem(id: "usages.none", title: "No usages in \(ws.name)", icon: "questionmark.circle",
+                                section: "Usages", action: .stay { NSSound.beep() })]
+        }
+        return usages.map { usage in
+            let l = usage.location
+            return PaletteItem(id: "usage:\(l.url.path):\(l.line):\(l.character)", title: "\(usage.file):\(l.line + 1)",
+                               subtitle: usage.preview, icon: "t.square", section: "Usages",
+                               action: .run { withAnimation(.smooth(duration: 0.3)) { ws.reveal(usage) } })
+        }
     }
 
     /// Folders the file can move into; its own folder is left out.

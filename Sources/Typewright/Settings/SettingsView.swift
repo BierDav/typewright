@@ -23,6 +23,7 @@ final class SettingsWindowController: NSWindowController {
         tabs.addTabViewItem(tab("General", "gearshape", GeneralSettings()))
         tabs.addTabViewItem(tab("Editor", "textformat", EditorSettings()))
         tabs.addTabViewItem(tab("Fonts", "character.textbox", FontSettings()))
+        tabs.addTabViewItem(tab("Packages", "shippingbox", PackageSettings()))
 
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
@@ -34,7 +35,7 @@ final class SettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Opens on a tab: 0 General, 1 Editor, 2 Fonts.
+    /// Opens on a tab: 0 General, 1 Editor, 2 Fonts, 3 Packages.
     func show(tab: Int) {
         (contentViewController as? NSTabViewController)?.selectedTabViewItemIndex = tab
         show()
@@ -50,6 +51,7 @@ struct GeneralSettings: View {
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @Bindable private var compilers = CompilerManager.shared
+    @Bindable private var textSize = PreviewTextSize.shared
 
     var body: some View {
         Form {
@@ -58,6 +60,17 @@ struct GeneralSettings: View {
                     ForEach(Appearance.allCases) { Text($0.title).tag($0.rawValue) }
                 }
                 .onChange(of: appearance) { _, v in Appearance.apply(v) }
+            }
+
+            Section {
+                Stepper(value: $textSize.size, in: PreviewTextSize.range, step: 1) {
+                    LabeledContent("Text size", value: "\(Int(textSize.size.rounded())) px")
+                }
+            } header: {
+                Text("Preview")
+            } footer: {
+                Text("For Markdown and for HTML without A4 pages. Zooming those previews changes it too.")
+                    .foregroundStyle(.secondary)
             }
 
             Section("Diagnostics") {
@@ -315,5 +328,116 @@ struct FontSettings: View {
         panel.prompt = "Add"
         guard panel.runModal() == .OK else { return }
         fonts.machinePaths += panel.urls.map(\.path).filter { !fonts.machinePaths.contains($0) }
+    }
+}
+
+struct PackageSettings: View {
+    @Bindable private var packages = PackageLibrary.shared
+    @State private var spec = ""
+    @State private var namespace = ""
+
+    var body: some View {
+        Form {
+            Section {
+                HStack {
+                    TextField("Package", text: $spec, prompt: Text("@preview/cetz:0.3.1"))
+                        .labelsHidden()
+                        .onSubmit(download)
+                    if packages.downloading.isEmpty {
+                        Button { download() } label: { Label("Download", systemImage: "arrow.down.circle") }
+                            .disabled(spec.trimmingCharacters(in: .whitespaces).isEmpty)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                ForEach(packages.downloaded) { package in
+                    HStack {
+                        Image(systemName: "shippingbox.fill").foregroundStyle(.tint)
+                        Text(package.name)
+                        Text(package.version).foregroundStyle(.secondary)
+                        Spacer()
+                        revealButton(package.url)
+                        removeButton { packages.remove(package) }
+                    }
+                }
+            } header: {
+                Text("Typst Universe")
+            } footer: {
+                if let error = packages.downloadError {
+                    Text(error).foregroundStyle(.red)
+                } else {
+                    Text("Downloaded automatically when a document imports \"@preview/…\". Download one ahead of time, e.g. to work offline. Shared with the typst CLI.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                ForEach(packages.namespaces) { ns in
+                    HStack {
+                        Image(systemName: ns.target == nil ? "folder.fill" : "link").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("@\(ns.name)")
+                            Text(ns.packages.isEmpty ? "No packages"
+                                 : ns.packages.map { "\($0.name):\($0.version)" }.joined(separator: ", "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        Spacer()
+                        revealButton(ns.target ?? ns.url)
+                        if ns.target != nil { removeButton { packages.unlink(ns) } }
+                    }
+                    .help((ns.target ?? ns.url).path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                }
+                HStack {
+                    TextField("Namespace", text: $namespace, prompt: Text("Namespace (defaults to the folder name)"))
+                        .labelsHidden()
+                    Button("Link Folder…", action: linkFolder)
+                }
+            } header: {
+                Text("Local Packages")
+            } footer: {
+                if let error = packages.linkError {
+                    Text(error).foregroundStyle(.red)
+                } else {
+                    Text("A linked folder becomes a namespace: with my-libs/1.0.0/ inside, linked as “personal”, documents import \"@personal/my-libs:1.0.0\". Unlinking keeps your files.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { packages.refresh() }
+    }
+
+    private func download() {
+        let spec = spec
+        Task { if await packages.download(spec) { self.spec = "" } }
+    }
+
+    private func linkFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Link"
+        panel.message = "Choose a folder with packages as <name>/<version>/"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let name = namespace.trimmingCharacters(in: .whitespaces)
+        packages.link(url, as: name.isEmpty ? url.lastPathComponent : name)
+        if packages.linkError == nil { namespace = "" }
+    }
+
+    private func revealButton(_ url: URL) -> some View {
+        Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: { Image(systemName: "folder") }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Reveal in Finder")
+    }
+
+    private func removeButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: "minus.circle.fill") }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Remove")
     }
 }

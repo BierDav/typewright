@@ -54,6 +54,8 @@ struct AppCommands: Commands {
             }
         }
         CommandGroup(after: .saveItem) {
+            Button("Move File…") { Opener.shared.showPalette(page: "file.move") }
+                .keyboardShortcut("i", modifiers: [.command, .option])
             Button("Close Space") { Opener.shared.closeSpace() }
                 .keyboardShortcut("w", modifiers: [.command, .control])
         }

@@ -3,7 +3,7 @@ import Foundation
 /// How a project file is opened.
 enum FileKind {
     /// `document` covers office files Quick Look can show: Word, Excel, PowerPoint, Pages, Numbers, Keynote.
-    case folder, typst, text, pdf, font, document, binary
+    case folder, typst, text, pdf, font, document, image, binary
 
     private static let textExtensions: Set<String> = [
         "bib", "yml", "yaml", "toml", "txt", "csv", "tsv", "json", "xml", "md", "svg", "html", "css", "js",
@@ -14,8 +14,9 @@ enum FileKind {
         "doc", "docx", "docm", "dot", "dotx", "xls", "xlsx", "xlsm", "xlt", "xltx", "ppt", "pptx", "pptm", "pot", "potx",
         "pps", "ppsx", "pages", "numbers", "key", "odt", "ods", "odp", "rtf",
     ]
+    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tiff", "tif", "bmp", "ico"]
     private static let binaryExtensions: Set<String> = [
-        "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "ico", "zip", "gz", "tar", "dmg",
+        "zip", "gz", "tar", "dmg",
         "mp3", "mp4", "mov", "wav",
     ]
 
@@ -26,6 +27,7 @@ enum FileKind {
         else if Self.fontExtensions.contains(ext) { self = .font }
         else if Self.documentExtensions.contains(ext) { self = .document }
         else if Self.textExtensions.contains(ext) { self = .text }
+        else if Self.imageExtensions.contains(ext) { self = .image }
         else if Self.binaryExtensions.contains(ext) { self = .binary }
         else { self = Self.sniff(url) }
     }

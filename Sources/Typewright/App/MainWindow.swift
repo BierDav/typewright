@@ -4,7 +4,8 @@ import Observation
 import SwiftUI
 
 enum WindowOverlay: Equatable {
-    case palette
+    /// Opens on the page of the command with this id, like "file.move".
+    case palette(page: String? = nil)
     /// Searches every space when true, the current space when false; nil follows the window, so the
     /// space overview searches all spaces and a space searches itself.
     case search(allSpaces: Bool?)
