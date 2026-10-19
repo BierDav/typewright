@@ -1,58 +1,85 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
-/// Opens project windows from menus, Finder and the home window.
+/// Opens space windows from menus, Finder and the space selector.
 @MainActor
 final class Opener {
     static let shared = Opener()
 
     private var controllers: [MainWindowController] = []
 
-    /// Focuses the window showing `url`, else loads it into a Home window, else opens a new one.
+    /// Focuses the window showing `url`, else loads it into an empty window, else opens a new one.
     func open(_ url: URL) {
         let url = url.standardizedFileURL
-        if let existing = controllers.first(where: { $0.state.project == url }) {
-            return existing.showWindow(nil)
-        }
-        let homes = controllers.filter { $0.state.project == nil }
-        if let target = homes.first(where: { $0.window?.isKeyWindow == true }) ?? homes.first {
-            target.state.project = url
+        if focus(url) { return }
+        let empty = controllers.filter { $0.state.space == nil }
+        if let target = empty.first(where: { $0.window?.isKeyWindow == true }) ?? empty.first {
+            target.state.space = url
             target.showWindow(nil)
         } else {
-            show(MainWindowController(project: url))
+            show(MainWindowController(space: url))
         }
+    }
+
+    /// Switches `state`'s window to `url`, unless another window already shows it.
+    func open(_ url: URL, in state: WindowState) {
+        let url = url.standardizedFileURL
+        if controllers.contains(where: { $0.state !== state && $0.state.space.map(Workspace.root)?.path == Workspace.root(of: url).path }) {
+            focus(url)
+        } else {
+            state.space = url
+        }
+    }
+
+    @discardableResult
+    private func focus(_ url: URL) -> Bool {
+        let root = Workspace.root(of: url).path
+        guard let existing = controllers.first(where: { $0.state.space.map(Workspace.root)?.path == root }) else { return false }
+        existing.showWindow(nil)
+        return true
     }
 
     func newWindow() {
-        show(MainWindowController(project: nil))
+        show(MainWindowController(space: nil))
     }
 
-    /// Brings up a Home window, reusing an existing one.
-    func showHome() {
-        if let home = controllers.first(where: { $0.state.project == nil }) {
-            home.showWindow(nil)
+    /// Brings up a window without a space, reusing an existing one.
+    func showEmptyWindow() {
+        if let empty = controllers.first(where: { $0.state.space == nil }) {
+            empty.showWindow(nil)
         } else {
             newWindow()
         }
     }
 
-    func closeProject() {
-        controllers.first { $0.window?.isKeyWindow == true }?.state.project = nil
+    func closeSpace() {
+        keyState?.space = nil
     }
 
-    /// Reopens the projects from the last session, or Home.
+    func toggleSpaces() {
+        guard let state = keyState, state.space != nil else { return }
+        state.setSpacesOpen(!state.spacesOpen)
+    }
+
+    private var keyState: WindowState? {
+        controllers.first { $0.window?.isKeyWindow == true }?.state
+    }
+
+    /// Reopens the spaces from the last session, or an empty window.
     func restoreSession() {
         guard controllers.isEmpty else { return }
-        let paths = UserDefaults.standard.stringArray(forKey: "openProjects") ?? []
+        let paths = UserDefaults.standard.stringArray(forKey: Self.sessionKey) ?? []
         let urls = paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
-        if urls.isEmpty { newWindow() } else { urls.forEach { show(MainWindowController(project: $0)) } }
+        if urls.isEmpty { newWindow() } else { urls.forEach { show(MainWindowController(space: $0)) } }
     }
 
     func saveSession() {
-        let paths = controllers.compactMap { $0.state.project?.path }
-        UserDefaults.standard.set(paths, forKey: "openProjects")
+        let paths = controllers.compactMap { $0.state.space?.path }
+        UserDefaults.standard.set(paths, forKey: Self.sessionKey)
     }
+
+    // Named before projects became spaces; kept so the session survives.
+    private static let sessionKey = "openProjects"
 
     func closed(_ controller: MainWindowController) {
         controllers.removeAll { $0 === controller }
@@ -68,68 +95,78 @@ final class Opener {
         saveSession()
     }
 
-    func openPanel() {
+    /// Asks for a space folder; the panel's New Folder button covers creating one.
+    func openPanel(in state: WindowState? = nil) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = [UTType(filenameExtension: "typ") ?? .plainText, .folder]
-        panel.message = "Choose a Typst file or project folder"
-        if panel.runModal() == .OK, let url = panel.url { open(url) }
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Open"
+        panel.message = "Choose a folder to open as a space"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if let state { open(url, in: state) } else { open(url) }
     }
 
-    func newProject(_ template: ProjectTemplate = ProjectTemplate.all[0]) {
-        let panel = NSSavePanel()
-        panel.title = "New \(template.name) Project"
-        panel.nameFieldLabel = "Project:"
-        panel.nameFieldStringValue = "Untitled"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+    /// Renames the space folder on disk and reopens the window on the new location.
+    func rename(_ workspace: Workspace, to name: String, in state: WindowState) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let old = workspace.root
+        guard !name.isEmpty, !name.contains("/"), name != old.lastPathComponent else { return }
+        let target = old.deletingLastPathComponent().appendingPathComponent(name).standardizedFileURL
+        // Case-only renames hit the same folder on case-insensitive volumes.
+        let caseOnly = target.path.lowercased() == old.path.lowercased()
+        guard caseOnly || !FileManager.default.fileExists(atPath: target.path) else { return }
+        workspace.flushSaves()
         do {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-            try template.body(url.lastPathComponent)
-                .write(to: url.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
-            open(url)
+            try FileManager.default.moveItem(at: old, to: target)
         } catch {
             NSAlert(error: error).runModal()
+            return
         }
-    }
-
-    /// Runs `git clone` and returns git's error output on failure.
-    func clone(_ remote: String, into parent: URL) async -> String? {
-        let name = URL(string: remote)?.deletingPathExtension().lastPathComponent ?? "repository"
-        let target = parent.appendingPathComponent(name.isEmpty ? "repository" : name)
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        proc.arguments = ["clone", remote, target.path]
-        let err = Pipe()
-        proc.standardError = err
-        do { try proc.run() } catch { return error.localizedDescription }
-        let output = await Task.detached {
-            let data = err.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            return String(decoding: data, as: UTF8.self)
-        }.value
-        guard proc.terminationStatus == 0 else { return output }
-        open(target)
-        return nil
+        // Persist under the old key first so the saved state moves along.
+        workspace.close()
+        SpaceStore.move(from: old, to: target)
+        SpaceList.replace(old, with: target)
+        state.space = target
     }
 }
 
-enum Recents {
+/// The user's spaces in their chosen order.
+enum SpaceList {
+    // Named before projects became spaces; kept so the list survives.
     private static let key = "recentProjects"
 
     static var all: [URL] {
         var seen = Set<String>()
         return (UserDefaults.standard.stringArray(forKey: key) ?? [])
-            .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() }
+            // Older entries may be files; their folder is the space.
+            .map { Workspace.root(of: URL(fileURLWithPath: $0)).resolvingSymlinksInPath() }
             .filter { FileManager.default.fileExists(atPath: $0.path) && seen.insert($0.path).inserted }
     }
 
+    /// Appends new spaces; known ones keep their place.
     static func add(_ url: URL) {
         let url = url.resolvingSymlinksInPath()
         var paths = UserDefaults.standard.stringArray(forKey: key) ?? []
-        paths.removeAll { $0 == url.path }
-        paths.insert(url.path, at: 0)
-        UserDefaults.standard.set(Array(paths.prefix(30)), forKey: key)
+        guard !paths.contains(url.path) else { return }
+        paths.append(url.path)
+        UserDefaults.standard.set(paths, forKey: key)
+    }
+
+    /// Moves a space to `index` in `all`; missing folders keep their entries for when they return.
+    static func move(_ url: URL, to index: Int) {
+        var visible = all.map(\.path)
+        guard let from = visible.firstIndex(of: url.path) else { return }
+        visible.insert(visible.remove(at: from), at: min(max(index, 0), visible.count))
+        let hidden = (UserDefaults.standard.stringArray(forKey: key) ?? []).filter { !visible.contains($0) }
+        UserDefaults.standard.set(visible + hidden, forKey: key)
+    }
+
+    /// Swaps a renamed space in place, keeping its position.
+    static func replace(_ old: URL, with new: URL) {
+        let old = old.resolvingSymlinksInPath().path, new = new.resolvingSymlinksInPath().path
+        let paths = (UserDefaults.standard.stringArray(forKey: key) ?? []).map { $0 == old ? new : $0 }
+        UserDefaults.standard.set(paths, forKey: key)
     }
 
     static func remove(_ url: URL) {
@@ -137,7 +174,7 @@ enum Recents {
         UserDefaults.standard.set(paths, forKey: key)
     }
 
-    /// Current git branch of the project, if any.
+    /// Current git branch of the space, if any.
     static func branch(of url: URL) -> String? {
         var isDir: ObjCBool = false
         FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)

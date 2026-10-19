@@ -38,6 +38,30 @@ final class CompilerTests: XCTestCase {
         XCTAssertEqual(error?.severity, .error)
     }
 
+    func testHTMLKeepsFontFamiliesAndUserLines() async {
+        let main = "#set text(font: \"Georgia\")\nHi\n\n#nope"
+        let failed = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: ["main.typ": main], format: .html)
+        XCTAssertEqual(failed.diagnostics.first?.path, "main.typ")
+        XCTAssertEqual(failed.diagnostics.first?.line, 4)
+        let result = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: ["main.typ": "#set text(font: \"Georgia\")\nHi"],
+                                                               format: .html)
+        XCTAssertTrue(String(decoding: result.output ?? Data(), as: UTF8.self).contains("font-family: &quot;georgia&quot;"))
+    }
+
+    func testSVGHasOnePagePerSVGAndKeepsUnchangedPages() async {
+        let compiler = BuiltinCompiler(root: root)
+        func pages(_ source: String) async -> [String] {
+            let result = await compiler.compile(main: "main.typ", buffers: ["main.typ": source], format: .svg)
+            return (result.output ?? Data()).split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+        }
+        let before = await pages("One\n#pagebreak()\nTwo")
+        XCTAssertEqual(before.count, 2)
+        XCTAssertTrue(before.allSatisfy { $0.hasPrefix("<svg") })
+        let after = await pages("One\n#pagebreak()\nTwo, edited")
+        XCTAssertEqual(after.first, before.first)
+        XCTAssertNotEqual(after.last, before.last)
+    }
+
     func testProducesPDF() async {
         let result = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: [:], format: .pdf)
         XCTAssertEqual(result.output?.prefix(4), Data("%PDF".utf8))

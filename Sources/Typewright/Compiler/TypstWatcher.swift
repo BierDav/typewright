@@ -6,6 +6,7 @@ final class TypstWatcher {
     let binary: URL
     let main: URL
     let format: RenderMode
+    let fontPaths: [URL]
 
     private let process = Process()
     private let output: URL
@@ -18,11 +19,12 @@ final class TypstWatcher {
     private var finishTask: Task<Void, Never>?
     private var stopped = false
 
-    init(binary: URL, main: URL, root: URL, format: RenderMode,
+    init(binary: URL, main: URL, root: URL, format: RenderMode, fontPaths: [URL],
          onCompiling: @escaping () -> Void, onResult: @escaping (CompileResult) -> Void) {
         self.binary = binary
         self.main = main
         self.format = format
+        self.fontPaths = fontPaths
         self.onCompiling = onCompiling
         self.onResult = onResult
         // typst can only write its output to a file.
@@ -33,6 +35,7 @@ final class TypstWatcher {
         process.arguments = ["watch", main.path, output.path, "--root", root.path, "--diagnostic-format", "short"]
         if format == .html { process.arguments! += ["--format", "html", "--features", "html"] }
         process.currentDirectoryURL = root
+        process.environment = TypstRunner.environment(fontPaths: fontPaths)
         process.standardOutput = FileHandle.nullDevice
         let pipe = Pipe()
         process.standardError = pipe

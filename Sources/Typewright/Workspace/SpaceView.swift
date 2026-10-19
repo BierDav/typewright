@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct ProjectView: View {
+struct SpaceView: View {
     let workspace: Workspace
     @State private var showIssues = false
     @State private var dragStart: Double?
@@ -23,36 +23,28 @@ struct ProjectView: View {
         return diagnostics.filter { !$0.isFromPackage && workspace.root.appendingPathComponent($0.path).standardizedFileURL == file }
     }
 
+    /// The detail column of a space window; the file tree lives in `SpacesSidebar`.
     var body: some View {
-        // The sidebar can't be hidden: toggling and drag-collapsing have nothing to change.
-        NavigationSplitView(columnVisibility: .constant(.all)) {
-            SidebarView(workspace: workspace)
-                .navigationSplitViewColumnWidth(min: 160, ideal: 210)
-        } detail: {
-            content
-                .ignoresSafeArea(.container, edges: .top)
-                .overlay(alignment: .leading) { sidebarEdge }
-        }
-        .toolbar(removing: .sidebarToggle)
-        .background(HiddenTitleBar(title: workspace.selectedFile?.lastPathComponent ?? workspace.name,
-                                   subtitle: workspace.name))
-        .onAppear {
-            workspace.scheduleCompile(delay: 0)
-        }
-        .onChange(of: compilers.active) { workspace.scheduleCompile(delay: 0) }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            workspace.refreshFromDisk()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
-            workspace.flushSaves()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in
-            workspace.flushSaves()
-            workspace.persist()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            workspace.close()
-        }
+        content
+            .ignoresSafeArea(.container, edges: .top)
+            .overlay(alignment: .leading) { sidebarEdge }
+            .onAppear {
+                workspace.scheduleCompile(delay: 0)
+            }
+            .onChange(of: compilers.active) { workspace.scheduleCompile(delay: 0) }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                workspace.refreshFromDisk()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+                workspace.flushSaves()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in
+                workspace.flushSaves()
+                workspace.persist()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                workspace.close()
+            }
     }
 
     /// Below this width a released divider closes the preview.
@@ -276,49 +268,6 @@ private struct HoverTracker: NSViewRepresentable {
         override func mouseEntered(with event: NSEvent) { onChange(true) }
         override func mouseExited(with event: NSEvent) { onChange(false) }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-}
-
-/// Makes the title bar transparent with inset window buttons while a project is shown.
-/// The title still feeds the Window menu.
-private struct HiddenTitleBar: NSViewRepresentable {
-    let title: String
-    let subtitle: String
-
-    func makeNSView(context: Context) -> NSView { WindowView() }
-
-    func updateNSView(_ view: NSView, context: Context) {
-        guard let window = view.window else { return }
-        window.title = title
-        window.subtitle = subtitle
-    }
-
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? { .zero }
-
-    private final class WindowView: NSView {
-        private weak var attached: NSWindow?
-        private var previous: (toolbar: NSToolbar?, style: NSWindow.ToolbarStyle)?
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if let window {
-                attached = window
-                previous = (window.toolbar, window.toolbarStyle)
-                window.titlebarAppearsTransparent = true
-                window.titleVisibility = .hidden
-                // An empty unified toolbar makes AppKit inset and center the window buttons itself.
-                window.toolbar = NSToolbar(identifier: "ProjectTitleBar")
-                window.toolbarStyle = .unified
-            } else if let attached {
-                if let previous {
-                    attached.toolbar = previous.toolbar
-                    attached.toolbarStyle = previous.style
-                }
-                attached.titlebarAppearsTransparent = false
-                attached.titleVisibility = .visible
-                self.attached = nil
-            }
-        }
     }
 }
 

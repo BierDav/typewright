@@ -17,7 +17,7 @@ struct RevealRequest: Equatable {
     let column: Int
 }
 
-/// One open project folder: files, buffers, autosave and compilation.
+/// One open space folder: files, buffers, autosave and compilation.
 @MainActor @Observable
 final class Workspace {
     let root: URL
@@ -42,6 +42,7 @@ final class Workspace {
     }
     private(set) var document: PDFDocument?
     private(set) var html: String?
+    private(set) var svgPages: [String]?
     private(set) var diagnostics: [Diagnostic] = []
     /// Compiler output when compilation failed without diagnostics.
     private(set) var failureLog: String?
@@ -50,6 +51,7 @@ final class Workspace {
 
     @ObservationIgnored let preview = PreviewController()
     @ObservationIgnored let htmlPreview = HTMLPreviewController()
+    @ObservationIgnored let svgPreview = SVGPreviewController()
     /// Shows a selected PDF file instead of the compiled document.
     @ObservationIgnored let filePreview = PreviewController()
     private var buffers: [URL: String] = [:]
@@ -66,17 +68,20 @@ final class Workspace {
     @ObservationIgnored private var editorStates: [URL: EditorState] = [:]
     @ObservationIgnored private var previewStates: [URL: PreviewState] = [:]
     @ObservationIgnored private var persistTask: Task<Void, Never>?
+    @ObservationIgnored private var isClosed = false
+    /// Font folders passed to every compiler, see `FontLibrary`.
+    @ObservationIgnored private var fontDirs: [URL] = []
+    @ObservationIgnored private var fontObserver: (any NSObjectProtocol)?
 
     init(url: URL) {
         let url = url.standardizedFileURL
-        var isDir: ObjCBool = false
-        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-        root = isDir.boolValue ? url : url.deletingLastPathComponent()
+        root = Self.root(of: url)
+        let isDir = root == url
         builtin = BuiltinCompiler(root: root)
         renderMode = UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf
 
-        let saved = ProjectStore.state(for: root)
-        let state = saved ?? ProjectState()
+        let saved = SpaceStore.state(for: root)
+        let state = saved ?? SpaceState()
         split = state.split
         reloadTree()
         let base = root
@@ -88,20 +93,31 @@ final class Workspace {
         editorStates = Dictionary(state.editors.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
         previewStates = Dictionary(state.previews.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
         expanded = Set(state.expanded.compactMap(resolve))
-        let initial = isDir.boolValue ? resolve(state.selected) ?? defaultMain() : url
+        let initial = isDir ? resolve(state.selected) ?? defaultMain() : url
         if let initial { select(initial) }
-        // New projects start out previewing their main file; known ones keep their choice, even none.
+        // New spaces start out previewing their main file; known ones keep their choice, even none.
         if saved == nil {
             previewFile = initial?.pathExtension == "typ" ? initial : defaultMain()
         } else {
             previewFile = resolve(state.preview)
         }
         preview.pendingRestore = previewFile.flatMap { previewStates[$0] }
+        fontObserver = NotificationCenter.default.addObserver(forName: FontLibrary.didChange, object: nil, queue: .main) {
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.updateFonts()
+                self?.restartWatcher()
+            }
+        }
     }
 
     /// Whether the compiled output for the current render mode is available.
     var hasOutput: Bool {
-        renderMode == .pdf ? document != nil : html != nil
+        switch renderMode {
+        case .pdf: document != nil
+        case .html: html != nil
+        case .svg: svgPages != nil
+        }
     }
 
     var name: String { root.lastPathComponent }
@@ -116,6 +132,22 @@ final class Workspace {
         tree = Self.scan(root, depth: 0)
         // New, removed or renamed files must reach the built-in compiler too.
         builtin.reset()
+        // Fonts may have been added to the space's font folders.
+        updateFonts()
+    }
+
+    private func updateFonts() {
+        fontDirs = FontLibrary.shared.directories(for: root)
+        htmlPreview.setFontDirectories(fontDirs)
+        builtin.setFontPaths(fontDirs) { [weak self] in self?.scheduleCompile(delay: 0) }
+        if let watcher, watcher.fontPaths != fontDirs { restartWatcher() }
+    }
+
+    /// `typst watch` only scans fonts at launch.
+    private func restartWatcher() {
+        guard watcher != nil else { return }
+        stopWatcher()
+        scheduleCompile(delay: 0)
     }
 
     func select(_ url: URL) {
@@ -152,6 +184,7 @@ final class Workspace {
         previewFile = url
         document = nil
         html = nil
+        svgPages = nil
         failureLog = nil
         diagnostics = []
         lastDuration = nil
@@ -190,14 +223,14 @@ final class Workspace {
 
     func persist() {
         capturePreviewState()
-        var state = ProjectState()
+        var state = SpaceState()
         state.selected = selectedFile.flatMap(relative)
         state.preview = previewFile.flatMap(relative)
         state.split = split
         for (url, s) in editorStates { if let key = relative(url) { state.editors[key] = s } }
         for (url, s) in previewStates { if let key = relative(url) { state.previews[key] = s } }
         state.expanded = expanded.compactMap(relative).sorted()
-        ProjectStore.save(state, for: root)
+        SpaceStore.save(state, for: root)
     }
 
     /// Picks up edits made by other apps for files without pending changes.
@@ -243,6 +276,50 @@ final class Workspace {
         // Case-only renames hit the same file on case-insensitive volumes.
         let caseOnly = target.path.lowercased() == url.path.lowercased()
         guard caseOnly || !FileManager.default.fileExists(atPath: target.path) else { return }
+        relocate(url, to: target)
+    }
+
+    /// Whether `url` can be moved into the folder `dir`.
+    func canMove(_ url: URL, into dir: URL) -> Bool {
+        dir.path != url.deletingLastPathComponent().path && dir.path != url.path && !dir.path.hasPrefix(url.path + "/")
+            && !FileManager.default.fileExists(atPath: dir.appendingPathComponent(url.lastPathComponent).path)
+    }
+
+    /// Moves a file or folder into `dir`, keeping its name.
+    func move(_ url: URL, into dir: URL) {
+        guard canMove(url, into: dir) else { return NSSound.beep() }
+        relocate(url, to: dir.appendingPathComponent(url.lastPathComponent).standardizedFileURL)
+        if dir.path != root.path { expanded.insert(dir.standardizedFileURL) }
+    }
+
+    /// Moves a file or folder to the Trash and drops everything that pointed into it.
+    func delete(_ url: URL) {
+        flushSaves()
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        func gone(_ u: URL) -> Bool { u == url || u.path.hasPrefix(url.path + "/") }
+        buffers = buffers.filter { !gone($0.key) }
+        dirty = dirty.filter { !gone($0) }
+        editorStates = editorStates.filter { !gone($0.key) }
+        previewStates = previewStates.filter { !gone($0.key) }
+        expanded = expanded.filter { !gone($0) }
+        reloadTree()
+        if let file = previewFile, gone(file) { setPreview(nil) }
+        if let file = selectedFile, gone(file) {
+            selectedFile = nil
+            selectedKind = nil
+            text = ""
+            revision += 1
+            if let main = defaultMain() { select(main) }
+        }
+        schedulePersist()
+    }
+
+    private func relocate(_ url: URL, to target: URL) {
         flushSaves()
         do {
             try FileManager.default.moveItem(at: url, to: target)
@@ -298,8 +375,8 @@ final class Workspace {
         }
         dirty.insert(url)
         scheduleAutosave()
-        // HTML skips layout, so it can keep up with every keystroke.
-        scheduleCompile(delay: renderMode == .html ? 0 : 0.25)
+        // HTML skips layout and SVG only swaps changed pages, so both keep up with every keystroke.
+        scheduleCompile(delay: renderMode == .pdf ? 0.25 : 0)
     }
 
     /// Edits only reach disk every 30 s and on file, window or app switches; the built-in compiler reads the buffers.
@@ -361,6 +438,11 @@ final class Workspace {
             await compileBuiltin(main: previewFile)
         case .binary(let binary):
             flushSaves()
+            guard renderMode != .svg else {
+                stopWatcher()
+                failureLog = "The SVG preview needs the built-in compiler. Choose it in Settings, or render as PDF."
+                return
+            }
             startWatcher(binary: binary, main: previewFile)
         }
     }
@@ -379,11 +461,12 @@ final class Workspace {
     /// Keeps one `typst watch` per previewed file and format; it recompiles on its own when files are saved.
     private func startWatcher(binary: URL, main: URL) {
         let mode = renderMode
-        if let watcher, watcher.binary == binary, watcher.main == main, watcher.format == mode { return }
+        if let watcher, watcher.binary == binary, watcher.main == main, watcher.format == mode,
+           watcher.fontPaths == fontDirs { return }
         stopWatcher()
         var started: TypstWatcher?
         let watcher = TypstWatcher(
-            binary: binary, main: main, root: root, format: mode,
+            binary: binary, main: main, root: root, format: mode, fontPaths: fontDirs,
             onCompiling: { [weak self] in
                 guard let self, self.watcher === started else { return }
                 self.isCompiling = true
@@ -416,6 +499,8 @@ final class Workspace {
             if let doc = PDFDocument(data: data) { document = doc }
         case .html:
             html = String(decoding: data, as: UTF8.self)
+        case .svg:
+            svgPages = data.split(separator: 0, omittingEmptySubsequences: false).map { String(decoding: $0, as: UTF8.self) }
         }
     }
 
@@ -436,7 +521,8 @@ final class Workspace {
             }
         case .binary(let binary):
             flushSaves()
-            result = await exportRunner.compile(binary: binary, main: previewFile, root: root, output: url)
+            result = await exportRunner.compile(binary: binary, main: previewFile, root: root, output: url,
+                                                fontPaths: fontDirs)
             if result.output != nil { return nil }
         }
         let errors = result.diagnostics.filter { $0.severity == .error }
@@ -444,15 +530,26 @@ final class Workspace {
     }
 
     func close() {
+        guard !isClosed else { return }
+        isClosed = true
         flushSaves()
         persistTask?.cancel()
         persist()
         compileTask?.cancel()
         stopWatcher()
         exportRunner.cancel()
+        if let fontObserver { NotificationCenter.default.removeObserver(fontObserver) }
     }
 
     // MARK: - Helpers
+
+    /// The space folder for a folder or a file inside it.
+    nonisolated static func root(of url: URL) -> URL {
+        let url = url.standardizedFileURL
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+        return isDir.boolValue ? url : url.deletingLastPathComponent()
+    }
 
     private func defaultMain() -> URL? {
         let main = root.appendingPathComponent("main.typ")

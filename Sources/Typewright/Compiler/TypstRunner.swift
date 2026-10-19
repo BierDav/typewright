@@ -1,7 +1,7 @@
 import Foundation
 
 enum RenderMode: String, CaseIterable {
-    case pdf, html
+    case pdf, html, svg
 }
 
 struct CompileResult {
@@ -17,7 +17,8 @@ final class TypstRunner: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
 
-    func compile(binary: URL, main: URL, root: URL, output: URL, format: RenderMode = .pdf) async -> CompileResult {
+    func compile(binary: URL, main: URL, root: URL, output: URL, format: RenderMode = .pdf,
+                 fontPaths: [URL] = []) async -> CompileResult {
         let start = Date()
         let proc = Process()
         proc.executableURL = binary
@@ -29,6 +30,7 @@ final class TypstRunner: @unchecked Sendable {
         // HTML export is experimental and gated behind a feature flag.
         if format == .html { proc.arguments! += ["--format", "html", "--features", "html"] }
         proc.currentDirectoryURL = root
+        proc.environment = TypstRunner.environment(fontPaths: fontPaths)
         let errPipe = Pipe()
         proc.standardError = errPipe
         proc.standardOutput = FileHandle.nullDevice
@@ -60,6 +62,13 @@ final class TypstRunner: @unchecked Sendable {
             log: stderr.trimmingCharacters(in: .whitespacesAndNewlines),
             duration: Date().timeIntervalSince(start)
         )
+    }
+
+    /// typst reads extra font folders from `TYPST_FONT_PATHS`, searched before the system's.
+    static func environment(fontPaths: [URL]) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["TYPST_FONT_PATHS"] = fontPaths.map(\.path).joined(separator: ":")
+        return env
     }
 
     func cancel() {

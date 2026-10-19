@@ -36,6 +36,7 @@ final class PreviewController {
     @ObservationIgnored nonisolated(unsafe) private var magnifyMonitor: Any?
     /// Applied to the next document instead of keeping the current scroll position.
     @ObservationIgnored var pendingRestore: PreviewState?
+    @ObservationIgnored private var zoomTimer: Timer?
 
     init() {
         defaultMargins = view.pageBreakMargins
@@ -121,30 +122,82 @@ final class PreviewController {
         sync()
     }
 
-    func zoomIn() {
-        view.autoScales = false
-        view.zoomIn(nil)
-        sync()
-    }
-
-    func zoomOut() {
-        view.autoScales = false
-        view.zoomOut(nil)
-        sync()
-    }
+    func zoomIn() { animateZoom(to: zoomTarget * 1.25) }
+    func zoomOut() { animateZoom(to: zoomTarget / 1.25) }
 
     func setAutoScales(_ on: Bool) {
-        applyMargins(auto: on)
-        view.autoScales = on
-        sync()
+        guard on else {
+            view.autoScales = false
+            return sync()
+        }
+        applyMargins(auto: true)
+        animateZoom(to: view.scaleFactorForSizeToFit) { [weak self] in
+            self?.view.autoScales = true
+            self?.sync()
+        }
     }
 
-    /// Fit-to-width pages span the full pane; zoomed pages keep PDFKit's side margins.
+    /// Where the running animation is heading, so quick repeated clicks keep stepping.
+    @ObservationIgnored private var pendingScale: CGFloat?
+    private var zoomTarget: CGFloat { pendingScale ?? view.scaleFactor }
+
+    /// Steps the scale over a short ease-out, keeping the point at the view's center in place.
+    private func animateZoom(to target: CGFloat, completion: (() -> Void)? = nil) {
+        zoomTimer?.invalidate()
+        view.autoScales = false
+        let target = min(max(target, view.minScaleFactor), view.maxScaleFactor)
+        let start = view.scaleFactor
+        let center = NSPoint(x: view.bounds.midX, y: view.bounds.midY)
+        guard abs(target - start) > 0.001, let page = view.page(for: center, nearest: true) else {
+            view.scaleFactor = target
+            pendingScale = nil
+            completion?()
+            return sync()
+        }
+        let anchor = view.convert(center, to: page)
+        let began = CACurrentMediaTime()
+        pendingScale = target
+        zoomTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { return timer.invalidate() }
+                let t = min((CACurrentMediaTime() - began) / 0.22, 1)
+                let eased = 1 - pow(1 - t, 3)
+                // Geometric steps feel equally fast at every zoom level.
+                self.view.scaleFactor = start * pow(target / start, eased)
+                self.keep(anchor, on: page, at: center)
+                guard t >= 1 else { return }
+                timer.invalidate()
+                self.zoomTimer = nil
+                self.pendingScale = nil
+                completion?()
+                self.sync()
+            }
+        }
+    }
+
+    /// Scrolls so `point` on `page` sits at `target` in the view again.
+    private func keep(_ point: NSPoint, on page: PDFPage, at target: NSPoint) {
+        guard let scroll = view.documentView?.enclosingScrollView else { return }
+        view.layoutDocumentView()
+        let now = view.convert(point, from: page)
+        let clip = scroll.contentView
+        var origin = clip.bounds.origin
+        origin.x += now.x - target.x
+        // The view's y grows upwards; a flipped document grows downwards.
+        origin.y += clip.isFlipped ? target.y - now.y : now.y - target.y
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
+        scroll.reflectScrolledClipView(clip)
+    }
+
+    /// Fit-to-width pages span the full pane; zoomed pages keep PDFKit's side margins. No margin above pages.
     private func applyMargins(auto: Bool) {
         var margins = defaultMargins
         if auto { margins.left = 0; margins.right = 0 }
+        // The first page starts at the top edge; the gap between pages stays the same.
+        margins.bottom += margins.top
+        margins.top = 0
         let current = view.pageBreakMargins
-        guard current.left != margins.left || current.right != margins.right else { return }
+        guard current.left != margins.left || current.right != margins.right || current.top != margins.top else { return }
         view.pageBreakMargins = margins
     }
 

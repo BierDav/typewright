@@ -1,9 +1,18 @@
 import AppKit
 import SwiftUI
 
+/// The space's file tree under its header.
 struct SidebarView: View {
     let workspace: Workspace
+    let onShowSpaces: () -> Void
+    let onRenameSpace: (String) -> Void
     @State private var renaming: URL?
+    /// The row being dragged and the pointer in the tree's coordinates.
+    @State private var drag: (url: URL, location: CGPoint)?
+    @State private var expandTask: Task<Void, Never>?
+
+    fileprivate static let treeSpace = "fileTree"
+    private static let rowPitch: CGFloat = 36
 
     private struct Row: Identifiable {
         let node: FileNode
@@ -22,12 +31,6 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        content
-            // Same behind-window blur as the preview instead of the wallpaper-tinted default.
-            .background(SidebarMaterial().ignoresSafeArea())
-    }
-
-    private var content: some View {
         GeometryReader { geo in
             ScrollView {
                 fileList
@@ -37,8 +40,15 @@ struct SidebarView: View {
                     .gesture(WindowDragGesture())
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            SpaceHeader(name: workspace.name, isDropTarget: dropTarget?.path == workspace.root.path,
+                        onRename: onRenameSpace, menuItems: spaceMenuItems)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 2)
+        }
         .safeAreaInset(edge: .bottom) {
             HStack {
+                SpacesButton(active: false, action: onShowSpaces)
                 Spacer()
                 ZenMenuButton(systemName: "plus", size: 28, rotatesWhenOpen: true, idleFill: false) {
                     createItems(in: nil)
@@ -61,7 +71,11 @@ struct SidebarView: View {
                     isPreviewed: row.node.url == workspace.previewFile,
                     isExpanded: workspace.expanded.contains(row.node.url),
                     isRenaming: renaming == row.node.url,
+                    isDragged: drag?.url == row.node.url,
+                    isDropTarget: dropTarget?.path == row.node.url.path,
                     onTap: { tap(row.node) },
+                    onDrag: { location in dragMoved(row.node.url, to: location) },
+                    onDrop: drop,
                     onTogglePreview: { workspace.togglePreview(row.node.url) },
                     onStartRename: { renaming = row.node.url },
                     onRename: { name in
@@ -76,6 +90,48 @@ struct SidebarView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
+        .coordinateSpace(.named(Self.treeSpace))
+        .overlay(alignment: .topLeading) {
+            if let drag, let node = rows.first(where: { $0.node.url == drag.url })?.node {
+                DragGhost(node: node).position(x: drag.location.x + 40, y: drag.location.y)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: dropTarget)
+    }
+
+    /// The folder a drop at the pointer would move into: the hovered folder, a hovered file's folder, or the space.
+    private var dropTarget: URL? {
+        guard let drag else { return nil }
+        let index = Int(((drag.location.y - 4) / Self.rowPitch).rounded(.down))
+        let dir: URL
+        if rows.indices.contains(index) {
+            let node = rows[index].node
+            dir = node.children != nil ? node.url : node.url.deletingLastPathComponent()
+        } else {
+            dir = workspace.root
+        }
+        return workspace.canMove(drag.url, into: dir) ? dir : nil
+    }
+
+    private func dragMoved(_ url: URL, to location: CGPoint) {
+        let before = dropTarget
+        drag = (url, location)
+        guard let target = dropTarget, target.path != before?.path else { return }
+        // Hovering a closed folder for a moment opens it, so deeper folders can be reached.
+        expandTask?.cancel()
+        expandTask = Task {
+            try? await Task.sleep(for: .seconds(0.7))
+            guard !Task.isCancelled, drag != nil, dropTarget?.path == target.path, target.path != workspace.root.path else { return }
+            withAnimation(.smooth(duration: 0.2)) { _ = workspace.expanded.insert(target.standardizedFileURL) }
+        }
+    }
+
+    private func drop() {
+        expandTask?.cancel()
+        if let drag, let target = dropTarget {
+            withAnimation(.smooth(duration: 0.25)) { workspace.move(drag.url, into: target) }
+        }
+        drag = nil
     }
 
     /// Shared by the right-click menu and the row's ellipsis button.
@@ -96,7 +152,23 @@ struct SidebarView: View {
         }
         items.append(.divider)
         items.append(.init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) })
+        items.append(.init("Copy Path", "doc.on.doc") { copyPath(node.url) })
+        items.append(.divider)
+        items.append(.init("Move to Trash", "trash") {
+            withAnimation(.smooth(duration: 0.2)) { workspace.delete(node.url) }
+        })
         return items
+    }
+
+    private func spaceMenuItems(rename: @escaping () -> Void) -> [SidebarMenuItem] {
+        createItems(in: nil) + [
+            .divider,
+            .init("Rename Space…", "pencil", action: rename),
+            .init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([workspace.root]) },
+            .init("Copy Path", "doc.on.doc") { copyPath(workspace.root) },
+            .divider,
+            .init("Close Space", "xmark") { Opener.shared.closeSpace() },
+        ]
     }
 
     private func createItems(in dir: URL?) -> [SidebarMenuItem] {
@@ -126,6 +198,11 @@ struct SidebarView: View {
             withAnimation(.smooth(duration: 0.3)) { workspace.select(node.url) }
         }
     }
+}
+
+func copyPath(_ url: URL) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(url.path, forType: .string)
 }
 
 /// One menu entry, rendered as a SwiftUI context menu and as an NSMenu so both stay identical.
@@ -178,7 +255,7 @@ struct SidebarMenuItem: Identifiable {
     }
 }
 
-private struct SidebarMenuContent: View {
+struct SidebarMenuContent: View {
     let items: [SidebarMenuItem]
 
     var body: some View {
@@ -195,7 +272,7 @@ private struct SidebarMenuContent: View {
 }
 
 /// Zen-style press feedback: the button shrinks while held and springs back.
-private struct ZenPressStyle: ButtonStyle {
+struct ZenPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.85 : 1)
@@ -204,7 +281,7 @@ private struct ZenPressStyle: ButtonStyle {
 }
 
 /// Zen-style square icon button face with its own hover fill.
-private struct ZenIcon: View {
+struct ZenIcon: View {
     let systemName: String
     var size: CGFloat = 24
     var active = false
@@ -232,7 +309,7 @@ private struct ZenIcon: View {
 }
 
 /// Icon button that pops up an NSMenu, so it knows when the menu is open.
-private struct ZenMenuButton: View {
+struct ZenMenuButton: View {
     let systemName: String
     var size: CGFloat = 24
     var rotatesWhenOpen = false
@@ -297,6 +374,133 @@ private struct MenuAnchor: NSViewRepresentable {
     }
 }
 
+/// Space name above the file tree; clicking it renames the space folder.
+private struct SpaceHeader: View {
+    let name: String
+    var isDropTarget = false
+    let onRename: (String) -> Void
+    let menuItems: (_ rename: @escaping () -> Void) -> [SidebarMenuItem]
+    @State private var renaming = false
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            if renaming {
+                RenameField(name: name, base: name) { new in
+                    guard renaming else { return }
+                    renaming = false
+                    if let new { onRename(new) }
+                }
+            } else {
+                Text(name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .pointerStyle(.horizontalText)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 13, weight: .semibold))
+        .padding(.horizontal, 10)
+        .frame(height: 34)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(isDropTarget ? AnyShapeStyle(Color.accentColor.opacity(0.2))
+                : AnyShapeStyle(Color.primary.opacity(hovered && !renaming ? 0.06 : 0))))
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .onTapGesture { renaming = true }
+        .help("Rename space")
+        .contextMenu { SidebarMenuContent(items: menuItems { renaming = true }) }
+    }
+}
+
+/// Inline name editor that preselects `base` and commits on Return, focus loss or an outside click.
+struct RenameField: View {
+    let name: String
+    let base: String
+    let onRename: (String?) -> Void
+    @State private var draft = ""
+    @State private var selection: TextSelection?
+    @State private var clickMonitor: Any?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("Name", text: $draft, selection: $selection)
+            .textFieldStyle(.plain)
+            .focused($focused)
+            .onSubmit { onRename(draft) }
+            .onExitCommand { onRename(nil) }
+            .onChange(of: focused) { _, now in
+                if now { selectBaseName() } else { onRename(draft) }
+            }
+            .onAppear {
+                draft = name
+                focused = true
+                // Clicks elsewhere don't always take focus, so watch for them directly.
+                clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+                    if !Self.isTextField(event.window?.contentView?.hitTest(event.locationInWindow)) {
+                        onRename(draft)
+                    }
+                    return event
+                }
+            }
+            .onDisappear {
+                if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+                clickMonitor = nil
+            }
+    }
+
+    /// Preselects the name without its extension, like Finder.
+    private func selectBaseName() {
+        let length = (base as NSString).length
+        // Focusing selects everything, sometimes a beat later; override it once that settled.
+        for delay in [0.0, 0.05] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard focused else { return }
+                if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isFieldEditor {
+                    editor.setSelectedRange(NSRange(location: 0, length: min(length, (editor.string as NSString).length)))
+                } else {
+                    let end = draft.index(draft.startIndex, offsetBy: min(base.count, draft.count))
+                    selection = TextSelection(range: draft.startIndex..<end)
+                }
+            }
+        }
+    }
+
+    private static func isTextField(_ view: NSView?) -> Bool {
+        var view = view
+        while let current = view {
+            if current is NSTextField || (current as? NSTextView)?.isFieldEditor == true { return true }
+            view = current.superview
+        }
+        return false
+    }
+
+}
+
+/// Floating label under the pointer while a file is dragged.
+private struct DragGhost: View {
+    let node: FileNode
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: node.children != nil ? "folder" : node.isTypst ? "t.square.fill" : "doc")
+            Text(node.name).lineLimit(1)
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 10)
+        .frame(height: 26)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+        .fixedSize()
+        .allowsHitTesting(false)
+    }
+}
+
 /// Zen-style tab row: rounded tile, hover fill, slight zoom while pressed.
 private struct FileRow: View {
     let node: FileNode
@@ -305,7 +509,11 @@ private struct FileRow: View {
     let isPreviewed: Bool
     let isExpanded: Bool
     let isRenaming: Bool
+    let isDragged: Bool
+    let isDropTarget: Bool
     let onTap: () -> Void
+    let onDrag: (CGPoint) -> Void
+    let onDrop: () -> Void
     let onTogglePreview: () -> Void
     let onStartRename: () -> Void
     let onRename: (String?) -> Void
@@ -313,10 +521,7 @@ private struct FileRow: View {
     @State private var hovered = false
     @State private var pressed = false
     @State private var menuOpen = false
-    @State private var draft = ""
-    @State private var selection: TextSelection?
-    @State private var clickMonitor: Any?
-    @FocusState private var focused: Bool
+    @State private var dragging = false
 
     private static var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 10, style: .continuous) }
     private var isFolder: Bool { node.children != nil }
@@ -327,7 +532,8 @@ private struct FileRow: View {
         HStack(spacing: 8) {
             leadingIcon
             if isRenaming {
-                renameField
+                RenameField(name: node.name, base: isFolder ? node.name : node.url.deletingPathExtension().lastPathComponent,
+                            onRename: onRename)
             } else {
                 Text(node.name)
                     .lineLimit(1)
@@ -353,76 +559,35 @@ private struct FileRow: View {
         .padding(.leading, 10 + CGFloat(depth) * 14)
         .padding(.trailing, 5)
         .frame(height: 34)
-        .background(Self.shape.fill(Color.primary.opacity(fill)))
+        .background(Self.shape.fill(isDropTarget ? AnyShapeStyle(Color.accentColor.opacity(0.2))
+            : AnyShapeStyle(Color.primary.opacity(fill))))
+        // The ghost follows the pointer; the row stays as a placeholder.
+        .opacity(isDragged ? 0.4 : 1)
         .contentShape(Self.shape)
         .scaleEffect(pressed ? 0.95 : 1)
         .animation(.spring(response: 0.25, dampingFraction: 0.65), value: pressed)
         .animation(.easeOut(duration: 0.12), value: hovered)
         .onHover { hovered = $0 }
         .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in pressed = true }
-                .onEnded { value in
+            DragGesture(minimumDistance: 0, coordinateSpace: .named(SidebarView.treeSpace))
+                .onChanged { value in
+                    // A few points of travel turn the press into a move.
+                    if !dragging && hypot(value.translation.width, value.translation.height) > 5 { dragging = true }
+                    pressed = !dragging
+                    if dragging { onDrag(value.location) }
+                }
+                .onEnded { _ in
                     pressed = false
-                    // Releasing outside the row cancels, like a button.
-                    if abs(value.translation.width) < 40 && abs(value.translation.height) < 17 { onTap() }
+                    if dragging {
+                        dragging = false
+                        onDrop()
+                    } else {
+                        onTap()
+                    }
                 },
             including: isRenaming ? .subviews : .all
         )
         .contextMenu { SidebarMenuContent(items: menuItems()) }
-    }
-
-    private var renameField: some View {
-        TextField("Name", text: $draft, selection: $selection)
-            .textFieldStyle(.plain)
-            .focused($focused)
-            .onSubmit { onRename(draft) }
-            .onExitCommand { onRename(nil) }
-            .onChange(of: focused) { _, now in
-                if now { selectBaseName() } else { onRename(draft) }
-            }
-            .onAppear {
-                draft = node.name
-                focused = true
-                // Clicks elsewhere don't always take focus, so watch for them directly.
-                clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
-                    if !Self.isTextField(event.window?.contentView?.hitTest(event.locationInWindow)) {
-                        onRename(draft)
-                    }
-                    return event
-                }
-            }
-            .onDisappear {
-                if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
-                clickMonitor = nil
-            }
-    }
-
-    /// Preselects the name without its extension, like Finder.
-    private func selectBaseName() {
-        let base = isFolder ? node.name : node.url.deletingPathExtension().lastPathComponent
-        let length = (base as NSString).length
-        // Focusing selects everything, sometimes a beat later; override it once that settled.
-        for delay in [0.0, 0.05] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard focused else { return }
-                if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isFieldEditor {
-                    editor.setSelectedRange(NSRange(location: 0, length: min(length, (editor.string as NSString).length)))
-                } else {
-                    let end = draft.index(draft.startIndex, offsetBy: min(base.count, draft.count))
-                    selection = TextSelection(range: draft.startIndex..<end)
-                }
-            }
-        }
-    }
-
-    private static func isTextField(_ view: NSView?) -> Bool {
-        var view = view
-        while let current = view {
-            if current is NSTextField || (current as? NSTextView)?.isFieldEditor == true { return true }
-            view = current.superview
-        }
-        return false
     }
 
     /// Folders swap their icon for the disclosure chevron while hovered.
@@ -433,10 +598,17 @@ private struct FileRow: View {
                 .font(.system(size: 10, weight: .semibold))
                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 .frame(width: 16)
+        } else if node.isTypst {
+            // Typst sources stand out in the tree in Typst's teal.
+            Image(systemName: "t.square.fill")
+                .foregroundStyle(Self.typstColor)
+                .frame(width: 16)
         } else {
             Image(systemName: icon).frame(width: 16)
         }
     }
+
+    static let typstColor = Color(red: 0.14, green: 0.62, blue: 0.68)
 
     private var fill: Double {
         if isSelected { return 0.12 }
@@ -446,7 +618,7 @@ private struct FileRow: View {
     private var icon: String {
         switch node.kind {
         case .folder: return "folder"
-        case .typst: return "t.square"
+        case .typst: return "t.square.fill"
         case .pdf: return "doc.richtext"
         case .font: return "textformat"
         case .text, .binary:

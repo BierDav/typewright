@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 @main
 struct TypewrightApp: App {
@@ -27,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows { Opener.shared.showHome() }
+        if !hasVisibleWindows { Opener.shared.showEmptyWindow() }
         return false
     }
 
@@ -45,22 +44,21 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Window") { Opener.shared.newWindow() }
                 .keyboardShortcut("n")
-            Button("New Project…") { Opener.shared.newProject() }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
-            Button("Open…") { Opener.shared.openPanel() }
+            Button("Open Space…") { Opener.shared.openPanel() }
                 .keyboardShortcut("o")
-            Menu("Open Recent") {
-                ForEach(Recents.all.prefix(10), id: \.self) { url in
+            Menu("Spaces") {
+                ForEach(SpaceList.all, id: \.self) { url in
                     Button(url.lastPathComponent) { Opener.shared.open(url) }
                 }
             }
         }
         CommandGroup(after: .saveItem) {
-            Button("Close Project") { Opener.shared.closeProject() }
+            Button("Close Space") { Opener.shared.closeSpace() }
                 .keyboardShortcut("w", modifiers: [.command, .control])
         }
-        CommandGroup(after: .windowArrangement) {
-            Button("Typewright Home") { Opener.shared.showHome() }
+        CommandGroup(after: .toolbar) {
+            Button("Show Spaces") { Opener.shared.toggleSpaces() }
+                .keyboardShortcut("s", modifiers: [.command, .option])
         }
     }
 }

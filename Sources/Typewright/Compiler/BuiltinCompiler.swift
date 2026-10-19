@@ -24,6 +24,19 @@ final class BuiltinCompiler: @unchecked Sendable {
         queue.async { tw_world_free(world) }
     }
 
+    /// Rescans the folders searched for fonts; `onChange` runs on the main queue if the fonts differ.
+    func setFontPaths(_ dirs: [URL], onChange: @escaping @MainActor () -> Void) {
+        let paths = dirs.map(\.path)
+        queue.async { [self] in
+            let cStrings = paths.map { strdup($0)! }
+            defer { cStrings.forEach { free($0) } }
+            let changed = cStrings.map { UnsafePointer($0) }.withUnsafeBufferPointer {
+                tw_world_set_font_paths(world, $0.baseAddress, $0.count)
+            }
+            if changed { DispatchQueue.main.async { MainActor.assumeIsolated(onChange) } }
+        }
+    }
+
     /// Forgets cached disk contents, e.g. after files changed outside the editor.
     func reset() {
         queue.async { [self] in tw_world_reset(world) }
@@ -36,8 +49,28 @@ final class BuiltinCompiler: @unchecked Sendable {
         }
     }
 
+    /// Wraps the main file for HTML so text carries its font family, which typst's HTML export drops.
+    private static let htmlWrapper = ".typewright-html.typ"
+    private static let htmlPrelude = """
+        #show text: it => context if target() == "html" {
+          let fonts = text.font
+          let fonts = if type(fonts) == array { fonts } else { (fonts,) }
+          let names = fonts.map(f => if type(f) == dictionary { f.name } else { f })
+          html.elem("span", attrs: (style: "font-family: " + names.map(n => "\\"" + n + "\\"").join(", ")), it)
+        } else { it }
+
+        """
+
     private func run(main: String, buffers: [String: String], format: RenderMode) -> CompileResult {
         let start = Date()
+        var buffers = buffers
+        var main = main
+        if format == .html {
+            // Included rather than edited, so diagnostics keep pointing at the user's file and lines.
+            let quoted = main.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            buffers[Self.htmlWrapper] = Self.htmlPrelude + "#include \"/\(quoted)\"\n"
+            main = Self.htmlWrapper
+        }
         tw_world_set_main(world, main)
         for path in overlays.subtracting(buffers.keys) { tw_world_remove_overlay(world, path) }
         for (path, text) in buffers {
@@ -46,13 +79,18 @@ final class BuiltinCompiler: @unchecked Sendable {
         }
         overlays = Set(buffers.keys)
 
-        let result = tw_world_compile(world, format == .pdf ? TWFormatPDF : TWFormatHTML)
+        let twFormat: TWFormat = switch format {
+        case .pdf: TWFormatPDF
+        case .html: TWFormatHTML
+        case .svg: TWFormatSVG
+        }
+        let result = tw_world_compile(world, twFormat)
         defer { tw_result_free(result) }
         let output = result.data.map { Data(bytes: $0, count: result.len) }
         let all = (try? JSONDecoder().decode([Entry].self, from: Data(String(cString: result.diagnostics).utf8))) ?? []
         // Diagnostics without a location can't be listed per file, so they become the failure log.
-        let located = all.filter { !$0.path.isEmpty }
-        let log = all.filter(\.path.isEmpty).map { "\($0.severity): \($0.message)" }.joined(separator: "\n")
+        let located = all.filter { !$0.path.isEmpty && $0.path != Self.htmlWrapper }
+        let log = all.filter { $0.path.isEmpty || $0.path == Self.htmlWrapper }.map { "\($0.severity): \($0.message)" }.joined(separator: "\n")
         return CompileResult(
             output: output,
             diagnostics: located.map {

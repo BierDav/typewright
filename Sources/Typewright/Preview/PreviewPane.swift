@@ -13,6 +13,16 @@ struct PDFViewHost: NSViewRepresentable {
     }
 }
 
+struct SVGViewHost: NSViewRepresentable {
+    let controller: SVGPreviewController
+    func makeNSView(context: Context) -> WKWebView { controller.view }
+    func updateNSView(_ view: WKWebView, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: WKWebView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 300, height: proposal.height ?? 300)
+    }
+}
+
 struct WebViewHost: NSViewRepresentable {
     let controller: HTMLPreviewController
     func makeNSView(context: Context) -> WKWebView { controller.view }
@@ -45,6 +55,7 @@ struct PreviewPane: View {
     @State private var hovering = false
     private var preview: PreviewController { workspace.preview }
     private var htmlPreview: HTMLPreviewController { workspace.htmlPreview }
+    private var svgPreview: SVGPreviewController { workspace.svgPreview }
     private var compilers: CompilerManager { .shared }
 
     var body: some View {
@@ -52,6 +63,7 @@ struct PreviewPane: View {
             switch workspace.renderMode {
             case .pdf: PDFViewHost(controller: preview)
             case .html: WebViewHost(controller: htmlPreview)
+            case .svg: SVGViewHost(controller: svgPreview)
             }
             if compilers.active == nil {
                 SetupCompilerView()
@@ -74,9 +86,11 @@ struct PreviewPane: View {
         .onHover { hovering = $0 }
         .onChange(of: workspace.document) { _, doc in preview.show(doc) }
         .onChange(of: workspace.html) { _, html in htmlPreview.show(html, baseURL: baseURL) }
+        .onChange(of: workspace.svgPages) { _, pages in svgPreview.show(pages) }
         .onAppear {
             preview.show(workspace.document)
             htmlPreview.show(workspace.html, baseURL: baseURL)
+            svgPreview.show(workspace.svgPages)
         }
     }
 
@@ -89,6 +103,7 @@ struct PreviewPane: View {
         switch workspace.renderMode {
         case .pdf: PDFZoomControls(controller: preview).disabled(workspace.document == nil)
         case .html: HTMLZoomControls(controller: htmlPreview).disabled(workspace.html == nil)
+        case .svg: SVGZoomControls(controller: svgPreview).disabled(workspace.svgPages == nil)
         }
         if workspace.isCompiling {
             ProgressView().controlSize(.mini)
@@ -99,14 +114,16 @@ struct PreviewPane: View {
                 Picker("Render As", selection: Bindable(workspace).renderMode) {
                     Text("PDF").tag(RenderMode.pdf)
                     Text("HTML").tag(RenderMode.html)
+                    Text("SVG").tag(RenderMode.svg)
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
-                Group {
-                    Toggle("A4 Pages", isOn: Bindable(htmlPreview).pages)
-                    Toggle("Dark Mode", isOn: Bindable(htmlPreview).darkMode)
+                Toggle("A4 Pages", isOn: Bindable(htmlPreview).pages)
+                    .disabled(workspace.renderMode != .html)
+                switch workspace.renderMode {
+                case .svg: Toggle("Dark Mode", isOn: Bindable(svgPreview).darkMode)
+                default: Toggle("Dark Mode", isOn: Bindable(htmlPreview).darkMode).disabled(workspace.renderMode != .html)
                 }
-                .disabled(workspace.renderMode != .html)
             }
             Divider()
             Button("Export PDF…", action: exportPDF)
@@ -174,6 +191,26 @@ struct PDFZoomControls: View {
         if controller.pageCount > 0 {
             Divider().frame(height: 16)
             Text("Page \(controller.page + 1) of \(controller.pageCount)").monospacedDigit()
+        }
+    }
+}
+
+struct SVGZoomControls: View {
+    let controller: SVGPreviewController
+
+    var body: some View {
+        let percent = "\(Int((controller.effectiveScale * 100).rounded()))%"
+        Button { controller.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
+            .help("Zoom out")
+        Button { controller.fitToWidth() } label: {
+            Text(controller.autoScales ? "Auto (\(percent))" : percent).monospacedDigit().frame(minWidth: 38)
+        }
+        .help(controller.autoScales ? "Fitting to width" : "Fit to width")
+        Button { controller.zoomIn() } label: { Image(systemName: "plus.magnifyingglass") }
+            .help("Zoom in")
+        if controller.pageCount > 0 {
+            Divider().frame(height: 16)
+            Text(controller.pageCount == 1 ? "1 page" : "\(controller.pageCount) pages").monospacedDigit()
         }
     }
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -9,6 +10,8 @@ typedef struct TWWorld TWWorld;
 typedef enum : uint8_t {
     TWFormatPDF = 0,
     TWFormatHTML = 1,
+    /// Pages as SVG documents separated by NUL bytes.
+    TWFormatSVG = 2,
 } TWFormat;
 
 typedef struct {
@@ -27,6 +30,9 @@ void tw_warm_up(void);
 
 TWWorld *_Nonnull tw_world_new(const char *_Nonnull root);
 void tw_world_free(TWWorld *_Nonnull world);
+
+/// Rescans the folders searched for fonts before the system's; returns whether the world's fonts changed.
+bool tw_world_set_font_paths(TWWorld *_Nonnull world, const char *_Nonnull const *_Nullable paths, size_t count);
 
 /// Sets the main file, relative to the root.
 void tw_world_set_main(TWWorld *_Nonnull world, const char *_Nonnull path);

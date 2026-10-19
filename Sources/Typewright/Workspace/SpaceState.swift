@@ -15,8 +15,8 @@ struct PreviewState: Codable, Equatable {
     var y = 0.0
 }
 
-/// UI state of one project; file keys are paths relative to the project root.
-struct ProjectState: Codable {
+/// UI state of one space; file keys are paths relative to the space folder.
+struct SpaceState: Codable {
     var selected: String?
     var preview: String?
     var split = 0.5
@@ -38,25 +38,36 @@ struct ProjectState: Codable {
     }
 }
 
-/// Keeps every project's UI state in Application Support so it survives relaunches.
+/// Keeps every space's UI state in Application Support so it survives relaunches.
 @MainActor
-enum ProjectStore {
+enum SpaceStore {
     private static let file = URL.applicationSupportDirectory
         .appending(path: "Typewright", directoryHint: .isDirectory)
+        // Named before projects became spaces; kept so saved state survives.
         .appending(path: "projects.json")
 
-    private static var states: [String: ProjectState] = {
+    private static var states: [String: SpaceState] = {
         guard let data = try? Data(contentsOf: file) else { return [:] }
-        return (try? JSONDecoder().decode([String: ProjectState].self, from: data)) ?? [:]
+        return (try? JSONDecoder().decode([String: SpaceState].self, from: data)) ?? [:]
     }()
 
-    /// nil for projects that were never opened before.
-    static func state(for root: URL) -> ProjectState? {
+    /// nil for spaces that were never opened before.
+    static func state(for root: URL) -> SpaceState? {
         states[root.path]
     }
 
-    static func save(_ state: ProjectState, for root: URL) {
+    static func save(_ state: SpaceState, for root: URL) {
         states[root.path] = state
+        write()
+    }
+
+    /// Carries the state over when a space folder is renamed.
+    static func move(from old: URL, to new: URL) {
+        states[new.path] = states.removeValue(forKey: old.path)
+        write()
+    }
+
+    private static func write() {
         guard let data = try? JSONEncoder().encode(states) else { return }
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: file, options: .atomic)

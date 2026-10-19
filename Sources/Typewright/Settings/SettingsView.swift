@@ -22,6 +22,7 @@ final class SettingsWindowController: NSWindowController {
         }
         tabs.addTabViewItem(tab("General", "gearshape", GeneralSettings()))
         tabs.addTabViewItem(tab("Editor", "textformat", EditorSettings()))
+        tabs.addTabViewItem(tab("Fonts", "character.textbox", FontSettings()))
 
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
@@ -41,10 +42,18 @@ final class SettingsWindowController: NSWindowController {
 
 struct GeneralSettings: View {
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
+    @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @Bindable private var compilers = CompilerManager.shared
 
     var body: some View {
         Form {
+            Section("Appearance") {
+                Picker("Theme", selection: $appearance) {
+                    ForEach(Appearance.allCases) { Text($0.title).tag($0.rawValue) }
+                }
+                .onChange(of: appearance) { _, v in Appearance.apply(v) }
+            }
+
             Section("Diagnostics") {
                 Toggle("Ignore library warnings", isOn: $ignoreLibraryWarnings)
                 Text("Hide warnings from imported packages (e.g. @preview/…). Errors are always shown.")
@@ -145,5 +154,116 @@ struct EditorSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct FontSettings: View {
+    @Bindable private var fonts = FontLibrary.shared
+    @State private var query = ""
+
+    private var results: [FontLibrary.GoogleFont] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return [] }
+        let matches = fonts.catalog.filter { $0.family.localizedCaseInsensitiveContains(q) }
+        // Families starting with the query first, then the rest in catalog (popularity) order.
+        let prefixed = matches.filter { $0.family.lowercased().hasPrefix(q.lowercased()) }
+        return Array((prefixed + matches.filter { !prefixed.contains($0) }).prefix(40))
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(fonts.spacePaths.indices, id: \.self) { i in
+                    HStack {
+                        TextField("Folder", text: $fonts.spacePaths[i], prompt: Text("./fonts"))
+                            .labelsHidden()
+                        removeButton { fonts.spacePaths.remove(at: i) }
+                    }
+                }
+                Button("Add Folder") { fonts.spacePaths.append("./") }
+            } header: {
+                Text("Space Fonts")
+            } footer: {
+                Text("Folders inside each space, relative to its root. Their fonts are only used by that space.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                ForEach(fonts.machinePaths.indices, id: \.self) { i in
+                    HStack {
+                        Text(fonts.machinePaths[i].replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        removeButton { fonts.machinePaths.remove(at: i) }
+                    }
+                }
+                Button("Add Folder…") { chooseMachineFolder() }
+            } header: {
+                Text("Machine Fonts")
+            } footer: {
+                Text("Folders every space searches for fonts.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                ForEach(fonts.installed, id: \.self) { family in
+                    HStack {
+                        Text(family)
+                        Spacer()
+                        removeButton { fonts.remove(family) }
+                    }
+                }
+                TextField("Search", text: $query, prompt: Text("Search Google Fonts"))
+                ForEach(results) { font in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(font.family)
+                            if let category = font.category {
+                                Text(category).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if let progress = fonts.downloads[font.family] {
+                            ProgressView(value: progress).frame(width: 100)
+                        } else if fonts.installed.contains(font.family) {
+                            Text("Downloaded").foregroundStyle(.secondary)
+                        } else {
+                            Button { Task { await fonts.download(font.family) } } label: {
+                                Label("Download", systemImage: "arrow.down.circle")
+                            }
+                        }
+                    }
+                }
+            } header: {
+                Text("Google Fonts")
+            } footer: {
+                if let error = fonts.lastError {
+                    Text(error).foregroundStyle(.red)
+                } else {
+                    Text("Kept inside Typewright and available to every space, without installing them on your Mac.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .task { await fonts.loadCatalog() }
+    }
+
+    private func removeButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: "minus.circle.fill") }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Remove")
+    }
+
+    private func chooseMachineFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        fonts.machinePaths += panel.urls.map(\.path).filter { !fonts.machinePaths.contains($0) }
     }
 }

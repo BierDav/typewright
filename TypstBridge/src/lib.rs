@@ -3,24 +3,25 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use parking_lot::Mutex;
 use serde::Serialize;
 use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic, Warned};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, Lines, RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook};
+use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World, WorldExt};
 use typst_html::{HtmlDocument, HtmlOptions};
 use typst_kit::datetime::Time;
 use typst_kit::downloader::SystemDownloader;
 use typst_kit::files::FsRoot;
-use typst_kit::fonts::FontStore;
+use typst_kit::fonts::{FontPath, FontStore};
 use typst_kit::packages::SystemPackages;
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
+use typst_svg::SvgOptions;
 
 /// Typst's deep recursion overflows the small stacks of GCD threads.
 const STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -29,12 +30,33 @@ const STACK_SIZE: usize = 64 * 1024 * 1024;
 static LIBRARY: LazyLock<LazyHash<Library>> =
     LazyLock::new(|| LazyHash::new(Library::builder().with_features([Feature::Html].into_iter().collect()).build()));
 
-static FONTS: LazyLock<FontStore> = LazyLock::new(|| {
-    let mut fonts = FontStore::new();
-    fonts.extend(typst_kit::fonts::system());
-    fonts.extend(typst_kit::fonts::embedded());
-    fonts
+/// System and embedded fonts, scanned once; every world's store repeats them after its own font folders.
+static BASE_FONTS: LazyLock<Vec<(BaseFont, FontInfo)>> = LazyLock::new(|| {
+    let system = typst_kit::fonts::system().map(|(path, info)| (BaseFont::Path(path.path, path.index), info));
+    let embedded = typst_kit::fonts::embedded().map(|(font, info)| (BaseFont::Embedded(font), info));
+    system.chain(embedded).collect()
 });
+
+/// Worlds without extra font folders share one store, so loaded fonts are shared too.
+static DEFAULT_FONTS: LazyLock<Arc<FontStore>> = LazyLock::new(|| Arc::new(font_store(Vec::new())));
+
+enum BaseFont {
+    Path(PathBuf, u32),
+    Embedded(Font),
+}
+
+/// Extra fonts come first so they win over system fonts with the same name, like `--font-path` in the CLI.
+fn font_store(extra: Vec<(FontPath, FontInfo)>) -> FontStore {
+    let mut fonts = FontStore::new();
+    fonts.extend(extra);
+    for (font, info) in BASE_FONTS.iter() {
+        match font {
+            BaseFont::Path(path, index) => fonts.push((FontPath { path: path.clone(), index: *index }, info.clone())),
+            BaseFont::Embedded(font) => fonts.push((font.clone(), info.clone())),
+        }
+    }
+    fonts
+}
 
 static PACKAGES: LazyLock<SystemPackages> =
     LazyLock::new(|| SystemPackages::new(SystemDownloader::new(concat!("typewright/", env!("CARGO_PKG_VERSION")))));
@@ -45,6 +67,11 @@ pub struct TWWorld {
     overlays: HashMap<FileId, String>,
     slots: Mutex<HashMap<FileId, Slot>>,
     time: Time,
+    fonts: Arc<FontStore>,
+    /// The fonts found in the world's extra font folders, to skip rebuilding when nothing changed.
+    extra_fonts: Vec<(PathBuf, u32)>,
+    /// SVGs of the last compile's pages by layout hash, so unchanged pages aren't rendered again.
+    svg_pages: Mutex<HashMap<u128, Arc<str>>>,
 }
 
 /// Cached results for one file; `stale` keeps an old parse so edits are reparsed incrementally.
@@ -146,7 +173,29 @@ impl TWWorld {
             TWFormat::Html => finish(typst::compile::<HtmlDocument>(self), |doc| {
                 typst_html::html(doc, &HtmlOptions::default()).map(String::into_bytes)
             }),
+            TWFormat::Svg => finish(typst::compile::<PagedDocument>(self), |doc| Ok(self.svg(doc))),
         }
+    }
+
+    /// One SVG per page, separated by NUL bytes, which SVG text can't contain.
+    fn svg(&self, doc: &PagedDocument) -> Vec<u8> {
+        let mut cache = self.svg_pages.lock();
+        let mut next = HashMap::with_capacity(doc.pages().len());
+        let mut out = Vec::new();
+        for (i, page) in doc.pages().iter().enumerate() {
+            let hash = typst::utils::hash128(page);
+            let svg = cache
+                .remove(&hash)
+                .or_else(|| next.get(&hash).cloned())
+                .unwrap_or_else(|| Arc::from(typst_svg::svg(page, &SvgOptions::default())));
+            if i > 0 {
+                out.push(0);
+            }
+            out.extend_from_slice(svg.as_bytes());
+            next.insert(hash, svg);
+        }
+        *cache = next;
+        out
     }
 
     /// Path as typst's CLI prints it: relative to the root, or prefixed with the package spec.
@@ -198,7 +247,7 @@ impl World for TWWorld {
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        FONTS.book()
+        self.fonts.book()
     }
 
     fn main(&self) -> FileId {
@@ -228,7 +277,7 @@ impl World for TWWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        FONTS.font(index)
+        self.fonts.font(index)
     }
 
     fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
@@ -252,6 +301,7 @@ struct DiagnosticJSON {
 pub enum TWFormat {
     Pdf = 0,
     Html = 1,
+    Svg = 2,
 }
 
 #[repr(C)]
@@ -274,7 +324,7 @@ pub extern "C" fn tw_version() -> *const c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn tw_warm_up() {
     LazyLock::force(&LIBRARY);
-    LazyLock::force(&FONTS);
+    LazyLock::force(&DEFAULT_FONTS);
 }
 
 fn typst_version() -> &'static str {
@@ -298,7 +348,31 @@ pub unsafe extern "C" fn tw_world_new(root: *const c_char) -> *mut TWWorld {
         overlays: HashMap::new(),
         slots: Mutex::new(HashMap::new()),
         time: Time::system(),
+        fonts: DEFAULT_FONTS.clone(),
+        extra_fonts: Vec::new(),
+        svg_pages: Mutex::new(HashMap::new()),
     }))
+}
+
+/// Rescans the world's extra font folders; returns whether its fonts changed.
+///
+/// # Safety
+/// `world` must be valid and `paths` point to `count` valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_world_set_font_paths(world: *mut TWWorld, paths: *const *const c_char, count: usize) -> bool {
+    let world = unsafe { &mut *world };
+    let paths = if count == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(paths, count) } };
+    let extra: Vec<_> = paths
+        .iter()
+        .flat_map(|&path| typst_kit::fonts::scan(std::path::Path::new(unsafe { str(path) })))
+        .collect();
+    let found: Vec<_> = extra.iter().map(|(path, _)| (path.path.clone(), path.index)).collect();
+    if found == world.extra_fonts {
+        return false;
+    }
+    world.fonts = if extra.is_empty() { DEFAULT_FONTS.clone() } else { Arc::new(font_store(extra)) };
+    world.extra_fonts = found;
+    true
 }
 
 /// # Safety

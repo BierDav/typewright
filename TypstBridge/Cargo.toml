@@ -11,6 +11,7 @@ crate-type = ["staticlib"]
 typst = "=0.15.1"
 typst-pdf = "=0.15.1"
 typst-html = "=0.15.1"
+typst-svg = "=0.15.1"
 typst-layout = "=0.15.1"
 typst-kit = { version = "=0.15.1", features = ["embedded-fonts", "scan-fonts", "system-packages", "system-downloader", "datetime"] }
 parking_lot = "0.12"

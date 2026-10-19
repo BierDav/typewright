@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import Observation
 import WebKit
 
@@ -8,6 +9,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     /// Zoom chosen by the user; A4 pages additionally scale to fit the width.
     private(set) var zoom: CGFloat = 1
     private(set) var fit: CGFloat = 1
+    @ObservationIgnored private var zoomTimer: Timer?
     var effectiveZoom: CGFloat { zoom * (pages ? fit : 1) }
 
     var darkMode = UserDefaults.standard.object(forKey: "htmlDarkMode") as? Bool ?? true {
@@ -25,7 +27,18 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
         }
     }
 
-    @ObservationIgnored let view = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+    @ObservationIgnored let view: WKWebView
+    @ObservationIgnored private let fontHandler = FontSchemeHandler()
+    @ObservationIgnored private var fontCSS = ""
+
+    /// Folders whose fonts the page may use; WebKit only sees installed fonts on its own.
+    private(set) var fontDirectories: [URL] = []
+
+    /// Rescans even for the same folders, since fonts inside them may have been added or replaced.
+    func setFontDirectories(_ dirs: [URL]) {
+        fontDirectories = dirs
+        loadFonts()
+    }
 
     @ObservationIgnored private var loadedBase: URL?
     @ObservationIgnored private var isReady = false
@@ -36,7 +49,13 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     @ObservationIgnored nonisolated(unsafe) private var magnifyMonitor: Any?
 
     override init() {
+        let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(fontHandler, forURLScheme: FontSchemeHandler.scheme)
+        view = WKWebView(frame: .zero, configuration: config)
         super.init()
+        // Like the PDF preview, A4 sheets float on the pane's material.
+        view.setValue(false, forKey: "drawsBackground")
+        view.underPageBackgroundColor = .clear
         view.navigationDelegate = self
         view.postsFrameChangedNotifications = true
         applyAppearance()
@@ -49,7 +68,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             let handled = MainActor.assumeIsolated {
                 guard let self, event.window === self.view.window,
                       self.view.bounds.contains(self.view.convert(event.locationInWindow, from: nil)) else { return false }
-                self.setZoom(self.zoom * (1 + event.magnification))
+                self.setZoom(self.zoom * (1 + event.magnification), animated: false)
                 return true
             }
             return handled ? nil : event
@@ -78,9 +97,26 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     func zoomOut() { setZoom(zoom / 1.1) }
     func resetZoom() { setZoom(1) }
 
-    private func setZoom(_ value: CGFloat) {
+    private func setZoom(_ value: CGFloat, animated: Bool = true) {
+        let start = view.pageZoom
         zoom = min(max(value, 0.25), 5)
-        view.pageZoom = effectiveZoom
+        guard animated, abs(effectiveZoom - start) > 0.001 else {
+            zoomTimer?.invalidate()
+            view.pageZoom = effectiveZoom
+            return
+        }
+        // Each step reflows the page, so this runs at a lower rate than the PDF zoom.
+        zoomTimer?.invalidate()
+        let began = CACurrentMediaTime()
+        zoomTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { return timer.invalidate() }
+                let t = min((CACurrentMediaTime() - began) / 0.2, 1)
+                let target = self.effectiveZoom
+                self.view.pageZoom = start * pow(target / start, 1 - pow(1 - t, 3))
+                if t >= 1 { timer.invalidate() }
+            }
+        }
     }
 
     /// A4 is 210mm = 794 CSS px; the sheet spans the full width.
@@ -107,6 +143,28 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
         }
     }
 
+    // MARK: - Fonts
+
+    private func loadFonts() {
+        let dirs = fontDirectories
+        Task {
+            let faces = await Task.detached { FontFace.scan(dirs) }.value
+            guard dirs == fontDirectories else { return }
+            fontHandler.files = faces.map(\.url)
+            fontCSS = faces.enumerated().map { i, face in
+                let family = face.family.replacingOccurrences(of: "\"", with: "\\\"")
+                return "@font-face { font-family: \"\(family)\"; src: url(\"\(FontSchemeHandler.scheme):///\(i)\"); "
+                    + "font-weight: \(face.weight); font-style: \(face.italic ? "italic" : "normal"); }"
+            }.joined(separator: "\n")
+            applyFonts()
+        }
+    }
+
+    private func applyFonts() {
+        guard isReady else { return }
+        view.callAsyncJavaScript("tw.setFonts(css)", arguments: ["css": fontCSS], in: nil, in: .page)
+    }
+
     // MARK: - Page
 
     private var shell: String {
@@ -117,10 +175,12 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     // Typst frames (math, figures) are SVGs with black ink, so they get inverted in dark mode.
     private static let style = """
         :root { color-scheme: light dark; }
-        body { margin: 0; padding: 24px 28px 88px; font: 16px/1.55 -apple-system, sans-serif; }
+        body { margin: 0; padding: 0 28px 88px; font: 16px/1.55 -apple-system, sans-serif; }
         :root:not(.tw-paged) body > * { max-width: 46em; margin-left: auto; margin-right: auto; }
         img, svg { max-width: 100%; }
-        .tw-paged body { padding: 18px 0 88px; background: color-mix(in srgb, CanvasText 7%, Canvas); }
+        :root:not(.tw-paged) { background: Canvas; }
+        .tw-paged body { padding: 0 0 88px; background: transparent; }
+        body > :first-child { margin-top: 0; }
         .tw-pages { display: flex; flex-direction: column; align-items: center; gap: 18px; }
         .tw-page {
           box-sizing: border-box; width: 210mm; min-height: 297mm; padding: 25mm;
@@ -135,6 +195,16 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     private static let script = """
         window.tw = {
           nodes: [], sources: [], head: [], headSource: null, pages: false, wrap: null,
+
+          setFonts(css) {
+            let style = document.getElementById('tw-fonts');
+            if (!style) {
+              style = document.createElement('style');
+              style.id = 'tw-fonts';
+              document.head.append(style);
+            }
+            style.textContent = css;
+          },
 
           update(html) {
             const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -225,6 +295,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isReady = true
         updateFit()
+        applyFonts()
         send()
     }
 
@@ -241,4 +312,65 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
         NSWorkspace.shared.open(url)
         return .cancel
     }
+}
+
+/// One face of a font file, described for `@font-face`.
+private struct FontFace: Sendable {
+    let url: URL
+    let family: String
+    let weight: Int
+    let italic: Bool
+
+    private static let extensions: Set<String> = ["ttf", "otf", "ttc", "otc", "woff", "woff2"]
+
+    static func scan(_ dirs: [URL]) -> [FontFace] {
+        dirs.flatMap { dir -> [FontFace] in
+            let files = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }
+                .filter { extensions.contains($0.pathExtension.lowercased()) } ?? []
+            return files.flatMap { url -> [FontFace] in
+                let descriptors = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor] ?? []
+                return descriptors.compactMap { face(url, $0) }
+            }
+        }
+    }
+
+    private static func face(_ url: URL, _ descriptor: CTFontDescriptor) -> FontFace? {
+        guard let family = CTFontDescriptorCopyAttribute(descriptor, kCTFontFamilyNameAttribute) as? String else { return nil }
+        let traits = CTFontDescriptorCopyAttribute(descriptor, kCTFontTraitsAttribute) as? [CFString: Any] ?? [:]
+        let weight = (traits[kCTFontWeightTrait] as? Double) ?? 0
+        let symbolic = (traits[kCTFontSymbolicTrait] as? UInt32) ?? 0
+        return FontFace(url: url, family: family, weight: cssWeight(weight),
+                        italic: symbolic & CTFontSymbolicTraits.traitItalic.rawValue != 0)
+    }
+
+    /// Core Text weights run from -1 to 1; CSS uses 100 to 900.
+    private static func cssWeight(_ value: Double) -> Int {
+        let steps: [(Double, Int)] = [(-0.8, 100), (-0.6, 200), (-0.4, 300), (0, 400), (0.23, 500),
+                                      (0.3, 600), (0.4, 700), (0.56, 800), (0.62, 900)]
+        return steps.min { abs($0.0 - value) < abs($1.0 - value) }!.1
+    }
+}
+
+/// Serves `twfont:///<index>` from the scanned font files, which the page can't read from disk itself.
+private final class FontSchemeHandler: NSObject, WKURLSchemeHandler {
+    static let scheme = "twfont"
+    var files: [URL] = []
+
+    func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
+        guard let url = task.request.url, let index = Int(url.lastPathComponent), files.indices.contains(index),
+              let data = try? Data(contentsOf: files[index]) else {
+            return task.didFailWithError(URLError(.fileDoesNotExist))
+        }
+        // Fonts are fetched cross-origin from the file: page.
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [
+            "Content-Type": "font/\(files[index].pathExtension.lowercased())",
+            "Access-Control-Allow-Origin": "*",
+        ])!
+        task.didReceive(response)
+        task.didReceive(data)
+        task.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop task: any WKURLSchemeTask) {}
 }
