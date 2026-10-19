@@ -24,4 +24,4 @@ Open `Typewright.xcodeproj` in Xcode and run the `Typewright` scheme.
 
 ## License
 
-MIT
+[Apache License 2.0](LICENSE)
