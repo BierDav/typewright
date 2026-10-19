@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        type: choice
+        options: [alpha, rc, stable]
+        default: alpha
+      major:
+        description: Major release (breaking changes)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: version
+        run: echo "version=$(scripts/next-version.sh '${{ inputs.channel }}' '${{ inputs.major }}')" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: xcodebuild -project Typewright.xcodeproj -scheme Typewright -derivedDataPath .build CODE_SIGN_IDENTITY=- test
+
+      - name: Build
+        id: build
+        run: echo "sha=$(scripts/build-app.sh '${{ steps.version.outputs.version }}' '${{ github.run_number }}' | tail -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          flags=(--generate-notes --target "$GITHUB_SHA")
+          [ "${{ inputs.channel }}" != "stable" ] && flags+=(--prerelease)
+          gh release create "v$VERSION" "dist/Typewright-$VERSION.zip" --title "Typewright $VERSION" "${flags[@]}"
+
+      - name: Update Homebrew tap
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ steps.build.outputs.sha }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$TAP_DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:BierDav/homebrew-tap.git tap
+          mkdir -p tap/Casks
+          if [ "${{ inputs.channel }}" = "stable" ]; then
+            scripts/cask.sh typewright "$VERSION" "$SHA" typewright@beta > tap/Casks/typewright.rb
+          fi
+          # The beta cask always tracks the newest build of any channel.
+          scripts/cask.sh typewright@beta "$VERSION" "$SHA" typewright > tap/Casks/typewright@beta.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks
+          git commit -m "typewright $VERSION"
+          git push
