@@ -29,6 +29,7 @@ struct CodeEditor: NSViewRepresentable {
     let documentID: Int
     let text: String
     let fontSize: CGFloat
+    let highlights: Bool
     let diagnostics: [Diagnostic]
     let reveal: RevealRequest?
     /// Restored when a new document is shown.
@@ -89,6 +90,7 @@ struct CodeEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
         c.onChange = onChange
+        c.highlights = highlights
         c.onStateChange = onStateChange
         guard let tv = c.textView else { return }
 
@@ -111,7 +113,7 @@ struct CodeEditor: NSViewRepresentable {
                     c.isRestoring = false
                 }
             }
-            if let storage = tv.textStorage { Highlighter.apply(to: storage, font: font) }
+            if let storage = tv.textStorage { c.style(storage) }
         }
 
         if c.diagnostics != diagnostics {
@@ -191,6 +193,7 @@ struct CodeEditor: NSViewRepresentable {
         weak var ruler: NSRulerView?
         var documentID = -1
         var font: NSFont?
+        var highlights = true
         var diagnostics: [Diagnostic] = []
         var reveal: RevealRequest?
         var onChange: (String) -> Void = { _ in }
@@ -211,8 +214,18 @@ struct CodeEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let tv = textView else { return }
-            if let storage = tv.textStorage, let font { Highlighter.apply(to: storage, font: font) }
+            if let storage = tv.textStorage { style(storage) }
             onChange(tv.string)
+        }
+
+        func style(_ storage: NSTextStorage) {
+            guard let font else { return }
+            if highlights {
+                Highlighter.apply(to: storage, font: font)
+            } else {
+                storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor],
+                                      range: NSRange(location: 0, length: storage.length))
+            }
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {

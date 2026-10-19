@@ -1,5 +1,6 @@
 import PDFKit
 import SwiftUI
+import WebKit
 
 struct PDFViewHost: NSViewRepresentable {
     let controller: PreviewController
@@ -8,6 +9,16 @@ struct PDFViewHost: NSViewRepresentable {
 
     // PDFView's fitting size changes with the document; don't let it drive layout.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: PDFView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 300, height: proposal.height ?? 300)
+    }
+}
+
+struct WebViewHost: NSViewRepresentable {
+    let controller: HTMLPreviewController
+    func makeNSView(context: Context) -> WKWebView { controller.view }
+    func updateNSView(_ view: WKWebView, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: WKWebView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 300, height: proposal.height ?? 300)
     }
 }
@@ -31,63 +42,80 @@ struct SidebarMaterial: NSViewRepresentable {
 
 struct PreviewPane: View {
     let workspace: Workspace
+    @State private var hovering = false
     private var preview: PreviewController { workspace.preview }
+    private var htmlPreview: HTMLPreviewController { workspace.htmlPreview }
     private var compilers: CompilerManager { .shared }
 
     var body: some View {
         ZStack {
-            PDFViewHost(controller: preview)
+            switch workspace.renderMode {
+            case .pdf: PDFViewHost(controller: preview)
+            case .html: WebViewHost(controller: htmlPreview)
+            }
             if compilers.activeBinary == nil {
                 SetupCompilerView()
             } else if workspace.previewFile == nil {
                 placeholder("No Typst file", "Create a .typ file to see a preview.")
-            } else if workspace.document == nil {
-                if workspace.isCompiling || workspace.diagnostics.isEmpty {
+            } else if !workspace.hasOutput {
+                if workspace.isCompiling || (workspace.diagnostics.isEmpty && workspace.failureLog == nil) {
                     ProgressView().controlSize(.small)
                 } else {
-                    placeholder("Compilation failed", "Fix the errors to see a preview.")
+                    placeholder("Compilation failed", workspace.failureLog ?? "Fix the errors to see a preview.")
                 }
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         .background(SidebarMaterial())
         // Overlay so the bar never drives the pane's size.
-        .overlay(alignment: .bottom) { bar }
+        .overlay(alignment: .bottom) {
+            FloatingBar(isVisible: hovering && compilers.activeBinary != nil && workspace.previewFile != nil) { bar }
+        }
+        .onHover { hovering = $0 }
         .onChange(of: workspace.document) { _, doc in preview.show(doc) }
-        .onAppear { preview.show(workspace.document) }
+        .onChange(of: workspace.html) { _, html in htmlPreview.show(html, baseURL: baseURL) }
+        .onAppear {
+            preview.show(workspace.document)
+            htmlPreview.show(workspace.html, baseURL: baseURL)
+        }
     }
 
+    private var baseURL: URL {
+        workspace.previewFile?.deletingLastPathComponent() ?? workspace.root
+    }
+
+    @ViewBuilder
     private var bar: some View {
-        HStack(spacing: 12) {
-            Button { preview.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
-                .help("Zoom out")
-            Text("\(Int((preview.scale * 100).rounded()))%")
-                .monospacedDigit()
-                .frame(minWidth: 38)
-            Button { preview.zoomIn() } label: { Image(systemName: "plus.magnifyingglass") }
-                .help("Zoom in")
-            Button { preview.fit() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
-                .help("Fit to width")
-            if preview.pageCount > 0 {
-                Divider().frame(height: 16)
-                Text("Page \(preview.page + 1) of \(preview.pageCount)").monospacedDigit()
-            }
-            Divider().frame(height: 16)
-            if workspace.isCompiling {
-                ProgressView().controlSize(.mini)
-            }
-            Button(action: exportPDF) { Image(systemName: "square.and.arrow.up") }
-                .help("Export PDF")
-                .disabled(workspace.document == nil)
+        switch workspace.renderMode {
+        case .pdf: PDFZoomControls(controller: preview).disabled(workspace.document == nil)
+        case .html: HTMLZoomControls(controller: htmlPreview).disabled(workspace.html == nil)
         }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 16)
-        .frame(height: 38)
+        if workspace.isCompiling {
+            ProgressView().controlSize(.mini)
+        }
+        Divider().frame(height: 16)
+        Menu {
+            Section("Render As") {
+                Picker("Render As", selection: Bindable(workspace).renderMode) {
+                    Text("PDF").tag(RenderMode.pdf)
+                    Text("HTML").tag(RenderMode.html)
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+                Group {
+                    Toggle("A4 Pages", isOn: Bindable(htmlPreview).pages)
+                    Toggle("Dark Mode", isOn: Bindable(htmlPreview).darkMode)
+                }
+                .disabled(workspace.renderMode != .html)
+            }
+            Divider()
+            Button("Export PDF…", action: exportPDF)
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .menuIndicator(.hidden)
         .fixedSize()
-        .glassEffect(.regular, in: .capsule)
-        .background(CursorArea())
-        .padding(.bottom, 14)
-        .opacity(workspace.document == nil ? 0 : 1)
+        .help("More")
     }
 
     private func placeholder(_ title: String, _ message: String) -> some View {
@@ -95,12 +123,88 @@ struct PreviewPane: View {
     }
 
     private func exportPDF() {
-        guard let doc = workspace.document else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = (workspace.previewFile?.deletingPathExtension().lastPathComponent ?? workspace.name) + ".pdf"
         panel.directoryURL = workspace.root
-        if panel.runModal() == .OK, let url = panel.url { doc.write(to: url) }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            guard let error = await workspace.exportPDF(to: url) else { return }
+            let alert = NSAlert()
+            alert.messageText = "Export failed"
+            alert.informativeText = error
+            alert.runModal()
+        }
+    }
+}
+
+/// Glass capsule pinned to the bottom of a preview, shown while the pointer is inside.
+struct FloatingBar<Content: View>: View {
+    let isVisible: Bool
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 12) { content }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 16)
+            .frame(height: 38)
+            .fixedSize()
+            .glassEffect(.regular, in: .capsule)
+            .background(CursorArea())
+            .padding(.bottom, 24)
+            .opacity(isVisible ? 1 : 0)
+            .allowsHitTesting(isVisible)
+            .animation(.easeOut(duration: 0.2), value: isVisible)
+    }
+}
+
+struct PDFZoomControls: View {
+    let controller: PreviewController
+
+    var body: some View {
+        let percent = "\(Int((controller.scale * 100).rounded()))%"
+        Button { controller.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
+            .help("Zoom out")
+        Button { controller.setAutoScales(true) } label: {
+            Text(controller.autoScales ? "Auto (\(percent))" : percent).monospacedDigit().frame(minWidth: 38)
+        }
+        .help(controller.autoScales ? "Fitting to width" : "Fit to width")
+        Button { controller.zoomIn() } label: { Image(systemName: "plus.magnifyingglass") }
+            .help("Zoom in")
+        if controller.pageCount > 0 {
+            Divider().frame(height: 16)
+            Text("Page \(controller.page + 1) of \(controller.pageCount)").monospacedDigit()
+        }
+    }
+}
+
+struct HTMLZoomControls: View {
+    let controller: HTMLPreviewController
+
+    var body: some View {
+        Button { controller.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
+            .help("Zoom out")
+        Button { controller.resetZoom() } label: {
+            Text("\(Int((controller.effectiveZoom * 100).rounded()))%").monospacedDigit().frame(minWidth: 38)
+        }
+        .help("Actual size")
+        Button { controller.zoomIn() } label: { Image(systemName: "plus.magnifyingglass") }
+            .help("Zoom in")
+    }
+}
+
+/// Full-width viewer for a PDF file in the project.
+struct PDFFileView: View {
+    let controller: PreviewController
+    @State private var hovering = false
+
+    var body: some View {
+        PDFViewHost(controller: controller)
+            .background(SidebarMaterial())
+            .overlay(alignment: .bottom) {
+                FloatingBar(isVisible: hovering) { PDFZoomControls(controller: controller) }
+            }
+            .onHover { hovering = $0 }
     }
 }
 

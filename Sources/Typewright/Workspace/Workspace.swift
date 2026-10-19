@@ -4,11 +4,11 @@ import PDFKit
 
 struct FileNode: Identifiable, Hashable {
     let url: URL
+    let kind: FileKind
     let children: [FileNode]?
     var id: URL { url }
     var name: String { url.lastPathComponent }
-    var isTypst: Bool { url.pathExtension == "typ" }
-    var isEditable: Bool { children == nil && Workspace.textExtensions.contains(url.pathExtension.lowercased()) }
+    var isTypst: Bool { kind == .typst }
 }
 
 struct RevealRequest: Equatable {
@@ -20,11 +20,10 @@ struct RevealRequest: Equatable {
 /// One open project folder: files, buffers, autosave and compilation.
 @MainActor @Observable
 final class Workspace {
-    nonisolated static let textExtensions: Set<String> = ["typ", "bib", "yml", "yaml", "toml", "txt", "csv", "json", "xml", "md", "svg"]
-
     let root: URL
     private(set) var tree: [FileNode] = []
     private(set) var selectedFile: URL?
+    private(set) var selectedKind: FileKind?
     private(set) var text = ""
     private(set) var revision = 0
     /// The file compiled for the preview; nil hides the preview.
@@ -34,18 +33,38 @@ final class Workspace {
     var expanded: Set<URL> = [] { didSet { schedulePersist() } }
     var reveal: RevealRequest?
 
+    var renderMode: RenderMode {
+        didSet {
+            UserDefaults.standard.set(renderMode.rawValue, forKey: "renderMode")
+            invalidateCompile()
+            scheduleCompile(delay: 0)
+        }
+    }
     private(set) var document: PDFDocument?
+    private(set) var html: String?
     private(set) var diagnostics: [Diagnostic] = []
+    /// Compiler output when compilation failed without diagnostics.
+    private(set) var failureLog: String?
     private(set) var isCompiling = false
     private(set) var lastDuration: TimeInterval?
 
     @ObservationIgnored let preview = PreviewController()
+    @ObservationIgnored let htmlPreview = HTMLPreviewController()
+    /// Shows a selected PDF file instead of the compiled document.
+    @ObservationIgnored let filePreview = PreviewController()
     private var buffers: [URL: String] = [:]
     private var dirty: Set<URL> = []
     private var compileTask: Task<Void, Never>?
+    /// Bumped when the previewed file or format changes, so in-flight results are dropped.
     private var generation = 0
+    private var outputCount = 0
+    private var compileRunning = false
+    private var compileQueued = false
     private let runner = TypstRunner()
+    private let exportRunner = TypstRunner()
     private let outputDir: URL
+    @ObservationIgnored private let shadow: ShadowRoot
+    @ObservationIgnored private var autosaveTask: Task<Void, Never>?
     @ObservationIgnored private var editorStates: [URL: EditorState] = [:]
     @ObservationIgnored private var previewStates: [URL: PreviewState] = [:]
     @ObservationIgnored private var persistTask: Task<Void, Never>?
@@ -58,6 +77,8 @@ final class Workspace {
         outputDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("Typewright-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+        shadow = ShadowRoot(root: root, in: outputDir)
+        renderMode = UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf
 
         let saved = ProjectStore.state(for: root)
         let state = saved ?? ProjectState()
@@ -83,6 +104,11 @@ final class Workspace {
         preview.pendingRestore = previewFile.flatMap { previewStates[$0] }
     }
 
+    /// Whether the compiled output for the current render mode is available.
+    var hasOutput: Bool {
+        renderMode == .pdf ? document != nil : html != nil
+    }
+
     var name: String { root.lastPathComponent }
 
     var wordCount: Int {
@@ -93,14 +119,24 @@ final class Workspace {
 
     func reloadTree() {
         tree = Self.scan(root, depth: 0)
+        // New, removed or renamed files must show up in the compile mirror too.
+        shadow.reset()
     }
 
     func select(_ url: URL) {
         guard url != selectedFile else { return }
+        let kind = FileKind(url: url)
+        guard kind.isOpenable else { return }
         flushSaves()
         selectedFile = url
-        text = buffers[url] ?? (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        buffers[url] = text
+        selectedKind = kind
+        if kind.isEditable {
+            text = buffers[url] ?? Self.read(url) ?? ""
+            buffers[url] = text
+        } else {
+            text = ""
+        }
+        if kind == .pdf { filePreview.show(PDFDocument(url: url), keepingPosition: false) }
         revision += 1
         schedulePersist()
     }
@@ -120,9 +156,12 @@ final class Workspace {
         capturePreviewState()
         previewFile = url
         document = nil
+        html = nil
+        failureLog = nil
         diagnostics = []
         lastDuration = nil
         preview.pendingRestore = url.flatMap { previewStates[$0] }
+        invalidateCompile()
         scheduleCompile(delay: 0)
         schedulePersist()
     }
@@ -176,11 +215,14 @@ final class Workspace {
         for url in buffers.keys where !dirty.contains(url) {
             buffers[url] = nil
         }
-        if let selected = selectedFile, !dirty.contains(selected),
-           let disk = try? String(contentsOf: selected, encoding: .utf8), disk != text {
+        if let selected = selectedFile, selectedKind?.isEditable == true, !dirty.contains(selected),
+           let disk = Self.read(selected), disk != text {
             text = disk
             buffers[selected] = disk
             revision += 1
+        }
+        if let selected = selectedFile, selectedKind == .pdf {
+            filePreview.show(PDFDocument(url: selected))
         }
         scheduleCompile(delay: 0)
     }
@@ -259,10 +301,24 @@ final class Workspace {
         text = newText
         buffers[url] = newText
         dirty.insert(url)
-        scheduleCompile(delay: 0.25)
+        scheduleAutosave()
+        // HTML skips layout, so it can keep up with every keystroke.
+        scheduleCompile(delay: renderMode == .html ? 0 : 0.25)
+    }
+
+    /// Edits only reach disk every 30 s and on file, window or app switches; compiles read the buffers.
+    private func scheduleAutosave() {
+        guard autosaveTask == nil else { return }
+        autosaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            self?.flushSaves()
+        }
     }
 
     func flushSaves() {
+        autosaveTask?.cancel()
+        autosaveTask = nil
         for url in dirty {
             try? buffers[url]?.write(to: url, atomically: true, encoding: .utf8)
         }
@@ -280,25 +336,70 @@ final class Workspace {
         }
     }
 
+    /// Never kills a running compile for a newer edit; one follow-up compile picks up everything typed meanwhile.
     private func compile() async {
-        flushSaves()
-        guard let main = previewFile, let binary = CompilerManager.shared.activeBinary else { return }
-        generation += 1
-        let current = generation
-        let output = outputDir.appendingPathComponent("preview-\(current).pdf")
-
-        runner.cancel()
+        guard !compileRunning else {
+            compileQueued = true
+            return
+        }
+        compileRunning = true
         isCompiling = true
-        let result = await runner.compile(binary: binary, main: main, root: root, output: output)
+        repeat {
+            compileQueued = false
+            await compileOnce()
+        } while compileQueued
+        compileRunning = false
+        isCompiling = false
+    }
+
+    private func invalidateCompile() {
+        generation += 1
+        runner.cancel()
+    }
+
+    /// Points the compile mirror at the current buffers and returns the main file and root to compile.
+    private func prepareMirror(main: URL) -> (main: URL, root: URL)? {
+        shadow.sync(buffers: buffers.filter { dirty.contains($0.key) }, main: main)
+        return shadow.url(for: main).map { ($0, shadow.shadow) }
+    }
+
+    private func compileOnce() async {
+        guard let previewFile, let binary = CompilerManager.shared.activeBinary,
+              let mirror = prepareMirror(main: previewFile) else { return }
+        let (main, root) = mirror
+        let current = generation
+        let mode = renderMode
+        outputCount += 1
+        let output = outputDir.appendingPathComponent("preview-\(outputCount).\(mode.rawValue)")
+
+        let result = await runner.compile(binary: binary, main: main, root: root, output: output, format: mode)
         try? FileManager.default.removeItem(at: output)
         guard current == generation else { return }
 
-        isCompiling = false
         diagnostics = result.diagnostics
         lastDuration = result.duration
-        if let pdf = result.pdf, let doc = PDFDocument(data: pdf) {
-            document = doc
+        failureLog = result.output == nil && result.diagnostics.isEmpty && !result.log.isEmpty ? result.log : nil
+        guard let data = result.output else { return }
+        switch mode {
+        case .pdf:
+            if let doc = PDFDocument(data: data) { document = doc }
+        case .html:
+            html = String(decoding: data, as: UTF8.self)
         }
+    }
+
+    /// Writes a PDF of the main file, compiling one if the preview isn't a PDF.
+    func exportPDF(to url: URL) async -> String? {
+        if renderMode == .pdf, let document, !isCompiling, !diagnostics.contains(where: { $0.severity == .error }) {
+            return document.write(to: url) ? nil : "Could not write \(url.lastPathComponent)."
+        }
+        guard let previewFile, let binary = CompilerManager.shared.activeBinary,
+              let mirror = prepareMirror(main: previewFile) else { return "No compiler available." }
+        let (main, root) = mirror
+        let result = await exportRunner.compile(binary: binary, main: main, root: root, output: url)
+        if result.output != nil { return nil }
+        let errors = result.diagnostics.filter { $0.severity == .error }
+        return errors.isEmpty ? result.log : errors.map { "\($0.path):\($0.line): \($0.message)" }.joined(separator: "\n")
     }
 
     func close() {
@@ -307,6 +408,7 @@ final class Workspace {
         persist()
         compileTask?.cancel()
         runner.cancel()
+        exportRunner.cancel()
         try? FileManager.default.removeItem(at: outputDir)
     }
 
@@ -316,6 +418,10 @@ final class Workspace {
         let main = root.appendingPathComponent("main.typ")
         if FileManager.default.fileExists(atPath: main.path) { return main }
         return Self.flatten(tree).first { $0.isTypst }?.url
+    }
+
+    private static func read(_ url: URL) -> String? {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? (try? String(contentsOf: url, encoding: .isoLatin1))
     }
 
     static func flatten(_ nodes: [FileNode]) -> [FileNode] {
@@ -331,7 +437,10 @@ final class Workspace {
         return items
             .map { url -> FileNode in
                 let isDir = (try? url.resourceValues(forKeys: Set(keys)).isDirectory) ?? false
-                return FileNode(url: url.standardizedFileURL, children: isDir ? scan(url, depth: depth + 1) : nil)
+                let url = url.standardizedFileURL
+                return isDir
+                    ? FileNode(url: url, kind: .folder, children: scan(url, depth: depth + 1))
+                    : FileNode(url: url, kind: FileKind(url: url), children: nil)
             }
             .sorted { a, b in
                 if (a.children == nil) != (b.children == nil) { return a.children != nil }

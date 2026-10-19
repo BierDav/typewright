@@ -17,6 +17,7 @@ final class ArrowAwarePDFView: PDFView {
 @MainActor @Observable
 final class PreviewController {
     private(set) var scale: CGFloat = 1
+    private(set) var autoScales = true
     private(set) var page = 0
     private(set) var pageCount = 0
 
@@ -31,10 +32,14 @@ final class PreviewController {
     }()
 
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    @ObservationIgnored private var defaultMargins = NSEdgeInsets()
+    @ObservationIgnored nonisolated(unsafe) private var magnifyMonitor: Any?
     /// Applied to the next document instead of keeping the current scroll position.
     @ObservationIgnored var pendingRestore: PreviewState?
 
     init() {
+        defaultMargins = view.pageBreakMargins
+        applyMargins(auto: true)
         let nc = NotificationCenter.default
         observers = [
             nc.addObserver(forName: .PDFViewScaleChanged, object: view, queue: .main) { [weak self] _ in
@@ -44,10 +49,24 @@ final class PreviewController {
                 MainActor.assumeIsolated { self?.sync() }
             },
         ]
+        // Pinching zooms manually, so it ends fit-to-width before PDFView handles it.
+        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .smartMagnify]) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, self.view.autoScales, event.window === self.view.window,
+                      self.view.bounds.contains(self.view.convert(event.locationInWindow, from: nil)) else { return }
+                self.view.autoScales = false
+                self.sync()
+            }
+            return event
+        }
     }
 
-    /// Swaps the document while keeping zoom and scroll position.
-    func show(_ document: PDFDocument?) {
+    deinit {
+        if let magnifyMonitor { NSEvent.removeMonitor(magnifyMonitor) }
+    }
+
+    /// Swaps the document, keeping zoom and scroll position unless told otherwise.
+    func show(_ document: PDFDocument?, keepingPosition: Bool = true) {
         guard let document, document !== view.document else { return }
         if let state = pendingRestore {
             pendingRestore = nil
@@ -58,7 +77,7 @@ final class PreviewController {
             sync()
             return
         }
-        guard view.document != nil, let scroll = view.documentView?.enclosingScrollView else {
+        guard keepingPosition, view.document != nil, let scroll = view.documentView?.enclosingScrollView else {
             view.document = document
             insetForToolbar()
             sync()
@@ -84,7 +103,7 @@ final class PreviewController {
         scroll.drawsBackground = false
         // Light knobs vanish over white pages in dark mode.
         scroll.scrollerKnobStyle = .dark
-        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 76, right: 0)
     }
 
     func state() -> PreviewState? {
@@ -102,12 +121,37 @@ final class PreviewController {
         sync()
     }
 
-    func zoomIn() { view.zoomIn(nil) }
-    func zoomOut() { view.zoomOut(nil) }
-    func fit() { view.autoScales = true }
+    func zoomIn() {
+        view.autoScales = false
+        view.zoomIn(nil)
+        sync()
+    }
+
+    func zoomOut() {
+        view.autoScales = false
+        view.zoomOut(nil)
+        sync()
+    }
+
+    func setAutoScales(_ on: Bool) {
+        applyMargins(auto: on)
+        view.autoScales = on
+        sync()
+    }
+
+    /// Fit-to-width pages span the full pane; zoomed pages keep PDFKit's side margins.
+    private func applyMargins(auto: Bool) {
+        var margins = defaultMargins
+        if auto { margins.left = 0; margins.right = 0 }
+        let current = view.pageBreakMargins
+        guard current.left != margins.left || current.right != margins.right else { return }
+        view.pageBreakMargins = margins
+    }
 
     private func sync() {
+        applyMargins(auto: view.autoScales)
         scale = view.scaleFactor
+        autoScales = view.autoScales
         pageCount = view.document?.pageCount ?? 0
         if let p = view.currentPage, let doc = view.document { page = doc.index(for: p) }
     }

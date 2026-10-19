@@ -122,8 +122,8 @@ struct SidebarView: View {
                     workspace.expanded.insert(node.url)
                 }
             }
-        } else if node.isEditable {
-            workspace.select(node.url)
+        } else if node.kind.isOpenable {
+            withAnimation(.smooth(duration: 0.3)) { workspace.select(node.url) }
         }
     }
 }
@@ -321,7 +321,7 @@ private struct FileRow: View {
     private static var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 10, style: .continuous) }
     private var isFolder: Bool { node.children != nil }
     /// Only the selected file's name is editable by clicking it.
-    private var canClickToRename: Bool { isSelected && node.isEditable && !isRenaming }
+    private var canClickToRename: Bool { isSelected && node.kind.isOpenable && !isRenaming }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -349,7 +349,7 @@ private struct FileRow: View {
         }
         .font(.system(size: 13))
         .foregroundStyle(isSelected ? .primary : .secondary)
-        .opacity(node.isEditable || isFolder ? 1 : 0.5)
+        .opacity(node.kind == .binary ? 0.5 : 1)
         .padding(.leading, 10 + CGFloat(depth) * 14)
         .padding(.trailing, 5)
         .frame(height: 34)
@@ -444,13 +444,17 @@ private struct FileRow: View {
     }
 
     private var icon: String {
-        if isFolder { return "folder" }
-        switch node.url.pathExtension.lowercased() {
-        case "typ": return "t.square"
-        case "png", "jpg", "jpeg", "gif", "svg", "webp": return "photo"
-        case "bib": return "books.vertical"
-        case "pdf": return "doc.richtext"
-        default: return "doc.text"
+        switch node.kind {
+        case .folder: return "folder"
+        case .typst: return "t.square"
+        case .pdf: return "doc.richtext"
+        case .font: return "textformat"
+        case .text, .binary:
+            switch node.url.pathExtension.lowercased() {
+            case "png", "jpg", "jpeg", "gif", "svg", "webp", "heic", "tiff": return "photo"
+            case "bib": return "books.vertical"
+            default: return node.kind == .text ? "doc.text" : "doc"
+            }
         }
     }
 }

@@ -1,8 +1,14 @@
 import Foundation
 
+enum RenderMode: String, CaseIterable {
+    case pdf, html
+}
+
 struct CompileResult {
-    let pdf: Data?
+    let output: Data?
     let diagnostics: [Diagnostic]
+    /// Raw stderr, for failures typst doesn't report as diagnostics.
+    let log: String
     let duration: TimeInterval
 }
 
@@ -11,7 +17,7 @@ final class TypstRunner: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
 
-    func compile(binary: URL, main: URL, root: URL, output: URL) async -> CompileResult {
+    func compile(binary: URL, main: URL, root: URL, output: URL, format: RenderMode = .pdf) async -> CompileResult {
         let start = Date()
         let proc = Process()
         proc.executableURL = binary
@@ -20,6 +26,8 @@ final class TypstRunner: @unchecked Sendable {
             "--root", root.path,
             "--diagnostic-format", "short",
         ]
+        // HTML export is experimental and gated behind a feature flag.
+        if format == .html { proc.arguments! += ["--format", "html", "--features", "html"] }
         proc.currentDirectoryURL = root
         let errPipe = Pipe()
         proc.standardError = errPipe
@@ -31,9 +39,10 @@ final class TypstRunner: @unchecked Sendable {
         try? FileManager.default.removeItem(at: output)
         do { try proc.run() } catch {
             return CompileResult(
-                pdf: nil,
+                output: nil,
                 diagnostics: [Diagnostic(path: main.lastPathComponent, line: 1, column: 1, severity: .error,
                                          message: "failed to launch typst: \(error.localizedDescription)")],
+                log: "",
                 duration: 0
             )
         }
@@ -46,8 +55,9 @@ final class TypstRunner: @unchecked Sendable {
 
         let ok = proc.terminationReason == .exit && proc.terminationStatus == 0
         return CompileResult(
-            pdf: ok ? try? Data(contentsOf: output) : nil,
+            output: ok ? try? Data(contentsOf: output) : nil,
             diagnostics: Diagnostic.parse(stderr),
+            log: stderr.trimmingCharacters(in: .whitespacesAndNewlines),
             duration: Date().timeIntervalSince(start)
         )
     }

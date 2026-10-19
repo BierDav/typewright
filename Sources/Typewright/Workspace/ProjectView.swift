@@ -43,6 +43,9 @@ struct ProjectView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             workspace.refreshFromDisk()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            workspace.flushSaves()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in
             workspace.flushSaves()
             workspace.persist()
@@ -58,12 +61,11 @@ struct ProjectView: View {
     private var content: some View {
         GeometryReader { geo in
             let total = geo.size.width
-            let editorW = workspace.previewFile == nil ? total : editorWidth(total)
+            let editorW = showsPreview ? editorWidth(total) : total
             HStack(spacing: 0) {
-                editor
-                    .overlay(alignment: .top) { topFade }
+                main
                     .frame(width: editorW)
-                if workspace.previewFile != nil {
+                if showsPreview {
                     HStack(spacing: 0) {
                         Divider()
                         PreviewPane(workspace: workspace)
@@ -74,13 +76,33 @@ struct ProjectView: View {
             }
             // Above both panes so the grab area reaches into the PDF side too.
             .overlay(alignment: .leading) {
-                if workspace.previewFile != nil {
+                if showsPreview {
                     dividerHandle(total).offset(x: editorW + 0.5 - Self.handleWidth / 2)
                 }
             }
             .clipped()
-            .animation(.smooth(duration: 0.3), value: workspace.previewFile == nil)
+            .animation(.smooth(duration: 0.3), value: showsPreview)
         }
+    }
+
+    /// Only Typst files get the split view; other files use the full width.
+    private var showsPreview: Bool {
+        workspace.previewFile != nil && (workspace.selectedKind == nil || workspace.selectedKind == .typst)
+    }
+
+    @ViewBuilder
+    private var main: some View {
+        Group {
+            switch workspace.selectedKind {
+            case .pdf?:
+                PDFFileView(controller: workspace.filePreview)
+            case .font?:
+                if let url = workspace.selectedFile { FontPreview(url: url) }
+            default:
+                editor.overlay(alignment: .top) { topFade }
+            }
+        }
+        .transition(.opacity)
     }
 
     private func editorWidth(_ total: CGFloat) -> CGFloat {
@@ -183,6 +205,7 @@ struct ProjectView: View {
                     documentID: workspace.revision,
                     text: workspace.text,
                     fontSize: fontSize,
+                    highlights: workspace.selectedKind == .typst,
                     diagnostics: fileDiagnostics,
                     reveal: workspace.reveal,
                     state: workspace.editorState(for: file),
