@@ -5,11 +5,14 @@ use std::ffi::{CStr, CString, c_char};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
+mod markdown;
+mod refactor;
+
 use parking_lot::Mutex;
 use serde::Serialize;
 use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic, Warned};
 use typst::foundations::{Bytes, Datetime, Duration};
-use typst::syntax::{FileId, Lines, RootedPath, Source, VirtualPath, VirtualRoot};
+use typst::syntax::{FileId, LinkedNode, Lines, RootedPath, Source, SyntaxKind, Tag, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World, WorldExt};
@@ -421,9 +424,15 @@ pub unsafe extern "C" fn tw_world_remove_overlay(world: *mut TWWorld, path: *con
 pub unsafe extern "C" fn tw_world_reset(world: *mut TWWorld) {
     let world = unsafe { &mut *world };
     let overlays = &world.overlays;
-    // Overlays and downloaded packages can't change on disk under us.
+    // Overlays and downloaded packages can't change on disk under us; local packages and failed downloads can.
     for (id, slot) in world.slots.get_mut().iter_mut() {
-        if matches!(id.root(), VirtualRoot::Project) && !overlays.contains_key(id) {
+        let on_disk = match id.root() {
+            VirtualRoot::Project => !overlays.contains_key(id),
+            VirtualRoot::Package(spec) => {
+                spec.namespace != "preview" || matches!(slot.source, Some(Err(_))) || matches!(slot.file, Some(Err(_)))
+            }
+        };
+        if on_disk {
             slot.invalidate();
         }
     }
@@ -459,4 +468,261 @@ pub unsafe extern "C" fn tw_result_free(result: TWResult) {
         drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(result.data, result.len)) });
     }
     drop(unsafe { CString::from_raw(result.diagnostics) });
+}
+
+// MARK: - Highlighting
+
+/// Token classes for the editor, typst's highlighting tags plus a few finer ones.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq)]
+enum HlTag {
+    Plain = 0,
+    Comment,
+    Punctuation,
+    Escape,
+    Strong,
+    Emph,
+    Link,
+    Raw,
+    Label,
+    Ref,
+    Heading,
+    ListMarker,
+    ListTerm,
+    MathDelimiter,
+    MathOperator,
+    Keyword,
+    Operator,
+    Number,
+    String,
+    Function,
+    Interpolated,
+    Error,
+    /// A named argument, dictionary key or closure parameter.
+    Param,
+    /// The unit of a numeric literal, like `mm` in `15mm`.
+    Unit,
+}
+
+const HL_BOLD: u32 = 1;
+const HL_ITALIC: u32 = 2;
+const HL_MATH: u32 = 4;
+
+fn hl_tag(tag: Tag) -> HlTag {
+    match tag {
+        Tag::Comment => HlTag::Comment,
+        Tag::Punctuation | Tag::MathGroupingParens => HlTag::Punctuation,
+        Tag::Escape => HlTag::Escape,
+        Tag::Strong => HlTag::Strong,
+        Tag::Emph => HlTag::Emph,
+        Tag::Link => HlTag::Link,
+        Tag::Raw => HlTag::Raw,
+        Tag::Label => HlTag::Label,
+        Tag::Ref => HlTag::Ref,
+        Tag::Heading => HlTag::Heading,
+        Tag::ListMarker => HlTag::ListMarker,
+        Tag::ListTerm => HlTag::ListTerm,
+        Tag::MathDelimiter => HlTag::MathDelimiter,
+        Tag::MathOperator => HlTag::MathOperator,
+        Tag::Keyword => HlTag::Keyword,
+        Tag::Operator => HlTag::Operator,
+        Tag::Number => HlTag::Number,
+        Tag::String => HlTag::String,
+        Tag::Function => HlTag::Function,
+        Tag::Interpolated => HlTag::Interpolated,
+        Tag::Error => HlTag::Error,
+    }
+}
+
+/// Names that typst's highlighter leaves plain: `top` in `(top: 1cm)` and `x` in `(x, y) => …`.
+fn is_param(node: &LinkedNode) -> bool {
+    if node.kind() != SyntaxKind::Ident {
+        return false;
+    }
+    match node.parent_kind() {
+        Some(SyntaxKind::Named) => node.prev_sibling().is_none(),
+        Some(SyntaxKind::Params) => true,
+        Some(SyntaxKind::Spread) => node.parent().and_then(|p| p.parent_kind()) == Some(SyntaxKind::Params),
+        _ => false,
+    }
+}
+
+/// The innermost tag around a leaf, with bold, italic and math inherited from its ancestors.
+fn classify(leaf: &LinkedNode) -> (HlTag, u32) {
+    let mut tag = None;
+    let mut flags = 0;
+    let mut node = Some(leaf.clone());
+    while let Some(n) = node {
+        if tag.is_none() {
+            tag = if is_param(&n) { Some(HlTag::Param) } else { typst::syntax::highlight(&n).map(hl_tag) };
+        }
+        match n.kind() {
+            SyntaxKind::Strong | SyntaxKind::Heading => flags |= HL_BOLD,
+            SyntaxKind::Emph => flags |= HL_ITALIC,
+            SyntaxKind::Equation => flags |= HL_MATH,
+            SyntaxKind::TermItem if tag == Some(HlTag::ListTerm) => flags |= HL_BOLD,
+            _ => {}
+        }
+        node = n.parent().cloned();
+    }
+    (tag.unwrap_or(HlTag::Plain), flags)
+}
+
+fn highlight_runs(text: &str, code: bool) -> Vec<u32> {
+    let root = if code { typst::syntax::parse_code(text) } else { typst::syntax::parse(text) };
+    let mut runs = Vec::new();
+    let mut offset = 0u32;
+    let mut push = |runs: &mut Vec<u32>, len: u32, tag: HlTag, flags: u32| {
+        if len > 0 && (tag != HlTag::Plain || flags != 0) {
+            // Neighbours with the same style merge into one run.
+            let n = runs.len();
+            let packed = tag as u32 | flags << 8;
+            if n >= 3 && runs[n - 1] == packed && runs[n - 3] + runs[n - 2] == offset {
+                runs[n - 2] += len;
+            } else {
+                runs.extend([offset, len, packed]);
+            }
+        }
+        offset += len;
+    };
+    fn walk(node: LinkedNode, f: &mut dyn FnMut(&LinkedNode)) {
+        if node.get().children().len() == 0 {
+            f(&node);
+        } else {
+            for child in node.children() {
+                walk(child, f);
+            }
+        }
+    }
+    walk(LinkedNode::new(&root), &mut |leaf| {
+        let text = leaf.get().leaf_text().as_str();
+        let (tag, flags) = classify(leaf);
+        if leaf.kind() == SyntaxKind::Numeric {
+            // `15mm` and `50%` show the magnitude and the unit apart.
+            let split = text.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%').len();
+            push(&mut runs, text[..split].encode_utf16().count() as u32, tag, flags);
+            push(&mut runs, text[split..].encode_utf16().count() as u32, HlTag::Unit, flags);
+        } else {
+            push(&mut runs, text.encode_utf16().count() as u32, tag, flags);
+        }
+    });
+    runs
+}
+
+/// Highlights `text` as markup, or as code when `code` is set. Returns `count` values, three per run:
+/// UTF-16 start, UTF-16 length and the tag, with style flags from bit 8 on. Free with `tw_highlight_free`.
+///
+/// # Safety
+/// `text` must point to `len` bytes of UTF-8 and `count` be valid for writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_highlight(text: *const u8, len: usize, code: bool, count: *mut usize) -> *mut u32 {
+    let bytes = if len == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(text, len) } };
+    let text = String::from_utf8_lossy(bytes);
+    let runs = highlight_runs(&text, code).into_boxed_slice();
+    unsafe { *count = runs.len() };
+    Box::into_raw(runs) as *mut u32
+}
+
+/// # Safety
+/// `runs` and `count` must come from one `tw_highlight` call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_highlight_free(runs: *mut u32, count: usize) {
+    drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(runs, count)) });
+}
+
+// MARK: - Packages
+
+fn obtain_package(spec: &str) -> Result<String, String> {
+    use std::str::FromStr;
+    use typst::syntax::package::{PackageSpec, VersionlessPackageSpec};
+    let spec = match PackageSpec::from_str(spec) {
+        Ok(spec) => spec,
+        // Without a version the newest one is fetched.
+        Err(_) => {
+            let versionless = VersionlessPackageSpec::from_str(spec).map_err(|e| e.to_string())?;
+            let version = PACKAGES.latest_version(&versionless).map_err(|e| e.to_string())?;
+            versionless.at(version)
+        }
+    };
+    PACKAGES.obtain(&spec).map_err(|e| e.to_string())?;
+    Ok(spec.to_string())
+}
+
+/// Downloads a package like `@preview/cetz:0.3.1` (or the newest `@preview/cetz`) into typst's package cache.
+/// Returns `ok:` and the full spec, or `error:` and a message; free with `tw_string_free`.
+///
+/// # Safety
+/// `spec` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_package_download(spec: *const c_char) -> *mut c_char {
+    let spec = unsafe { str(spec) }.trim();
+    let result = match obtain_package(spec) {
+        Ok(spec) => format!("ok:{spec}"),
+        Err(message) => format!("error:{message}"),
+    };
+    CString::new(result).unwrap_or_default().into_raw()
+}
+
+/// # Safety
+/// `string` must come from this library and not be freed twice.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_string_free(string: *mut c_char) {
+    drop(unsafe { CString::from_raw(string) });
+}
+
+// MARK: - Refactoring
+
+#[derive(serde::Deserialize)]
+struct RefactorRequest {
+    op: String,
+    text: String,
+    start: usize,
+    #[serde(default)]
+    length: usize,
+    #[serde(default)]
+    all: bool,
+    /// UTF-16 start of the scope to put an extracted function in.
+    scope: Option<usize>,
+}
+
+/// Runs a refactoring described by a JSON request; see the header. Free the result with `tw_string_free`.
+///
+/// # Safety
+/// `request` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_refactor(request: *const c_char) -> *mut c_char {
+    let response = match serde_json::from_str::<RefactorRequest>(unsafe { str(request) }) {
+        Ok(r) => {
+            let taken = |name: &str| LIBRARY.global.scope().get(name).is_some();
+            let response = match r.op.as_str() {
+                "candidates" => refactor::candidates(&r.text, r.start, r.length),
+                "extract" => refactor::extract(&r.text, r.start, r.length, r.all, taken),
+                "scopes" => refactor::function_scopes(&r.text, r.start, r.length),
+                "function" => refactor::extract_function(&r.text, r.start, r.length, r.scope, taken),
+                "symbol" => refactor::symbol(&r.text, r.start),
+                "usages" => refactor::usages(&r.text, r.start),
+                _ => refactor::inline(&r.text, r.start),
+            };
+            serde_json::to_string(&response).unwrap_or_default()
+        }
+        Err(e) => format!("{{\"error\":\"{e}\"}}"),
+    };
+    CString::new(response).unwrap_or_default().into_raw()
+}
+
+// MARK: - Markdown
+
+/// # Safety
+/// `text` must point to `len` bytes of UTF-8. Free the result with `tw_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_markdown_html(text: *const u8, len: usize) -> *mut c_char {
+    let bytes = if len == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(text, len) } };
+    let html = markdown::to_html(&String::from_utf8_lossy(bytes)).replace('\0', "");
+    CString::new(html).unwrap_or_default().into_raw()
+}
+
+/// Free the result with `tw_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn tw_markdown_code_css() -> *mut c_char {
+    CString::new(markdown::code_css()).unwrap_or_default().into_raw()
 }

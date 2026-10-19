@@ -56,16 +56,22 @@ struct PreviewPane: View {
     private var preview: PreviewController { workspace.preview }
     private var htmlPreview: HTMLPreviewController { workspace.htmlPreview }
     private var svgPreview: SVGPreviewController { workspace.svgPreview }
+    private var markdownPreview: HTMLPreviewController { workspace.markdownPreview }
     private var compilers: CompilerManager { .shared }
+    private var markdown: Bool { workspace.previewIsMarkdown }
 
     var body: some View {
         ZStack {
-            switch workspace.renderMode {
-            case .pdf: PDFViewHost(controller: preview)
-            case .html: WebViewHost(controller: htmlPreview)
-            case .svg: SVGViewHost(controller: svgPreview)
+            if markdown {
+                WebViewHost(controller: markdownPreview)
+            } else {
+                switch workspace.renderMode {
+                case .pdf: PDFViewHost(controller: preview)
+                case .html: WebViewHost(controller: htmlPreview)
+                case .svg: SVGViewHost(controller: svgPreview)
+                }
             }
-            if compilers.active == nil {
+            if compilers.active == nil && !markdown {
                 SetupCompilerView()
             } else if workspace.previewFile == nil {
                 placeholder("No Typst file", "Create a .typ file to see a preview.")
@@ -81,16 +87,18 @@ struct PreviewPane: View {
         .background(SidebarMaterial())
         // Overlay so the bar never drives the pane's size.
         .overlay(alignment: .bottom) {
-            FloatingBar(isVisible: hovering && compilers.active != nil && workspace.previewFile != nil) { bar }
+            FloatingBar(isVisible: hovering && (compilers.active != nil || markdown) && workspace.previewFile != nil) { bar }
         }
         .onHover { hovering = $0 }
         .onChange(of: workspace.document) { _, doc in preview.show(doc) }
         .onChange(of: workspace.html) { _, html in htmlPreview.show(html, baseURL: baseURL) }
         .onChange(of: workspace.svgPages) { _, pages in svgPreview.show(pages) }
+        .onChange(of: workspace.markdownHTML) { _, html in markdownPreview.show(html, baseURL: baseURL) }
         .onAppear {
             preview.show(workspace.document)
             htmlPreview.show(workspace.html, baseURL: baseURL)
             svgPreview.show(workspace.svgPages)
+            markdownPreview.show(workspace.markdownHTML, baseURL: baseURL)
         }
     }
 
@@ -100,6 +108,24 @@ struct PreviewPane: View {
 
     @ViewBuilder
     private var bar: some View {
+        if markdown {
+            HTMLZoomControls(controller: markdownPreview).disabled(workspace.markdownHTML == nil)
+            Divider().frame(height: 16)
+            Menu {
+                Toggle("Dark Mode", isOn: Bindable(markdownPreview).darkMode)
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More")
+        } else {
+            typstBar
+        }
+    }
+
+    @ViewBuilder
+    private var typstBar: some View {
         switch workspace.renderMode {
         case .pdf: PDFZoomControls(controller: preview).disabled(workspace.document == nil)
         case .html: HTMLZoomControls(controller: htmlPreview).disabled(workspace.html == nil)
@@ -215,18 +241,31 @@ struct SVGZoomControls: View {
     }
 }
 
+/// A4 pages zoom like the PDF preview; reflowing text changes the text size shared by all such previews.
 struct HTMLZoomControls: View {
     let controller: HTMLPreviewController
 
     var body: some View {
-        Button { controller.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
-            .help("Zoom out")
-        Button { controller.resetZoom() } label: {
-            Text("\(Int((controller.effectiveZoom * 100).rounded()))%").monospacedDigit().frame(minWidth: 38)
+        if controller.paged {
+            let percent = "\(Int((controller.effectiveScale * 100).rounded()))%"
+            Button { controller.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
+                .help("Zoom out")
+            Button { controller.resetZoom() } label: {
+                Text(controller.pageScale == nil ? "Auto (\(percent))" : percent).monospacedDigit().frame(minWidth: 38)
+            }
+            .help(controller.pageScale == nil ? "Fitting to width" : "Fit to width")
+            Button { controller.zoomIn() } label: { Image(systemName: "plus.magnifyingglass") }
+                .help("Zoom in")
+        } else {
+            Button { controller.zoomOut() } label: { Image(systemName: "textformat.size.smaller") }
+                .help("Smaller text")
+            Button { controller.resetZoom() } label: {
+                Text("\(Int(controller.textSize.rounded())) px").monospacedDigit().frame(minWidth: 38)
+            }
+            .help("Standard text size")
+            Button { controller.zoomIn() } label: { Image(systemName: "textformat.size.larger") }
+                .help("Larger text")
         }
-        .help("Actual size")
-        Button { controller.zoomIn() } label: { Image(systemName: "plus.magnifyingglass") }
-            .help("Zoom in")
     }
 }
 

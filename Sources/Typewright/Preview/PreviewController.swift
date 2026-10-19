@@ -36,6 +36,8 @@ final class PreviewController {
     @ObservationIgnored nonisolated(unsafe) private var magnifyMonitor: Any?
     /// Applied to the next document instead of keeping the current scroll position.
     @ObservationIgnored var pendingRestore: PreviewState?
+    /// Like `pendingRestore`, as a position shared with the other previews.
+    @ObservationIgnored var pendingPosition: DocumentPosition?
     @ObservationIgnored private var zoomTimer: Timer?
 
     init() {
@@ -69,6 +71,10 @@ final class PreviewController {
     /// Swaps the document, keeping zoom and scroll position unless told otherwise.
     func show(_ document: PDFDocument?, keepingPosition: Bool = true) {
         guard let document, document !== view.document else { return }
+        if pendingRestore == nil, let position = pendingPosition {
+            pendingPosition = nil
+            pendingRestore = Self.state(for: position, in: document)
+        }
         if let state = pendingRestore {
             pendingRestore = nil
             view.document = document
@@ -111,6 +117,22 @@ final class PreviewController {
         guard let doc = view.document, let dest = view.currentDestination, let page = dest.page else { return nil }
         return PreviewState(scale: view.autoScales ? nil : Double(view.scaleFactor),
                             page: doc.index(for: page), x: dest.point.x, y: dest.point.y)
+    }
+
+    /// The top of the view as a page position, which the SVG and A4 HTML previews understand too.
+    func position() -> DocumentPosition? {
+        guard let doc = view.document, let dest = view.currentDestination, let page = dest.page else { return nil }
+        let bounds = page.bounds(for: view.displayBox)
+        let fraction = bounds.height > 0 ? min(max((bounds.maxY - dest.point.y) / bounds.height, 0), 1) : 0
+        return DocumentPosition(page: Double(doc.index(for: page)) + fraction,
+                                zoom: view.autoScales ? nil : Double(view.scaleFactor))
+    }
+
+    private static func state(for position: DocumentPosition, in doc: PDFDocument) -> PreviewState {
+        let index = min(max(Int(position.page), 0), max(doc.pageCount - 1, 0))
+        let bounds = doc.page(at: index)?.bounds(for: .cropBox) ?? .zero
+        let fraction = position.page - Double(index)
+        return PreviewState(scale: position.zoom, page: index, x: bounds.minX, y: bounds.maxY - fraction * bounds.height)
     }
 
     private func restore(_ state: PreviewState) {

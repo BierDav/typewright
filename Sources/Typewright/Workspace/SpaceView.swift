@@ -76,9 +76,11 @@ struct SpaceView: View {
         }
     }
 
-    /// Only Typst files get the split view; other files use the full width.
+    /// Only Typst and Markdown files get the split view; other files use the full width.
     private var showsPreview: Bool {
-        workspace.previewFile != nil && (workspace.selectedKind == nil || workspace.selectedKind == .typst)
+        guard workspace.previewFile != nil else { return false }
+        guard let file = workspace.selectedFile, let kind = workspace.selectedKind else { return true }
+        return kind == .typst || MarkdownRenderer.isMarkdown(file)
     }
 
     @ViewBuilder
@@ -87,6 +89,8 @@ struct SpaceView: View {
             switch workspace.selectedKind {
             case .pdf?:
                 PDFFileView(controller: workspace.filePreview)
+            case .image?:
+                ImageFileView(controller: workspace.imagePreview)
             case .document?:
                 if let url = workspace.selectedFile { DocumentPreview(url: url).id(workspace.revision) }
             case .font?:
@@ -194,6 +198,7 @@ struct SpaceView: View {
                     glidingCursor: glidingCursor,
                     find: workspace.selectedKind?.isEditable == true ? workspace.find : nil,
                     highlights: workspace.selectedKind == .typst,
+                    markdown: workspace.selectedFile.map(MarkdownRenderer.isMarkdown) ?? false,
                     diagnostics: fileDiagnostics,
                     reveal: workspace.reveal,
                     state: workspace.editorState(for: file),

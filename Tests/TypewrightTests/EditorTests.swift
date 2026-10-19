@@ -91,4 +91,117 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(CommandPalette.score("nfs", "new file in sub"), 4)
         XCTAssertNil(CommandPalette.score("xyz", "new file"))
     }
+    func testFindsHexWithoutHash() {
+        let text = "#set page(fill: rgb(\"DDD3C4\"))"
+        let found = ColorLiteral.find(in: text)
+        XCTAssertEqual(found.count, 1)
+        XCTAssertEqual(found[0].format, .hex(uppercase: true, alpha: false, hash: false))
+        let color = NSColor(srgbRed: 1, green: 0.5, blue: 0, alpha: 1)
+        XCTAssertEqual(ColorLiteral.source(for: color, format: found[0].format), "rgb(\"FF8000\")")
+    }
+
+    func testHighlightsParametersNumbersAndUnits() {
+        let text = "#set page(margin: (top: 15mm, right: right-m), columns: 2)"
+        let runs = Highlighter.runs(in: text)
+        func tag(of token: String) -> Highlighter.Tag? {
+            let r = (text as NSString).range(of: token)
+            return runs.first { NSLocationInRange(r.location, $0.range) }?.tag
+        }
+        XCTAssertEqual(tag(of: "set"), .keyword)
+        XCTAssertEqual(tag(of: "page"), .function)
+        XCTAssertEqual(tag(of: "margin"), .param)
+        XCTAssertEqual(tag(of: "top"), .param)
+        XCTAssertEqual(tag(of: "15"), .number)
+        XCTAssertEqual(tag(of: "mm"), .unit)
+        XCTAssertNil(tag(of: "right-m"))
+        XCTAssertEqual(tag(of: "2"), .number)
+        let code = Highlighter.runs(in: "let x = \"a\" // c", code: true)
+        XCTAssertEqual(code.map(\.tag), [.keyword, .operator, .string, .comment])
+    }
+
+    func testHighlightsMarkup() {
+        let text = "= Title <intro>\nSee @intro and *bold* $x^2$"
+        let runs = Highlighter.runs(in: text)
+        func run(at token: String) -> Highlighter.Run? {
+            let r = (text as NSString).range(of: token)
+            return runs.first { NSLocationInRange(r.location, $0.range) }
+        }
+        XCTAssertEqual(run(at: "Title")?.tag, .heading)
+        XCTAssertEqual(run(at: "<intro>")?.tag, .label)
+        XCTAssertEqual(run(at: "@intro")?.tag, .ref)
+        XCTAssertEqual(run(at: "bold")?.bold, true)
+        XCTAssertEqual(run(at: "x^")?.math, true)
+        XCTAssertNil(run(at: "See"))
+    }
+
+    func testDuplicatesAndDeletesLines() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.string = "a\nbc\nd"
+        tv.setSelectedRange(NSRange(location: 3, length: 0))
+        tv.duplicateLine()
+        XCTAssertEqual(tv.string, "a\nbc\nbc\nd")
+        XCTAssertEqual(tv.selectedRange().location, 6)
+        tv.deleteLine()
+        XCTAssertEqual(tv.string, "a\nbc\nd")
+        XCTAssertEqual(tv.selectedRange().location, 6)
+        tv.deleteLine()
+        XCTAssertEqual(tv.string, "a\nbc")
+        XCTAssertEqual(tv.selectedRange().location, 3)
+        tv.setSelectedRange(NSRange(location: 0, length: 1))
+        tv.duplicateLine()
+        XCTAssertEqual(tv.string, "aa\nbc")
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 1))
+    }
+    func testExtractsAndInlinesVariables() {
+        let text = "#set page(margin: (top: 15mm, bottom: 15mm))"
+        let caret = NSRange(location: (text as NSString).range(of: "15mm").location + 1, length: 0)
+        let candidate = Refactor.candidates(in: text, selection: caret).candidates[0]
+        XCTAssertEqual(candidate.text, "15mm")
+        let extracted = Refactor.extract(in: text, range: candidate.range, all: true)
+        XCTAssertEqual(extracted.count, 2)
+        let out = TextEdit.apply(extracted.textEdits, to: text)
+        XCTAssertEqual(out, "#let margin-top = 15mm\n#set page(margin: (top: margin-top, bottom: margin-top))")
+        XCTAssertEqual(extracted.nameRanges.map { (out as NSString).substring(with: $0) }, Array(repeating: "margin-top", count: 3))
+        let inlined = Refactor.inline(in: out, at: 6)
+        XCTAssertEqual(TextEdit.apply(inlined.textEdits, to: out), text)
+        XCTAssertNotNil(Refactor.inline(in: "plain text", at: 2).error)
+    }
+    func testMovesLines() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.string = "a\nbc\nd"
+        tv.setSelectedRange(NSRange(location: 3, length: 0))
+        tv.moveLines(up: false)
+        XCTAssertEqual(tv.string, "a\nd\nbc")
+        XCTAssertEqual(tv.selectedRange().location, 5)
+        tv.moveLines(up: true)
+        tv.moveLines(up: true)
+        XCTAssertEqual(tv.string, "bc\na\nd")
+        XCTAssertEqual(tv.selectedRange().location, 1)
+        tv.string = "x\ny\nz\n"
+        tv.setSelectedRange(NSRange(location: 0, length: 4))
+        tv.moveLines(up: false)
+        XCTAssertEqual(tv.string, "z\nx\ny\n")
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 2, length: 4))
+    }
+    func testHighlightsMarkdown() {
+        let text = "# Title\n\nSome **bold** and `code` with [link](https://x.y).\n\n```typ\n#let a = 1\n```\n- item\n"
+        let storage = NSTextStorage(string: text)
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        MarkdownHighlighter.apply(to: storage, font: font)
+        func color(_ needle: String, offset: Int = 0) -> NSColor? {
+            storage.attribute(.foregroundColor, at: (text as NSString).range(of: needle).location + offset, effectiveRange: nil) as? NSColor
+        }
+        func isBold(_ needle: String) -> Bool {
+            let f = storage.attribute(.font, at: (text as NSString).range(of: needle).location, effectiveRange: nil) as? NSFont
+            return f?.fontDescriptor.symbolicTraits.contains(.bold) == true
+        }
+        XCTAssertEqual(color("Title"), Highlighter.keywordColor)
+        XCTAssertTrue(isBold("bold"))
+        XCTAssertEqual(color("`code`"), Highlighter.stringColor)
+        XCTAssertEqual(color("link"), .linkColor)
+        XCTAssertEqual(color("let"), Highlighter.keywordColor)
+        XCTAssertEqual(color("1\n```"), Highlighter.numberColor)
+        XCTAssertEqual(color("- item"), Highlighter.keywordColor)
+        XCTAssertEqual(color("Some"), .textColor)
+    }
 }

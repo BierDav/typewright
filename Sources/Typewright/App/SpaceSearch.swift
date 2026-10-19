@@ -323,7 +323,7 @@ struct SpaceSearchView: View {
         if let preview, let find = previewFind {
             VStack(spacing: 0) {
                 HStack(spacing: 6) {
-                    Image(systemName: preview.kind == .typst ? "t.square" : "doc").foregroundStyle(.secondary)
+                    Image(systemName: preview.kind == .typst ? "t.square" : MarkdownRenderer.isMarkdown(preview.url) ? "m.square" : "doc").foregroundStyle(.secondary)
                     Text(String(preview.url.path.dropFirst(preview.space.path.count + 1))).fontWeight(.medium)
                     if allSpaces { Text(preview.space.lastPathComponent).foregroundStyle(.tertiary) }
                     Spacer()
@@ -343,6 +343,7 @@ struct SpaceSearchView: View {
                     glidingCursor: glidingCursor,
                     find: find,
                     highlights: preview.kind == .typst,
+                    markdown: MarkdownRenderer.isMarkdown(preview.url),
                     diagnostics: previewDiagnostics(preview),
                     reveal: previewReveal,
                     state: nil,

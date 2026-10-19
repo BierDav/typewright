@@ -61,9 +61,9 @@ final class Opener {
         state.setSpacesOpen(!state.spacesOpen)
     }
 
-    func showPalette() {
+    func showPalette(page: String? = nil) {
         guard let state = keyState else { return }
-        state.overlay = state.overlay == .palette ? nil : .palette
+        state.overlay = state.overlay == .palette(page: page) ? nil : .palette(page: page)
     }
 
     /// Full text search in the space, or across all spaces from the space overview.

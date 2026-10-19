@@ -30,14 +30,14 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
     @ObservationIgnored let view: WKWebView
     @ObservationIgnored private var isReady = false
     @ObservationIgnored private let scrollReporter = ScrollReporter()
-    @ObservationIgnored private var scrollFraction = 0.0
+    @ObservationIgnored private var pagePosition = 0.0
     /// Scroll and zoom to apply once the next document is on screen.
-    @ObservationIgnored var pendingRestore: WebPreviewState? {
+    @ObservationIgnored var pendingRestore: DocumentPosition? {
         didSet { if pendingRestore != nil { restoreIfShown() } }
     }
 
-    func state() -> WebPreviewState {
-        WebPreviewState(scroll: scrollFraction, zoom: autoScales ? nil : Double(scale))
+    func position() -> DocumentPosition {
+        DocumentPosition(page: pagePosition, zoom: autoScales ? nil : Double(scale))
     }
 
     /// Applies the pending state when the pages it's meant for are already shown.
@@ -50,9 +50,10 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
         } else {
             autoScales = true
         }
-        scrollFraction = state.scroll
+        pagePosition = state.page
         view.callAsyncJavaScript("tw.setZoom(auto, scale, false); " + ScrollReporter.restoreScript,
-                                 arguments: ["auto": autoScales, "scale": scale, "fraction": state.scroll], in: nil, in: .page)
+                                 arguments: ["auto": autoScales, "scale": scale, "page": state.page, "fraction": 0],
+                                 in: nil, in: .page)
     }
     @ObservationIgnored private var pending: [String]?
     @ObservationIgnored private var sent: [String] = []
@@ -65,7 +66,7 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
         scrollReporter.install(in: config.userContentController)
         view = WKWebView(frame: .zero, configuration: config)
         super.init()
-        scrollReporter.onScroll = { [weak self] in self?.scrollFraction = $0 }
+        scrollReporter.onScroll = { [weak self] _, page in if let page { self?.pagePosition = page } }
         view.navigationDelegate = self
         // Pages float on the pane's material, like the PDF preview.
         view.setValue(false, forKey: "drawsBackground")
@@ -155,8 +156,10 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
         :root { color-scheme: light dark; }
         html, body { margin: 0; background: transparent; }
         body { padding: 0 0 88px; }
-        #pages { display: flex; flex-direction: column; align-items: center; gap: 12px; }
-        .page { background: white; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); line-height: 0; width: 100%; }
+        /* Auto margins center pages only while they fit; wider ones start at the left edge instead of overflowing past it. */
+        #pages { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+        .page { background: white; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); line-height: 0; width: 100%;
+          margin: 0 auto; flex-shrink: 0; }
         .page svg { display: block; width: 100%; height: auto; }
         .tw-animating .page { transition: width 0.22s cubic-bezier(0.33, 1, 0.68, 1); }
         /* Only the drawing is inverted, so the page shadow stays dark; images are turned back. */
@@ -185,14 +188,16 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
             this.scale = scale;
             if (!animated) return this.layout();
             // Keep the middle of the view on the same spot of the document while the pages resize.
-            const anchor = (scrollY + innerHeight / 2) / document.documentElement.scrollHeight;
-            document.documentElement.classList.add('tw-animating');
+            const root = document.documentElement;
+            const anchor = (scrollY + innerHeight / 2) / root.scrollHeight;
+            const anchorX = (scrollX + innerWidth / 2) / root.scrollWidth;
+            root.classList.add('tw-animating');
             this.layout();
             const end = performance.now() + 260;
             const follow = () => {
-              scrollTo(scrollX, anchor * document.documentElement.scrollHeight - innerHeight / 2);
+              scrollTo(anchorX * root.scrollWidth - innerWidth / 2, anchor * root.scrollHeight - innerHeight / 2);
               if (performance.now() < end) requestAnimationFrame(follow);
-              else document.documentElement.classList.remove('tw-animating');
+              else root.classList.remove('tw-animating');
             };
             requestAnimationFrame(follow);
           },
