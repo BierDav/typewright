@@ -204,4 +204,25 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(color("- item"), Highlighter.keywordColor)
         XCTAssertEqual(color("Some"), .textColor)
     }
+
+    func testHighlightsInjectedLanguages() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        func color(_ storage: NSTextStorage, _ needle: String) -> NSColor? {
+            storage.attribute(.foregroundColor, at: (storage.string as NSString).range(of: needle).location, effectiveRange: nil) as? NSColor
+        }
+        let typst = NSTextStorage(string: "Text\n```sql\nSELECT name FROM t -- c\n```\n```md\n# Head\n```\n```cobol\nMOVE\n```\n")
+        Highlighter.apply(to: typst, font: font)
+        XCTAssertEqual(color(typst, "SELECT"), Highlighter.keywordColor)
+        XCTAssertEqual(color(typst, "name"), .textColor)
+        XCTAssertEqual(color(typst, "-- c"), Highlighter.commentColor)
+        XCTAssertEqual(color(typst, "Head"), Highlighter.keywordColor)
+        XCTAssertEqual(color(typst, "MOVE"), Highlighter.stringColor)
+
+        let markdown = NSTextStorage(string: "```py\ndef f(): return 1\n```\n\n````typ\n```js\nlet x\n```\n````\n")
+        MarkdownHighlighter.apply(to: markdown, font: font)
+        XCTAssertEqual(color(markdown, "def"), Highlighter.keywordColor)
+        XCTAssertEqual(color(markdown, "f()"), Highlighter.functionColor)
+        XCTAssertEqual(color(markdown, "1\n"), Highlighter.numberColor)
+        XCTAssertEqual(color(markdown, "let"), Highlighter.keywordColor)
+    }
 }

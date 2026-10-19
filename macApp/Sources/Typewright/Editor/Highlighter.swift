@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TypewrightCore
 import TypstBridge
 
 /// Typst syntax colouring from typst's own parser, in IntelliJ's palette.
@@ -36,8 +37,7 @@ enum Highlighter {
     static let labelColor = color(0x9E880D, 0xB3AE60)
     static let commentColor = color(0x8C8C8C, 0x7A7E85)
     static let mathColor = color(0x0E7C86, 0x5FB8C2)
-
-    static func color(for tag: Tag) -> NSColor? { foreground(tag) }
+    static let typeColor = color(0x1F7A6B, 0x4EC9B0)
 
     private static func foreground(_ tag: Tag) -> NSColor? {
         switch tag {
@@ -88,15 +88,23 @@ enum Highlighter {
     }
 
     static func apply(to storage: NSTextStorage, font: NSFont, code: Bool = false) {
-        let full = NSRange(location: 0, length: storage.length)
+        storage.beginEditing()
+        apply(to: storage, range: NSRange(location: 0, length: storage.length), font: font, code: code, depth: 0)
+        storage.endEditing()
+    }
+
+    /// Highlights `range` as Typst; raw blocks with a known language tag get that language's colouring.
+    static func apply(to storage: NSTextStorage, range: NSRange, font: NSFont, code: Bool, depth: Int) {
         let fonts = NSFontManager.shared
         let bold = fonts.convert(font, toHaveTrait: .boldFontMask)
         let italic = fonts.convert(font, toHaveTrait: .italicFontMask)
         let boldItalic = fonts.convert(bold, toHaveTrait: .italicFontMask)
+        let ns = storage.string as NSString
+        let text = range.location == 0 && range.length == ns.length ? storage.string : ns.substring(with: range)
 
-        storage.beginEditing()
-        storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor], range: full)
-        for run in runs(in: storage.string, code: code) where NSMaxRange(run.range) <= full.length {
+        storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor], range: range)
+        for run in runs(in: text, code: code) where NSMaxRange(run.range) <= range.length {
+            let r = NSRange(location: range.location + run.range.location, length: run.range.length)
             var attrs: [NSAttributedString.Key: Any] = [:]
             let isItalic = run.italic || run.tag == .comment
             if run.bold || isItalic { attrs[.font] = run.bold && isItalic ? boldItalic : run.bold ? bold : italic }
@@ -106,8 +114,21 @@ enum Highlighter {
                 attrs[.foregroundColor] = mathColor
             }
             if run.tag == .link { attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue }
-            if !attrs.isEmpty { storage.addAttributes(attrs, range: run.range) }
+            if !attrs.isEmpty { storage.addAttributes(attrs, range: r) }
+            if run.tag == .raw, depth < InjectedLanguages.maxDepth { injectRaw(in: storage, run: r, font: font, depth: depth) }
         }
-        storage.endEditing()
+    }
+
+    /// Colours the body of a ```` ```lang ```` raw block in its language.
+    private static func injectRaw(in storage: NSTextStorage, run: NSRange, font: NSFont, depth: Int) {
+        let raw = (storage.string as NSString).substring(with: run)
+        guard raw.hasPrefix("```") else { return }
+        let parts = CodeHighlight.shared.rawBlock(raw: raw)
+        guard parts.size == 4 else { return }
+        let tag = (raw as NSString).substring(with: NSRange(location: Int(parts.get(index: 0)),
+                                                            length: Int(parts.get(index: 1) - parts.get(index: 0))))
+        guard let language = InjectedLanguages.language(tag) else { return }
+        let body = NSRange(location: run.location + Int(parts.get(index: 2)), length: Int(parts.get(index: 3) - parts.get(index: 2)))
+        InjectedLanguages.apply(language, to: storage, range: body, font: font, depth: depth + 1)
     }
 }

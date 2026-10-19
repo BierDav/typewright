@@ -1,12 +1,12 @@
 import AppKit
 
-/// Markdown colouring in the editor's palette; fenced Typst code gets Typst's own colouring.
+/// Markdown colouring in the editor's palette; fenced code gets its language's colouring.
 enum MarkdownHighlighter {
     private static func re(_ p: String, _ o: NSRegularExpression.Options = [.anchorsMatchLines]) -> NSRegularExpression {
         try! NSRegularExpression(pattern: p, options: o)
     }
 
-    private static let fence = re(#"^ {0,3}(`{3,}|~{3,})[ \t]*([\w+-]*)[^\n]*\n([\s\S]*?)(?:^ {0,3}\1[`~]*[ \t]*$|\z)"#)
+    private static let fence = re(#"^ {0,3}(`{3,}|~{3,})[ \t]*([\w+#.-]*)[^\n]*\n([\s\S]*?)(?:^ {0,3}\1[`~]*[ \t]*$|\z)"#)
     private static let frontMatter = re(#"\A---\n[\s\S]*?\n---[ \t]*$"#)
     private static let heading = re(#"^ {0,3}(#{1,6})(?:[ \t]+(.*))?$"#)
     private static let setext = re(#"^(?=.*\S).+\n {0,3}(=+|-+)[ \t]*$"#)
@@ -27,14 +27,19 @@ enum MarkdownHighlighter {
     private static let escape = re(#"\\[\\`*_{}\[\]()#+\-.!|<>~$]"#, [])
 
     static func apply(to storage: NSTextStorage, font: NSFont) {
+        storage.beginEditing()
+        apply(to: storage, range: NSRange(location: 0, length: storage.length), font: font, depth: 0)
+        storage.endEditing()
+    }
+
+    /// Highlights `range` alone; regexes treat its bounds as the text's start and end.
+    static func apply(to storage: NSTextStorage, range full: NSRange, font: NSFont, depth: Int) {
         let string = storage.string
         let ns = string as NSString
-        let full = NSRange(location: 0, length: ns.length)
         let fonts = NSFontManager.shared
         let bold = fonts.convert(font, toHaveTrait: .boldFontMask)
         let italic = fonts.convert(font, toHaveTrait: .italicFontMask)
 
-        storage.beginEditing()
         storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor], range: full)
 
         // Code blocks and front matter first; nothing inside them is Markdown.
@@ -46,15 +51,10 @@ enum MarkdownHighlighter {
         for m in fence.matches(in: string, range: full) where !protected.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) {
             storage.addAttributes([.foregroundColor: Highlighter.commentColor], range: m.range)
             let body = m.range(at: 3)
-            let language = m.range(at: 2).length > 0 ? ns.substring(with: m.range(at: 2)).lowercased() : ""
+            let tag = m.range(at: 2).length > 0 ? ns.substring(with: m.range(at: 2)) : ""
             if body.length > 0 {
-                if ["typ", "typst", "typc"].contains(language) {
-                    let code = ns.substring(with: body)
-                    storage.addAttributes([.foregroundColor: NSColor.textColor], range: body)
-                    for run in Highlighter.runs(in: code, code: language == "typc") where NSMaxRange(run.range) <= body.length {
-                        let r = NSRange(location: body.location + run.range.location, length: run.range.length)
-                        if let color = Highlighter.color(for: run.tag) { storage.addAttribute(.foregroundColor, value: color, range: r) }
-                    }
+                if depth < InjectedLanguages.maxDepth, let language = InjectedLanguages.language(tag) {
+                    InjectedLanguages.apply(language, to: storage, range: body, font: font, depth: depth + 1)
                 } else {
                     storage.addAttributes([.foregroundColor: Highlighter.stringColor], range: body)
                 }
@@ -115,6 +115,5 @@ enum MarkdownHighlighter {
                                    .strikethroughStyle: 0], range: m.range)
         }
         each(escape) { color($0.range, Highlighter.keywordColor) }
-        storage.endEditing()
     }
 }
