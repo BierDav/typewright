@@ -2,6 +2,15 @@ import AppKit
 import SwiftUI
 
 final class TypstTextView: NSTextView {
+    // NSTextView sets the I-beam on every move, even under floating controls.
+    override func mouseMoved(with event: NSEvent) {
+        if let cursor = CursorArea.cursor(for: event) { cursor.set() } else { super.mouseMoved(with: event) }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if let cursor = CursorArea.cursor(for: event) { cursor.set() } else { super.cursorUpdate(with: event) }
+    }
+
     override func insertTab(_ sender: Any?) {
         insertText("  ", replacementRange: selectedRange())
     }
@@ -22,7 +31,11 @@ struct CodeEditor: NSViewRepresentable {
     let fontSize: CGFloat
     let diagnostics: [Diagnostic]
     let reveal: RevealRequest?
+    /// Restored when a new document is shown.
+    let state: EditorState?
+    let topInset: CGFloat
     let onChange: (String) -> Void
+    let onStateChange: (EditorState) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -47,7 +60,9 @@ struct CodeEditor: NSViewRepresentable {
         tv.isAutomaticSpellingCorrectionEnabled = false
         tv.drawsBackground = true
         tv.backgroundColor = .textBackgroundColor
-        tv.insertionPointColor = .controlAccentColor
+        tv.insertionPointColor = .labelColor
+        // Neutral selection instead of the system accent.
+        tv.selectedTextAttributes = [.backgroundColor: NSColor.gray.withAlphaComponent(0.3)]
         tv.delegate = context.coordinator
 
         let scroll = NSScrollView()
@@ -55,6 +70,9 @@ struct CodeEditor: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.contentView.postsBoundsChangedNotifications = true
+        // Text starts below the hidden title bar strip but scrolls under it.
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: topInset, left: 0, bottom: 0, right: 0)
         let ruler = LineNumberRuler(textView: tv, scrollView: scroll)
         scroll.verticalRulerView = ruler
         scroll.hasVerticalRuler = true
@@ -62,12 +80,16 @@ struct CodeEditor: NSViewRepresentable {
 
         context.coordinator.textView = tv
         context.coordinator.ruler = ruler
+        NotificationCenter.default.addObserver(
+            context.coordinator, selector: #selector(Coordinator.didScroll),
+            name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
         c.onChange = onChange
+        c.onStateChange = onStateChange
         guard let tv = c.textView else { return }
 
         let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
@@ -76,11 +98,18 @@ struct CodeEditor: NSViewRepresentable {
             c.documentID = documentID
             c.font = font
             tv.font = font
-            if isNewDocument && tv.string != text {
-                tv.string = text
-                tv.undoManager?.removeAllActions()
-                tv.setSelectedRange(NSRange(location: 0, length: 0))
-                tv.scrollToBeginningOfDocument(nil)
+            if isNewDocument {
+                c.isRestoring = true
+                if tv.string != text {
+                    tv.string = text
+                    tv.undoManager?.removeAllActions()
+                }
+                let state = state ?? EditorState()
+                // Wait for the view to get its real width so line positions are final.
+                DispatchQueue.main.async {
+                    Self.restore(state, in: tv)
+                    c.isRestoring = false
+                }
             }
             if let storage = tv.textStorage { Highlighter.apply(to: storage, font: font) }
         }
@@ -132,6 +161,21 @@ struct CodeEditor: NSViewRepresentable {
         return r
     }
 
+    private static func restore(_ state: EditorState, in tv: NSTextView) {
+        let length = (tv.string as NSString).length
+        let location = min(state.selection, length)
+        tv.setSelectedRange(NSRange(location: location, length: min(state.length, length - location)))
+        guard let lm = tv.layoutManager, let scroll = tv.enclosingScrollView else { return }
+        var y = -scroll.contentInsets.top
+        if length > 0, state.top > 0 {
+            let rect = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: min(state.top, length - 1)), effectiveRange: nil)
+            y += rect.minY + tv.textContainerOrigin.y
+        }
+        let clip = scroll.contentView
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: NSPoint(x: 0, y: y), size: clip.bounds.size)).origin)
+        scroll.reflectScrolledClipView(clip)
+    }
+
     private static func select(line: Int, column: Int, in tv: NSTextView) {
         let s = tv.string as NSString
         guard let r = lineRange(line, in: s) else { return }
@@ -150,6 +194,20 @@ struct CodeEditor: NSViewRepresentable {
         var diagnostics: [Diagnostic] = []
         var reveal: RevealRequest?
         var onChange: (String) -> Void = { _ in }
+        var onStateChange: (EditorState) -> Void = { _ in }
+        var isRestoring = false
+
+        @objc func didScroll() { report() }
+
+        private func report() {
+            guard !isRestoring, let tv = textView, let lm = tv.layoutManager, let container = tv.textContainer,
+                  let scroll = tv.enclosingScrollView else { return }
+            let selection = tv.selectedRange()
+            let y = scroll.contentView.bounds.minY + scroll.contentInsets.top - tv.textContainerOrigin.y
+            let glyph = lm.glyphIndex(for: NSPoint(x: 0, y: max(0, y)), in: container)
+            let top = (tv.string as NSString).length == 0 ? 0 : lm.characterIndexForGlyph(at: glyph)
+            onStateChange(EditorState(selection: selection.location, length: selection.length, top: top))
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let tv = textView else { return }
@@ -159,6 +217,7 @@ struct CodeEditor: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             ruler?.needsDisplay = true
+            report()
         }
     }
 }

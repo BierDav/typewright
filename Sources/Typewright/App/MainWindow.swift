@@ -43,7 +43,7 @@ struct MainWindow: View {
     var body: some View {
         Group {
             if let workspace {
-                ProjectView(workspace: workspace) { state.project = nil }
+                ProjectView(workspace: workspace)
             } else {
                 HomeView()
             }
