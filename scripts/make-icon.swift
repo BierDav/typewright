@@ -30,7 +30,7 @@ func render(_ size: CGFloat) -> NSBitmapImageRep {
     return rep
 }
 
-let set = "Sources/Typewright/Assets.xcassets/AppIcon.appiconset"
+let set = "macApp/Sources/Typewright/Assets.xcassets/AppIcon.appiconset"
 try FileManager.default.createDirectory(atPath: set, withIntermediateDirectories: true)
 var images: [[String: String]] = []
 for base in [16, 32, 128, 256, 512] {
@@ -44,4 +44,4 @@ for base in [16, 32, 128, 256, 512] {
 let contents: [String: Any] = ["images": images, "info": ["version": 1, "author": "xcode"]]
 try JSONSerialization.data(withJSONObject: contents, options: [.prettyPrinted, .sortedKeys])
     .write(to: URL(fileURLWithPath: "\(set)/Contents.json"))
-try render(512).representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "Resources/logo.png"))
+try render(512).representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "macApp/Resources/logo.png"))

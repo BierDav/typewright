@@ -10,7 +10,14 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test Kotlin core
+        run: sharedKotlin/gradlew -p sharedKotlin allTests
       - name: Build and test
         run: |
-          xcodebuild -project Typewright.xcodeproj -scheme Typewright \
+          xcodebuild -project macApp/Typewright.xcodeproj -scheme Typewright \
             -derivedDataPath .build CODE_SIGN_IDENTITY=- test

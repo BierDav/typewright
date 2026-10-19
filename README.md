@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Resources/logo.png" width="128" alt="Typewright logo">
+  <img src="macApp/Resources/logo.png" width="128" alt="Typewright logo">
 </p>
 
 <h1 align="center">Typewright</h1>
@@ -20,7 +20,7 @@ Typewright needs macOS 26 or newer. On first launch it downloads the official Ty
 
 ## Build from source
 
-Open `Typewright.xcodeproj` in Xcode and run the `Typewright` scheme.
+Install Rust (`cargo`) and a JDK 21, then open `macApp/Typewright.xcodeproj` in Xcode and run the `Typewright` scheme.
 
 ## License
 
