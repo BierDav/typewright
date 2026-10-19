@@ -29,6 +29,31 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
 
     @ObservationIgnored let view: WKWebView
     @ObservationIgnored private var isReady = false
+    @ObservationIgnored private let scrollReporter = ScrollReporter()
+    @ObservationIgnored private var scrollFraction = 0.0
+    /// Scroll and zoom to apply once the next document is on screen.
+    @ObservationIgnored var pendingRestore: WebPreviewState? {
+        didSet { if pendingRestore != nil { restoreIfShown() } }
+    }
+
+    func state() -> WebPreviewState {
+        WebPreviewState(scroll: scrollFraction, zoom: autoScales ? nil : Double(scale))
+    }
+
+    /// Applies the pending state when the pages it's meant for are already shown.
+    private func restoreIfShown() {
+        guard isReady, !isSending, let pending, pending == sent, !sent.isEmpty, let state = pendingRestore else { return }
+        pendingRestore = nil
+        if let zoom = state.zoom {
+            scale = CGFloat(zoom)
+            autoScales = false
+        } else {
+            autoScales = true
+        }
+        scrollFraction = state.scroll
+        view.callAsyncJavaScript("tw.setZoom(auto, scale, false); " + ScrollReporter.restoreScript,
+                                 arguments: ["auto": autoScales, "scale": scale, "fraction": state.scroll], in: nil, in: .page)
+    }
     @ObservationIgnored private var pending: [String]?
     @ObservationIgnored private var sent: [String] = []
     @ObservationIgnored private var isSending = false
@@ -36,8 +61,11 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
     @ObservationIgnored nonisolated(unsafe) private var magnifyMonitor: Any?
 
     override init() {
-        view = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let config = WKWebViewConfiguration()
+        scrollReporter.install(in: config.userContentController)
+        view = WKWebView(frame: .zero, configuration: config)
         super.init()
+        scrollReporter.onScroll = { [weak self] in self?.scrollFraction = $0 }
         view.navigationDelegate = self
         // Pages float on the pane's material, like the PDF preview.
         view.setValue(false, forKey: "drawsBackground")
@@ -100,7 +128,7 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
 
     /// Sends only the pages that differ from what the page shows; the next update waits for this one.
     private func send() {
-        guard isReady, !isSending, let pages = pending, pages != sent else { return }
+        guard isReady, !isSending, let pages = pending, pages != sent else { return restoreIfShown() }
         isSending = true
         var changes: [String: String] = [:]
         for (i, page) in pages.enumerated() where i >= sent.count || sent[i] != page { changes[String(i)] = page }

@@ -42,6 +42,25 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
 
     @ObservationIgnored private var loadedBase: URL?
     @ObservationIgnored private var isReady = false
+    @ObservationIgnored private let scrollReporter = ScrollReporter()
+    @ObservationIgnored private var scrollFraction = 0.0
+    /// Scroll and zoom to apply once the next document is on screen.
+    @ObservationIgnored var pendingRestore: WebPreviewState? {
+        didSet { if pendingRestore != nil { restoreIfShown() } }
+    }
+
+    func state() -> WebPreviewState {
+        WebPreviewState(scroll: scrollFraction, zoom: Double(zoom))
+    }
+
+    /// Applies the pending state when the document it's meant for is already shown.
+    private func restoreIfShown() {
+        guard isReady, !isSending, let pending, pending == sent, let state = pendingRestore else { return }
+        pendingRestore = nil
+        setZoom(CGFloat(state.zoom ?? 1), animated: false)
+        scrollFraction = state.scroll
+        view.callAsyncJavaScript(ScrollReporter.restoreScript, arguments: ["fraction": state.scroll], in: nil, in: .page)
+    }
     @ObservationIgnored private var pending: String?
     @ObservationIgnored private var sent: String?
     @ObservationIgnored private var isSending = false
@@ -51,8 +70,10 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     override init() {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(fontHandler, forURLScheme: FontSchemeHandler.scheme)
+        scrollReporter.install(in: config.userContentController)
         view = WKWebView(frame: .zero, configuration: config)
         super.init()
+        scrollReporter.onScroll = { [weak self] in self?.scrollFraction = $0 }
         // Like the PDF preview, A4 sheets float on the pane's material.
         view.setValue(false, forKey: "drawsBackground")
         view.underPageBackgroundColor = .clear
@@ -133,7 +154,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
 
     /// Sends the newest output once the previous update is applied, so fast typing never queues stale pages.
     private func send() {
-        guard isReady, !isSending, let html = pending, html != sent else { return }
+        guard isReady, !isSending, let html = pending, html != sent else { return restoreIfShown() }
         isSending = true
         sent = html
         view.callAsyncJavaScript("tw.update(html)", arguments: ["html": html], in: nil, in: .page) { [weak self] _ in

@@ -16,7 +16,7 @@ Native macOS Typst editor (SwiftUI + AppKit, macOS 26+, Liquid Glass). Edist is 
 - `Sources/Typewright/Workspace` space model (files, autosave, compile scheduling) and space UI. A space is a folder.
 - `Sources/Typewright/Compiler` built-in compiler (`BuiltinCompiler`), external typst download/selection (`CompilerManager`), `typst watch` driver, diagnostics parsing, font sources (`FontLibrary`).
 - `TypstBridge/` Rust static library linking typst in process; its `World` serves unsaved buffers from memory. Built by `scripts/build-typst-bridge.sh` as an Xcode build phase (needs `cargo`).
-- `Sources/Typewright/Editor` NSTextView based editor, highlighting, line numbers.
+- `Sources/Typewright/Editor` NSTextView based editor, highlighting, line numbers, tinymist language server client (`LanguageClient`, completions, go to definition) and color literal swatches with the color wheel.
 - `Sources/Typewright/Preview` PDF (PDFKit), HTML and SVG previews (shown as the inspector pane).
 - `scripts/` icon generation, release build, version calculation, cask generation.
 
@@ -36,6 +36,7 @@ Native macOS Typst editor (SwiftUI + AppKit, macOS 26+, Liquid Glass). Edist is 
 - The built-in typst version is pinned in `TypstBridge/Cargo.toml` (`typst = "=x.y.z"`); bump all typst crates together.
 - External compilers only see the disk: edits are saved on every keystroke and `typst watch` recompiles. The built-in compiler reads buffers and autosaves every 30 s.
 - The typst CLI is downloaded to `~/Library/Application Support/Typewright/compilers/<version>/typst`.
+- tinymist (the language server) is downloaded to `~/Library/Application Support/Typewright/tinymist/tinymist`; a Homebrew install wins. One process runs per open space and gets full-text `didChange`s.
 
 ## Releases
 

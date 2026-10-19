@@ -23,7 +23,13 @@ private struct FontFace: Identifiable {
 /// Specimen view for font files in the project.
 struct FontPreview: View {
     let url: URL
+    /// Where this font's specimen was scrolled to last time.
+    var initialOffset: Double = 0
+    var onScroll: (URL, Double) -> Void = { _, _ in }
     @State private var faces: [FontFace]?
+    @State private var position = ScrollPosition()
+    /// Scroll reports are ignored until the saved offset is back, or they'd overwrite it with the top.
+    @State private var restored = false
     @State private var sample = "The quick brown fox jumps over the lazy dog"
 
     private static let sizes: [CGFloat] = [12, 18, 24, 36, 48, 72]
@@ -46,11 +52,23 @@ struct FontPreview: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
                 }
+                .scrollPosition($position)
+                .onScrollGeometryChange(for: Double.self) { Double($0.contentOffset.y) } action: { _, offset in
+                    if restored { onScroll(url, offset) }
+                }
             } else {
                 ProgressView().controlSize(.small)
             }
         }
-        .task(id: url) { faces = FontFace.load(url) }
+        .task(id: url) {
+            restored = false
+            faces = FontFace.load(url)
+            // Scroll once the specimen is laid out.
+            try? await Task.sleep(for: .milliseconds(30))
+            position.scrollTo(y: initialOffset)
+            try? await Task.sleep(for: .milliseconds(30))
+            restored = true
+        }
     }
 
     private func face(for face: FontFace, waterfall: Bool) -> some View {

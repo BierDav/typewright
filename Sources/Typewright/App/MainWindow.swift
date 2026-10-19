@@ -3,23 +3,49 @@ import CoreImage
 import Observation
 import SwiftUI
 
+enum WindowOverlay: Equatable {
+    case palette
+    /// Searches every space when true, the current space when false; nil follows the window, so the
+    /// space overview searches all spaces and a space searches itself.
+    case search(allSpaces: Bool?)
+}
+
 @MainActor @Observable
 final class WindowState {
     var space: URL?
     /// Whether the space selector covers the file tree.
     var spacesOpen = false
+    /// The command palette or full text search over the window.
+    var overlay: WindowOverlay?
+    /// A file and line to show once the window switched to its space.
+    var pendingReveal: SourceLocation?
     /// Live selector progress while a two-finger swipe drives it.
     var swipe: CGFloat?
     /// Whether the selector overlay is in the view tree; it stays a moment after closing to animate out.
     var selectorMounted = false
     /// Where the sidebar's content sits in the window; the selector overlay lines up with it.
-    var sidebarFrame = CGRect(x: 0, y: 52, width: 220, height: 700)
+    var sidebarFrame = CGRect(x: 0, y: 52, width: 220, height: 700) {
+        didSet {
+            // Remembered across launches; only real resizes count, not the first layout pass.
+            guard sidebarFrame.width != oldValue.width, sidebarFrame.width >= Self.minSidebarWidth else { return }
+            UserDefaults.standard.set(Double(sidebarFrame.width), forKey: Self.sidebarWidthKey)
+        }
+    }
+    /// The sidebar width the window opens with.
+    let initialSidebarWidth: CGFloat
+
+    static let minSidebarWidth: CGFloat = 180
+    private static let sidebarWidthKey = "sidebarWidth"
 
     static let spacesAnimation = Animation.smooth(duration: 0.35)
     /// How far the open selector reaches past the sidebar, pushing the space aside.
     static let spacesExtra: CGFloat = 150
 
-    init(space: URL?) { self.space = space }
+    init(space: URL?) {
+        self.space = space
+        let saved = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+        initialSidebarWidth = saved >= Self.minSidebarWidth ? saved : 220
+    }
 
     /// Opens or closes the selector with its slide.
     func setSpacesOpen(_ open: Bool) {
@@ -75,7 +101,7 @@ struct MainWindow: View {
         // The sidebar can't be hidden: toggling and drag-collapsing have nothing to change.
         NavigationSplitView(columnVisibility: .constant(.all)) {
             SpacesSidebar(state: state, workspace: workspace)
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+                .navigationSplitViewColumnWidth(min: WindowState.minSidebarWidth, ideal: state.initialSidebarWidth)
         } detail: {
             Group {
                 if let workspace {
@@ -93,12 +119,17 @@ struct MainWindow: View {
         }
         .toolbar(removing: .sidebarToggle)
         .overlay { SpacesOverlay(state: state, workspace: workspace) }
+        .overlay { WindowOverlayView(state: state, workspace: workspace) }
         .background(HiddenTitleBar(title: workspace?.selectedFile?.lastPathComponent ?? workspace?.name ?? "Typewright",
                                    subtitle: workspace?.name ?? ""))
         .onChange(of: state.space, initial: true) { _, url in
             let previous = workspace
             let next = url.map { Workspace(url: $0) }
             if let next { SpaceList.add(next.root) }
+            if let next, let pending = state.pendingReveal, pending.url.path.hasPrefix(next.root.path + "/") {
+                next.open(pending)
+            }
+            state.pendingReveal = nil
             // The selector slides away while the new space zooms in behind it.
             withAnimation(WindowState.spacesAnimation) {
                 workspace = next

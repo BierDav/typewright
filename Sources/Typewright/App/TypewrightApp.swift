@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Appearance.apply(UserDefaults.standard.string(forKey: "appearance") ?? "")
         BuiltinCompiler.warmUp()
         Task { await CompilerManager.shared.setUp() }
+        Task { await LanguageServerManager.shared.setUp() }
         Opener.shared.restoreSession()
     }
 
@@ -56,7 +57,13 @@ struct AppCommands: Commands {
             Button("Close Space") { Opener.shared.closeSpace() }
                 .keyboardShortcut("w", modifiers: [.command, .control])
         }
+        CommandGroup(after: .textEditing) {
+            Button("Find in Space…") { Opener.shared.showSearch() }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+        }
         CommandGroup(after: .toolbar) {
+            Button("Command Palette…") { Opener.shared.showPalette() }
+                .keyboardShortcut("k")
             Button("Show Spaces") { Opener.shared.toggleSpaces() }
                 .keyboardShortcut("s", modifiers: [.command, .option])
         }

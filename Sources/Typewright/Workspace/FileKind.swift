@@ -2,16 +2,21 @@ import Foundation
 
 /// How a project file is opened.
 enum FileKind {
-    case folder, typst, text, pdf, font, binary
+    /// `document` covers office files Quick Look can show: Word, Excel, PowerPoint, Pages, Numbers, Keynote.
+    case folder, typst, text, pdf, font, document, binary
 
     private static let textExtensions: Set<String> = [
         "bib", "yml", "yaml", "toml", "txt", "csv", "tsv", "json", "xml", "md", "svg", "html", "css", "js",
         "tex", "sty", "cls", "csl", "lua", "py", "sh", "swift", "rs", "c", "h", "ini", "cfg", "log", "gitignore",
     ]
     private static let fontExtensions: Set<String> = ["ttf", "otf", "ttc", "otc", "woff", "woff2"]
+    private static let documentExtensions: Set<String> = [
+        "doc", "docx", "docm", "dot", "dotx", "xls", "xlsx", "xlsm", "xlt", "xltx", "ppt", "pptx", "pptm", "pot", "potx",
+        "pps", "ppsx", "pages", "numbers", "key", "odt", "ods", "odp", "rtf",
+    ]
     private static let binaryExtensions: Set<String> = [
         "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "ico", "zip", "gz", "tar", "dmg",
-        "mp3", "mp4", "mov", "wav", "docx", "xlsx", "pptx", "key", "pages", "numbers",
+        "mp3", "mp4", "mov", "wav",
     ]
 
     init(url: URL) {
@@ -19,6 +24,7 @@ enum FileKind {
         if ext == "typ" { self = .typst }
         else if ext == "pdf" { self = .pdf }
         else if Self.fontExtensions.contains(ext) { self = .font }
+        else if Self.documentExtensions.contains(ext) { self = .document }
         else if Self.textExtensions.contains(ext) { self = .text }
         else if Self.binaryExtensions.contains(ext) { self = .binary }
         else { self = Self.sniff(url) }

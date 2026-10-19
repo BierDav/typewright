@@ -61,6 +61,17 @@ final class Opener {
         state.setSpacesOpen(!state.spacesOpen)
     }
 
+    func showPalette() {
+        guard let state = keyState else { return }
+        state.overlay = state.overlay == .palette ? nil : .palette
+    }
+
+    /// Full text search in the space, or across all spaces from the space overview.
+    func showSearch() {
+        guard let state = keyState else { return }
+        state.overlay = .search(allSpaces: nil)
+    }
+
     private var keyState: WindowState? {
         controllers.first { $0.window?.isKeyWindow == true }?.state
     }
@@ -169,8 +180,12 @@ enum SpaceList {
         UserDefaults.standard.set(paths, forKey: key)
     }
 
+    /// Drops every entry that leads to the space, like a file inside it or a symlinked spelling of its path.
     static func remove(_ url: URL) {
-        let paths = (UserDefaults.standard.stringArray(forKey: key) ?? []).filter { $0 != url.path }
+        let target = Workspace.root(of: url).resolvingSymlinksInPath().path
+        let paths = (UserDefaults.standard.stringArray(forKey: key) ?? []).filter {
+            Workspace.root(of: URL(fileURLWithPath: $0)).resolvingSymlinksInPath().path != target
+        }
         UserDefaults.standard.set(paths, forKey: key)
     }
 

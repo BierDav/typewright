@@ -34,6 +34,12 @@ final class SettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Opens on a tab: 0 General, 1 Editor, 2 Fonts.
+    func show(tab: Int) {
+        (contentViewController as? NSTabViewController)?.selectedTabViewItemIndex = tab
+        show()
+    }
+
     func show() {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -144,6 +150,7 @@ private struct CompilerRow: View {
 
 struct EditorSettings: View {
     @AppStorage("editorFontSize") private var fontSize = 14.0
+    @AppStorage("glidingCursor") private var glidingCursor = true
 
     var body: some View {
         Form {
@@ -152,8 +159,51 @@ struct EditorSettings: View {
                 Text("#let greeting = \"Hello, Typst\"")
                     .font(.system(size: fontSize, design: .monospaced))
             }
+            Section("Cursor") {
+                Toggle("Gliding cursor", isOn: $glidingCursor)
+                Text("The cursor slides to its new position instead of jumping.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+                        LanguageServerSection()
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct LanguageServerSection: View {
+    @Bindable private var server = LanguageServerManager.shared
+
+    var body: some View {
+        Section {
+            Toggle("Completions and Go to Definition", isOn: $server.isEnabled)
+            if let system = server.systemBinary {
+                LabeledContent("tinymist", value: system.path)
+            } else if server.isDownloading {
+                LabeledContent("tinymist") { ProgressView().controlSize(.small) }
+            } else if let version = server.downloadedVersion {
+                LabeledContent("tinymist \(version)") {
+                    HStack {
+                        Button("Update") { Task { await server.download() } }
+                        Button("Remove", role: .destructive) { server.remove() }
+                    }
+                }
+            } else {
+                LabeledContent("tinymist") {
+                    Button { Task { await server.download() } } label: { Label("Download", systemImage: "arrow.down.circle") }
+                }
+                .disabled(!server.isEnabled)
+            }
+        } header: {
+            Text("Language Server")
+        } footer: {
+            if let error = server.lastError {
+                Text(error).foregroundStyle(.red)
+            } else {
+                Text("Completions pop up while typing, or with ⌥⎋ or ⌃Space. ⌘-click an import, symbol, path or font name to open it. Uses tinymist from github.com/Myriad-Dreamin/tinymist.")
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

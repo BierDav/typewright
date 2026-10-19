@@ -6,8 +6,8 @@ struct SpaceView: View {
     @State private var dragStart: Double?
     @State private var dragSplit: Double?
     @State private var dividerHovered = false
-    @State private var sidebarEdgeHovered = false
     @AppStorage("editorFontSize") private var fontSize = 14.0
+    @AppStorage("glidingCursor") private var glidingCursor = true
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
     private var compilers: CompilerManager { .shared }
 
@@ -27,7 +27,6 @@ struct SpaceView: View {
     var body: some View {
         content
             .ignoresSafeArea(.container, edges: .top)
-            .overlay(alignment: .leading) { sidebarEdge }
             .onAppear {
                 workspace.scheduleCompile(delay: 0)
             }
@@ -88,8 +87,12 @@ struct SpaceView: View {
             switch workspace.selectedKind {
             case .pdf?:
                 PDFFileView(controller: workspace.filePreview)
+            case .document?:
+                if let url = workspace.selectedFile { DocumentPreview(url: url).id(workspace.revision) }
             case .font?:
-                if let url = workspace.selectedFile { FontPreview(url: url) }
+                if let url = workspace.selectedFile {
+                    FontPreview(url: url, initialOffset: workspace.fontOffset(for: url), onScroll: workspace.fontDidScroll)
+                }
             default:
                 editor.overlay(alignment: .top) { topFade }
             }
@@ -114,15 +117,6 @@ struct SpaceView: View {
             .mask(LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom))
             .frame(height: Self.fadeHeight)
             .allowsHitTesting(false)
-    }
-
-    /// Highlights the sidebar's native resize edge like the preview divider.
-    private var sidebarEdge: some View {
-        DividerLine(active: sidebarEdgeHovered)
-            .frame(width: 6, alignment: .leading)
-            .background(HoverTracker { sidebarEdgeHovered = $0 })
-            .allowsHitTesting(false)
-            .ignoresSafeArea()
     }
 
     private static let handleWidth: CGFloat = 14
@@ -197,17 +191,29 @@ struct SpaceView: View {
                     documentID: workspace.revision,
                     text: workspace.text,
                     fontSize: fontSize,
+                    glidingCursor: glidingCursor,
+                    find: workspace.selectedKind?.isEditable == true ? workspace.find : nil,
                     highlights: workspace.selectedKind == .typst,
                     diagnostics: fileDiagnostics,
                     reveal: workspace.reveal,
                     state: workspace.editorState(for: file),
                     topInset: Self.fadeHeight - 10,
                     onChange: workspace.textDidChange,
-                    onStateChange: workspace.editorStateDidChange
+                    onStateChange: workspace.editorStateDidChange,
+                    language: workspace.selectedKind == .typst ? workspace : nil
                 )
                 .overlay(alignment: .bottomTrailing) {
                     if workspace.previewFile != nil { issuesButton }
                 }
+                .overlay(alignment: .topTrailing) {
+                    if workspace.find.isVisible && workspace.selectedKind?.isEditable == true {
+                        FindBar(find: workspace.find)
+                            .padding(.top, Self.fadeHeight)
+                            .padding(.trailing, 16)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
+                .animation(.smooth(duration: 0.2), value: workspace.find.isVisible)
             } else {
                 ContentUnavailableView("No file selected", systemImage: "doc")
             }

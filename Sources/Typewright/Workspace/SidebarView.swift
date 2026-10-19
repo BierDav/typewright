@@ -10,6 +10,10 @@ struct SidebarView: View {
     /// The row being dragged and the pointer in the tree's coordinates.
     @State private var drag: (url: URL, location: CGPoint)?
     @State private var expandTask: Task<Void, Never>?
+    /// The row briefly tinted after revealing the selected file.
+    @State private var flashed: URL?
+    /// The pointer while files from another app hover the tree.
+    @State private var externalDrop: CGPoint?
 
     fileprivate static let treeSpace = "fileTree"
     private static let rowPitch: CGFloat = 36
@@ -31,20 +35,24 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            ScrollView {
-                fileList
-                    .frame(maxWidth: .infinity, minHeight: geo.size.height, alignment: .top)
-                    // Empty space moves the window; rows and buttons keep their own gestures.
-                    .contentShape(Rectangle())
-                    .gesture(WindowDragGesture())
+        ScrollViewReader { proxy in
+            GeometryReader { geo in
+                ScrollView {
+                    fileList
+                        .frame(maxWidth: .infinity, minHeight: geo.size.height, alignment: .top)
+                        // Empty space moves the window; rows and buttons keep their own gestures.
+                        .contentShape(Rectangle())
+                        .gesture(WindowDragGesture())
+                }
             }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            SpaceHeader(name: workspace.name, isDropTarget: dropTarget?.path == workspace.root.path,
-                        onRename: onRenameSpace, menuItems: spaceMenuItems)
-                .padding(.horizontal, 8)
-                .padding(.bottom, 2)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                SpaceHeader(name: workspace.name, isDropTarget: dropTarget?.path == workspace.root.path,
+                            canReveal: workspace.selectedFile.map(isInTree) ?? false,
+                            onReveal: { revealSelected(proxy) },
+                            onRename: onRenameSpace, menuItems: spaceMenuItems)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 2)
+            }
         }
         .safeAreaInset(edge: .bottom) {
             HStack {
@@ -72,7 +80,7 @@ struct SidebarView: View {
                     isExpanded: workspace.expanded.contains(row.node.url),
                     isRenaming: renaming == row.node.url,
                     isDragged: drag?.url == row.node.url,
-                    isDropTarget: dropTarget?.path == row.node.url.path,
+                    isDropTarget: dropTarget?.path == row.node.url.path || flashed == row.node.url,
                     onTap: { tap(row.node) },
                     onDrag: { location in dragMoved(row.node.url, to: location) },
                     onDrop: drop,
@@ -97,33 +105,56 @@ struct SidebarView: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: dropTarget)
+        .onDrop(of: [.fileURL], delegate: ExternalDrop(
+            onMove: { location in hoverMoved { externalDrop = location } },
+            onExit: {
+                expandTask?.cancel()
+                externalDrop = nil
+            },
+            onDrop: importDropped))
     }
 
     /// The folder a drop at the pointer would move into: the hovered folder, a hovered file's folder, or the space.
     private var dropTarget: URL? {
-        guard let drag else { return nil }
-        let index = Int(((drag.location.y - 4) / Self.rowPitch).rounded(.down))
-        let dir: URL
-        if rows.indices.contains(index) {
-            let node = rows[index].node
-            dir = node.children != nil ? node.url : node.url.deletingLastPathComponent()
-        } else {
-            dir = workspace.root
+        if let drag {
+            let dir = folder(at: drag.location)
+            return workspace.canMove(drag.url, into: dir) ? dir : nil
         }
-        return workspace.canMove(drag.url, into: dir) ? dir : nil
+        return externalDrop.map(folder(at:))
+    }
+
+    private func folder(at location: CGPoint) -> URL {
+        let index = Int(((location.y - 4) / Self.rowPitch).rounded(.down))
+        guard rows.indices.contains(index) else { return workspace.root }
+        let node = rows[index].node
+        return node.children != nil ? node.url : node.url.deletingLastPathComponent()
     }
 
     private func dragMoved(_ url: URL, to location: CGPoint) {
+        hoverMoved { drag = (url, location) }
+    }
+
+    /// Applies a pointer move; hovering a closed folder for a moment opens it, so deeper folders can be reached.
+    private func hoverMoved(_ update: () -> Void) {
         let before = dropTarget
-        drag = (url, location)
+        update()
         guard let target = dropTarget, target.path != before?.path else { return }
-        // Hovering a closed folder for a moment opens it, so deeper folders can be reached.
         expandTask?.cancel()
         expandTask = Task {
             try? await Task.sleep(for: .seconds(0.7))
-            guard !Task.isCancelled, drag != nil, dropTarget?.path == target.path, target.path != workspace.root.path else { return }
+            guard !Task.isCancelled, drag != nil || externalDrop != nil, dropTarget?.path == target.path,
+                  target.path != workspace.root.path else { return }
             withAnimation(.smooth(duration: 0.2)) { _ = workspace.expanded.insert(target.standardizedFileURL) }
         }
+    }
+
+    /// Files from Finder move in like Finder does on the same disk; holding Option copies them.
+    private func importDropped(_ urls: [URL], at location: CGPoint) {
+        expandTask?.cancel()
+        externalDrop = nil
+        let target = folder(at: location)
+        let copy = NSEvent.modifierFlags.contains(.option)
+        withAnimation(.smooth(duration: 0.25)) { workspace.importItems(urls, into: target, copy: copy) }
     }
 
     private func drop() {
@@ -152,7 +183,10 @@ struct SidebarView: View {
         }
         items.append(.divider)
         items.append(.init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) })
-        items.append(.init("Copy Path", "doc.on.doc") { copyPath(node.url) })
+        items.append(.init("Copy Absolute Path", "doc.on.doc") { copyPath(node.url) })
+        items.append(.init("Copy Relative Path", "doc.on.doc") {
+            copyPath(String(node.url.path.dropFirst(workspace.root.path.count + 1)))
+        })
         items.append(.divider)
         items.append(.init("Move to Trash", "trash") {
             withAnimation(.smooth(duration: 0.2)) { workspace.delete(node.url) }
@@ -185,6 +219,28 @@ struct SidebarView: View {
         renaming = url
     }
 
+    private func isInTree(_ url: URL) -> Bool { url.path.hasPrefix(workspace.root.path + "/") }
+
+    /// Opens the folders around the selected file, scrolls to it and tints it for a moment.
+    private func revealSelected(_ proxy: ScrollViewProxy) {
+        guard let file = workspace.selectedFile, isInTree(file) else { return }
+        var folders: [URL] = []
+        var dir = file.deletingLastPathComponent().standardizedFileURL
+        while dir.path != workspace.root.path, dir.path.hasPrefix(workspace.root.path + "/") {
+            folders.append(dir)
+            dir = dir.deletingLastPathComponent().standardizedFileURL
+        }
+        withAnimation(.smooth(duration: 0.2)) { workspace.expanded.formUnion(folders) }
+        // Scroll once the opened rows exist.
+        DispatchQueue.main.async {
+            withAnimation(.smooth(duration: 0.3)) { proxy.scrollTo(file, anchor: .center) }
+            withAnimation(.easeOut(duration: 0.15)) { flashed = file }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                withAnimation(.easeOut(duration: 0.5)) { if flashed == file { flashed = nil } }
+            }
+        }
+    }
+
     private func tap(_ node: FileNode) {
         if node.children != nil {
             withAnimation(.smooth(duration: 0.2)) {
@@ -200,9 +256,45 @@ struct SidebarView: View {
     }
 }
 
-func copyPath(_ url: URL) {
+/// Accepts file URLs from other apps and reports the pointer while they hover.
+struct ExternalDrop: DropDelegate {
+    let onMove: (CGPoint) -> Void
+    let onExit: () -> Void
+    let onDrop: ([URL], CGPoint) -> Void
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        onMove(info.location)
+        return DropProposal(operation: NSEvent.modifierFlags.contains(.option) ? .copy : .move)
+    }
+
+    func dropExited(info: DropInfo) { onExit() }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let providers = info.itemProviders(for: [.fileURL])
+        guard !providers.isEmpty else { return false }
+        let location = info.location
+        Task { @MainActor in
+            var urls: [URL] = []
+            for provider in providers {
+                if let url = await Self.load(provider) { urls.append(url) }
+            }
+            onDrop(urls, location)
+        }
+        return true
+    }
+
+    private static func load(_ provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { cont in
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in cont.resume(returning: url) }
+        }
+    }
+}
+
+func copyPath(_ url: URL) { copyPath(url.path) }
+
+func copyPath(_ path: String) {
     NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(url.path, forType: .string)
+    NSPasteboard.general.setString(path, forType: .string)
 }
 
 /// One menu entry, rendered as a SwiftUI context menu and as an NSMenu so both stay identical.
@@ -378,6 +470,8 @@ private struct MenuAnchor: NSViewRepresentable {
 private struct SpaceHeader: View {
     let name: String
     var isDropTarget = false
+    let canReveal: Bool
+    let onReveal: () -> Void
     let onRename: (String) -> Void
     let menuItems: (_ rename: @escaping () -> Void) -> [SidebarMenuItem]
     @State private var renaming = false
@@ -402,9 +496,18 @@ private struct SpaceHeader: View {
                     .pointerStyle(.horizontalText)
             }
             Spacer(minLength: 0)
+            if hovered && canReveal && !renaming {
+                Button(action: onReveal) {
+                    ZenIcon(systemName: "scope", size: 24, idleFill: false)
+                }
+                .buttonStyle(ZenPressStyle())
+                .help("Reveal the open file")
+                .transition(.opacity)
+            }
         }
         .font(.system(size: 13, weight: .semibold))
-        .padding(.horizontal, 10)
+        .padding(.leading, 10)
+        .padding(.trailing, 5)
         .frame(height: 34)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
             .fill(isDropTarget ? AnyShapeStyle(Color.accentColor.opacity(0.2))
@@ -615,12 +718,21 @@ private struct FileRow: View {
         return hovered || menuOpen ? 0.06 : 0
     }
 
+    static func documentIcon(_ ext: String) -> String {
+        switch ext {
+        case "xls", "xlsx", "xlsm", "xlt", "xltx", "numbers", "ods": return "tablecells"
+        case "ppt", "pptx", "pptm", "pot", "potx", "pps", "ppsx", "key", "odp": return "rectangle.on.rectangle"
+        default: return "doc.text.image"
+        }
+    }
+
     private var icon: String {
         switch node.kind {
         case .folder: return "folder"
         case .typst: return "t.square.fill"
         case .pdf: return "doc.richtext"
         case .font: return "textformat"
+        case .document: return Self.documentIcon(node.url.pathExtension.lowercased())
         case .text, .binary:
             switch node.url.pathExtension.lowercased() {
             case "png", "jpg", "jpeg", "gif", "svg", "webp", "heic", "tiff": return "photo"

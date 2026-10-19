@@ -15,6 +15,13 @@ struct PreviewState: Codable, Equatable {
     var y = 0.0
 }
 
+/// Scroll position (0 = top, 1 = bottom) and zoom of a previewed file in the HTML or SVG preview.
+struct WebPreviewState: Codable, Equatable {
+    var scroll = 0.0
+    /// nil fits the width where the preview can.
+    var zoom: Double?
+}
+
 /// UI state of one space; file keys are paths relative to the space folder.
 struct SpaceState: Codable {
     var selected: String?
@@ -22,6 +29,8 @@ struct SpaceState: Codable {
     var split = 0.5
     var editors: [String: EditorState] = [:]
     var previews: [String: PreviewState] = [:]
+    var htmlPreviews: [String: WebPreviewState] = [:]
+    var svgPreviews: [String: WebPreviewState] = [:]
     var expanded: [String] = []
 
     init() {}
@@ -35,6 +44,8 @@ struct SpaceState: Codable {
         editors = try c.decodeIfPresent([String: EditorState].self, forKey: .editors) ?? [:]
         previews = try c.decodeIfPresent([String: PreviewState].self, forKey: .previews) ?? [:]
         expanded = try c.decodeIfPresent([String].self, forKey: .expanded) ?? []
+        htmlPreviews = try c.decodeIfPresent([String: WebPreviewState].self, forKey: .htmlPreviews) ?? [:]
+        svgPreviews = try c.decodeIfPresent([String: WebPreviewState].self, forKey: .svgPreviews) ?? [:]
     }
 }
 

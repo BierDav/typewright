@@ -58,14 +58,12 @@ struct SpacesOverlay: View {
                     .frame(width: width, height: frame.height)
                     .offset(x: frame.minX - width * (1 - progress), y: frame.minY)
                     .allowsHitTesting(progress == 1)
-                if progress == 1 {
-                    // The split view's own divider is covered, so the selector's edge takes over.
-                    SidebarResizeHandle(state: state)
-                        .frame(width: 8)
-                        .frame(maxHeight: .infinity)
-                        .offset(x: frame.maxX + WindowState.spacesExtra - 8)
-                }
             }
+            // Always shown, and it follows the selector's edge while that slides.
+            SidebarResizeHandle(state: state)
+                .frame(width: 9)
+                .frame(maxHeight: .infinity)
+                .offset(x: frame.maxX + extra - 4.5)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .ignoresSafeArea()
@@ -104,7 +102,7 @@ struct SpacesButton: View {
     }
 }
 
-/// Drags the sidebar's divider while the selector covers it.
+/// The sidebar's divider: a faint line that brightens while hovered or dragged, and resizes the sidebar.
 private struct SidebarResizeHandle: View {
     let state: WindowState
     @State private var start: CGFloat?
@@ -115,15 +113,15 @@ private struct SidebarResizeHandle: View {
     var body: some View {
         Color.clear
             .contentShape(Rectangle())
-            // Same 1pt line the sidebar's own divider shows while hovered or dragged.
-            .overlay(alignment: .trailing) {
+            .overlay {
                 Rectangle()
-                    .fill(Color.primary.opacity(0.4))
+                    .fill(Color.primary.opacity(hovered || start != nil ? 0.45 : 0.12))
                     .frame(width: 1)
-                    .opacity(hovered || start != nil ? 1 : 0)
                     .animation(.easeOut(duration: 0.15), value: hovered || start != nil)
             }
             .pointerStyle(.columnResize)
+            // The text view sets its own cursor on every move.
+            .background(CursorArea(cursor: .resizeLeftRight))
             .onHover { hovered = $0 }
             .background(SplitViewFinder { splitView = $0 })
             .gesture(
@@ -177,6 +175,8 @@ private struct SpacesPane: View {
     let spaces: [URL]
     let onChange: () -> Void
     @State private var drag: (url: URL, offset: CGFloat)?
+    /// The pointer while folders from Finder hover the list.
+    @State private var externalDrop: CGPoint?
 
     private static let rowHeight: CGFloat = 42
     private static let pitch = rowHeight + 2
@@ -187,9 +187,8 @@ private struct SpacesPane: View {
                 ForEach(Array(spaces.enumerated()), id: \.element) { index, url in
                     SpaceRow(url: url, isCurrent: url.path == current, isDragged: drag?.url == url) {
                         open(url)
-                    } onRemove: {
-                        SpaceList.remove(url)
-                        onChange()
+                    } onForget: {
+                        forget(url)
                     } onDrag: { offset in
                         drag = (url, offset)
                     } onDrop: {
@@ -197,6 +196,8 @@ private struct SpacesPane: View {
                     }
                     .offset(y: offset(of: index))
                     .zIndex(drag?.url == url ? 1 : 0)
+                    .transition(.asymmetric(insertion: .opacity,
+                                            removal: .opacity.combined(with: .scale(scale: 0.9)).combined(with: .move(edge: .leading))))
                     .animation(drag?.url == url ? nil : .smooth(duration: 0.2), value: target)
                 }
                 if spaces.isEmpty {
@@ -208,9 +209,15 @@ private struct SpacesPane: View {
                         .frame(height: 34)
                 }
                 OpenSpaceRow { Opener.shared.openPanel(in: state) }
+                    .offset(y: externalDrop == nil ? 0 : Self.pitch)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
+            .animation(.smooth(duration: 0.2), value: insertionIndex)
+            .onDrop(of: [.fileURL], delegate: ExternalDrop(
+                onMove: { externalDrop = $0 },
+                onExit: { externalDrop = nil },
+                onDrop: addDropped))
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             HStack(spacing: 8) {
@@ -244,8 +251,33 @@ private struct SpacesPane: View {
         return min(max(source + Int((drag.offset / Self.pitch).rounded()), 0), spaces.count - 1)
     }
 
+    /// Where folders dropped from Finder would be inserted.
+    private var insertionIndex: Int? {
+        externalDrop.map(index(at:))
+    }
+
+    private func index(at location: CGPoint) -> Int {
+        min(max(Int(((location.y - 4) / Self.pitch).rounded()), 0), spaces.count)
+    }
+
+    /// Dropped folders become spaces at the drop position; dropped files add their folder.
+    private func addDropped(_ urls: [URL], at location: CGPoint) {
+        externalDrop = nil
+        var index = index(at: location)
+        for url in urls {
+            let root = Workspace.root(of: url).resolvingSymlinksInPath()
+            // Known spaces before the drop point shift the position by one when they move.
+            if let from = SpaceList.all.firstIndex(where: { $0.path == root.path }), from < index { index -= 1 }
+            SpaceList.add(root)
+            SpaceList.move(root, to: index)
+            index += 1
+        }
+        withAnimation(.smooth(duration: 0.25)) { onChange() }
+    }
+
     /// The dragged row follows the pointer; the rows it passes make room for it.
     private func offset(of index: Int) -> CGFloat {
+        if let insertionIndex { return index >= insertionIndex ? Self.pitch : 0 }
         guard let drag, let source, let target else { return 0 }
         if index == source { return drag.offset }
         if source < target, index > source, index <= target { return -Self.pitch }
@@ -260,6 +292,13 @@ private struct SpacesPane: View {
             onChange()
             self.drag = nil
         }
+    }
+
+    /// The open space closes first, so any space can be forgotten.
+    private func forget(_ url: URL) {
+        if url.path == current { state.space = nil }
+        SpaceList.remove(url)
+        withAnimation(.smooth(duration: 0.3)) { onChange() }
     }
 
     private func open(_ url: URL) {
@@ -277,7 +316,7 @@ private struct SpaceRow: View {
     let isCurrent: Bool
     let isDragged: Bool
     let onOpen: () -> Void
-    let onRemove: () -> Void
+    let onForget: () -> Void
     let onDrag: (CGFloat) -> Void
     let onDrop: () -> Void
     @State private var hovered = false
@@ -337,7 +376,7 @@ private struct SpaceRow: View {
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             Button("Copy Path") { copyPath(url) }
             Divider()
-            Button("Remove from Spaces", action: onRemove).disabled(isCurrent)
+            Button("Forget Space", action: onForget)
         }
         .help("Drag to reorder")
     }

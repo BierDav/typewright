@@ -28,6 +28,7 @@ final class FontLibrary {
         .appending(path: "Typewright/fonts/google", directoryHint: .isDirectory)
     private let catalogFile = URL.applicationSupportDirectory.appending(path: "Typewright/fonts/google-catalog.json")
     @ObservationIgnored private var notifyTask: Task<Void, Never>?
+    @ObservationIgnored private var isLoadingCatalog = false
 
     private init() {
         spacePaths = UserDefaults.standard.stringArray(forKey: "fontSpacePaths") ?? ["./fonts"]
@@ -50,6 +51,20 @@ final class FontLibrary {
                 return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
                     && seen.insert(url.path).inserted
             }
+    }
+
+    /// The space font folders as configured, whether they exist yet or not.
+    func spaceFolders(for root: URL) -> [URL] {
+        spacePaths.map { path in
+            let expanded = (path as NSString).expandingTildeInPath
+            return (expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : root.appending(path: path)).standardizedFileURL
+        }
+    }
+
+    /// The catalog entry for a family name in any case, as typst reports them lowercased.
+    func googleFont(named name: String) -> GoogleFont? {
+        let wanted = name.lowercased()
+        return catalog.first { $0.family.lowercased() == wanted }
     }
 
     private func changed() {
@@ -79,7 +94,9 @@ final class FontLibrary {
 
     /// Loads the family list, from a cache younger than a week if there is one.
     func loadCatalog() async {
-        guard catalog.isEmpty else { return }
+        guard catalog.isEmpty, !isLoadingCatalog else { return }
+        isLoadingCatalog = true
+        defer { isLoadingCatalog = false }
         let modified = (try? catalogFile.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         if let modified, modified.timeIntervalSinceNow > -7 * 24 * 3600,
            let data = try? Data(contentsOf: catalogFile),
@@ -103,7 +120,8 @@ final class FontLibrary {
         }
     }
 
-    func download(_ family: String) async {
+    /// Downloads a Google font into `folder/<family>`, or into Typewright's own Google Fonts folder.
+    func download(_ family: String, into folder: URL? = nil) async {
         guard downloads[family] == nil else { return }
         downloads[family] = 0
         defer { downloads[family] = nil }
@@ -117,8 +135,9 @@ final class FontLibrary {
                 try FileManager.default.moveItem(at: location, to: staging.appending(path: file.name))
                 downloads[family] = Double(i + 1) / Double(files.count)
             }
-            let target = googleDirectory.appending(path: family, directoryHint: .isDirectory)
-            try FileManager.default.createDirectory(at: googleDirectory, withIntermediateDirectories: true)
+            let parent = folder ?? googleDirectory
+            let target = parent.appending(path: family, directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: target)
             try FileManager.default.moveItem(at: staging, to: target)
             lastError = nil
