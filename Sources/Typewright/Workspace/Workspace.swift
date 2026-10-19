@@ -27,7 +27,11 @@ final class Workspace {
     private(set) var selectedFile: URL?
     private(set) var text = ""
     private(set) var revision = 0
-    var mainFile: URL? { didSet { scheduleCompile(delay: 0) } }
+    /// The file compiled for the preview; nil hides the preview.
+    private(set) var previewFile: URL?
+    var split: Double { didSet { schedulePersist() } }
+    /// Folders open in the sidebar; everything else starts collapsed.
+    var expanded: Set<URL> = [] { didSet { schedulePersist() } }
     var reveal: RevealRequest?
 
     private(set) var document: PDFDocument?
@@ -42,6 +46,9 @@ final class Workspace {
     private var generation = 0
     private let runner = TypstRunner()
     private let outputDir: URL
+    @ObservationIgnored private var editorStates: [URL: EditorState] = [:]
+    @ObservationIgnored private var previewStates: [URL: PreviewState] = [:]
+    @ObservationIgnored private var persistTask: Task<Void, Never>?
 
     init(url: URL) {
         let url = url.standardizedFileURL
@@ -52,10 +59,28 @@ final class Workspace {
             .appendingPathComponent("Typewright-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
+        let saved = ProjectStore.state(for: root)
+        let state = saved ?? ProjectState()
+        split = state.split
         reloadTree()
-        let initial = isDir.boolValue ? defaultMain() : url
-        mainFile = initial
+        let base = root
+        func resolve(_ path: String?) -> URL? {
+            guard let path else { return nil }
+            let url = base.appendingPathComponent(path).standardizedFileURL
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
+        editorStates = Dictionary(state.editors.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
+        previewStates = Dictionary(state.previews.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
+        expanded = Set(state.expanded.compactMap(resolve))
+        let initial = isDir.boolValue ? resolve(state.selected) ?? defaultMain() : url
         if let initial { select(initial) }
+        // New projects start out previewing their main file; known ones keep their choice, even none.
+        if saved == nil {
+            previewFile = initial?.pathExtension == "typ" ? initial : defaultMain()
+        } else {
+            previewFile = resolve(state.preview)
+        }
+        preview.pendingRestore = previewFile.flatMap { previewStates[$0] }
     }
 
     var name: String { root.lastPathComponent }
@@ -77,12 +102,72 @@ final class Workspace {
         text = buffers[url] ?? (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         buffers[url] = text
         revision += 1
+        schedulePersist()
     }
 
     func reveal(_ diagnostic: Diagnostic) {
         guard !diagnostic.isFromPackage else { return }
         select(root.appendingPathComponent(diagnostic.path).standardizedFileURL)
         reveal = RevealRequest(line: diagnostic.line, column: diagnostic.column)
+    }
+
+    func togglePreview(_ url: URL) {
+        setPreview(previewFile == url ? nil : url)
+    }
+
+    func setPreview(_ url: URL?) {
+        guard url != previewFile else { return }
+        capturePreviewState()
+        previewFile = url
+        document = nil
+        diagnostics = []
+        lastDuration = nil
+        preview.pendingRestore = url.flatMap { previewStates[$0] }
+        scheduleCompile(delay: 0)
+        schedulePersist()
+    }
+
+    // MARK: - View state
+
+    func editorState(for url: URL?) -> EditorState? {
+        url.flatMap { editorStates[$0] }
+    }
+
+    func editorStateDidChange(_ state: EditorState) {
+        guard let url = selectedFile, editorStates[url] != state else { return }
+        editorStates[url] = state
+        schedulePersist()
+    }
+
+    private func capturePreviewState() {
+        guard let main = previewFile, document != nil, preview.view.document === document,
+              let state = preview.state() else { return }
+        previewStates[main] = state
+    }
+
+    private func schedulePersist() {
+        persistTask?.cancel()
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.persist()
+        }
+    }
+
+    func persist() {
+        capturePreviewState()
+        let prefix = root.path + "/"
+        func relative(_ url: URL) -> String? {
+            url.path.hasPrefix(prefix) ? String(url.path.dropFirst(prefix.count)) : nil
+        }
+        var state = ProjectState()
+        state.selected = selectedFile.flatMap(relative)
+        state.preview = previewFile.flatMap(relative)
+        state.split = split
+        for (url, s) in editorStates { if let key = relative(url) { state.editors[key] = s } }
+        for (url, s) in previewStates { if let key = relative(url) { state.previews[key] = s } }
+        state.expanded = expanded.compactMap(relative).sorted()
+        ProjectStore.save(state, for: root)
     }
 
     /// Picks up edits made by other apps for files without pending changes.
@@ -100,16 +185,71 @@ final class Workspace {
         scheduleCompile(delay: 0)
     }
 
-    func createFile() {
-        var url = root.appendingPathComponent("untitled.typ")
-        var i = 2
-        while FileManager.default.fileExists(atPath: url.path) {
-            url = root.appendingPathComponent("untitled-\(i).typ")
-            i += 1
-        }
+    @discardableResult
+    func createFile(in dir: URL? = nil) -> URL {
+        let url = Self.unique(in: dir ?? root, name: "untitled", ext: "typ")
         FileManager.default.createFile(atPath: url.path, contents: Data())
         reloadTree()
         select(url)
+        return url
+    }
+
+    @discardableResult
+    func createFolder(in dir: URL? = nil) -> URL {
+        let url = Self.unique(in: dir ?? root, name: "New Folder", ext: nil)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        reloadTree()
+        return url
+    }
+
+    /// Renames a file or folder and moves buffers, selection, preview and saved state along.
+    func rename(_ url: URL, to name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !name.contains("/"), name != url.lastPathComponent else { return }
+        let target = url.deletingLastPathComponent().appendingPathComponent(name).standardizedFileURL
+        // Case-only renames hit the same file on case-insensitive volumes.
+        let caseOnly = target.path.lowercased() == url.path.lowercased()
+        guard caseOnly || !FileManager.default.fileExists(atPath: target.path) else { return }
+        flushSaves()
+        do {
+            try FileManager.default.moveItem(at: url, to: target)
+        } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        func moved(_ u: URL) -> URL {
+            if u == url { return target }
+            guard u.path.hasPrefix(url.path + "/") else { return u }
+            return URL(fileURLWithPath: target.path + u.path.dropFirst(url.path.count)).standardizedFileURL
+        }
+        func remap<V>(_ d: [URL: V]) -> [URL: V] {
+            Dictionary(d.map { (moved($0.key), $0.value) }) { a, _ in a }
+        }
+        buffers = remap(buffers)
+        editorStates = remap(editorStates)
+        previewStates = remap(previewStates)
+        selectedFile = selectedFile.map(moved)
+        expanded = Set(expanded.map(moved))
+        if let file = previewFile, moved(file) != file {
+            previewFile = moved(file)
+            scheduleCompile(delay: 0)
+        }
+        reloadTree()
+        schedulePersist()
+    }
+
+    private static func unique(in dir: URL, name: String, ext: String?) -> URL {
+        func make(_ n: String) -> URL {
+            let base = dir.appendingPathComponent(n)
+            return (ext.map { base.appendingPathExtension($0) } ?? base).standardizedFileURL
+        }
+        var url = make(name)
+        var i = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = make(ext == nil ? "\(name) \(i)" : "\(name)-\(i)")
+            i += 1
+        }
+        return url
     }
 
     // MARK: - Editing
@@ -142,7 +282,7 @@ final class Workspace {
 
     private func compile() async {
         flushSaves()
-        guard let main = mainFile, let binary = CompilerManager.shared.activeBinary else { return }
+        guard let main = previewFile, let binary = CompilerManager.shared.activeBinary else { return }
         generation += 1
         let current = generation
         let output = outputDir.appendingPathComponent("preview-\(current).pdf")
@@ -163,6 +303,8 @@ final class Workspace {
 
     func close() {
         flushSaves()
+        persistTask?.cancel()
+        persist()
         compileTask?.cancel()
         runner.cancel()
         try? FileManager.default.removeItem(at: outputDir)

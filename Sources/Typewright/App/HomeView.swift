@@ -164,7 +164,7 @@ private struct TemplateCard: View {
                     .shadow(color: .black.opacity(0.25), radius: hovering ? 8 : 3, y: hovering ? 4 : 1)
                     .overlay {
                         RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(Color.accentColor, lineWidth: 3)
+                            .strokeBorder(Color.primary.opacity(0.6), lineWidth: 3)
                             .padding(-5)
                             .opacity(hovering ? 1 : 0)
                     }

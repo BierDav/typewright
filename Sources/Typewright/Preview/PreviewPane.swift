@@ -12,6 +12,23 @@ struct PDFViewHost: NSViewRepresentable {
     }
 }
 
+/// Behind-window blur, so the preview reads as a translucent sidebar.
+struct SidebarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSVisualEffectView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+}
+
 struct PreviewPane: View {
     let workspace: Workspace
     private var preview: PreviewController { workspace.preview }
@@ -22,7 +39,7 @@ struct PreviewPane: View {
             PDFViewHost(controller: preview)
             if compilers.activeBinary == nil {
                 SetupCompilerView()
-            } else if workspace.mainFile == nil {
+            } else if workspace.previewFile == nil {
                 placeholder("No Typst file", "Create a .typ file to see a preview.")
             } else if workspace.document == nil {
                 if workspace.isCompiling || workspace.diagnostics.isEmpty {
@@ -33,8 +50,7 @@ struct PreviewPane: View {
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-        // Use the inspector's title bar strip for the page too.
-        .ignoresSafeArea(.container, edges: .top)
+        .background(SidebarMaterial())
         // Overlay so the bar never drives the pane's size.
         .overlay(alignment: .bottom) { bar }
         .onChange(of: workspace.document) { _, doc in preview.show(doc) }
@@ -69,20 +85,20 @@ struct PreviewPane: View {
         .frame(height: 38)
         .fixedSize()
         .glassEffect(.regular, in: .capsule)
+        .background(CursorArea())
         .padding(.bottom, 14)
         .opacity(workspace.document == nil ? 0 : 1)
     }
 
     private func placeholder(_ title: String, _ message: String) -> some View {
         ContentUnavailableView(title, systemImage: "doc.text", description: Text(message))
-            .background(.background)
     }
 
     private func exportPDF() {
         guard let doc = workspace.document else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
-        panel.nameFieldStringValue = (workspace.mainFile?.deletingPathExtension().lastPathComponent ?? workspace.name) + ".pdf"
+        panel.nameFieldStringValue = (workspace.previewFile?.deletingPathExtension().lastPathComponent ?? workspace.name) + ".pdf"
         panel.directoryURL = workspace.root
         if panel.runModal() == .OK, let url = panel.url { doc.write(to: url) }
     }
@@ -123,7 +139,6 @@ struct SetupCompilerView: View {
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.background)
         .task { if compilers.releases.isEmpty { await compilers.refreshReleases() } }
     }
 }
