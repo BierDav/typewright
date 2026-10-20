@@ -61,8 +61,8 @@ final class Opener {
 
     func toggleSpaces() {
         guard let state = keyState, state.space != nil else { return }
-        // The selector lives in the sidebar.
-        if !state.spacesOpen { state.sidebarVisible = true }
+        // A hidden sidebar stays hidden; the selector slides in along the window's edge instead.
+        state.floatingSidebar = false
         state.setSpacesOpen(!state.spacesOpen)
     }
 
@@ -136,27 +136,48 @@ final class Opener {
         if let state { open(url, in: state) } else { open(url) }
     }
 
-    /// Renames the space folder on disk and reopens the window on the new location.
-    func rename(_ workspace: Workspace, to name: String, in state: WindowState) {
+    /// Renames a space's folder on disk; every window showing it, its saved state and its sync follow along.
+    @discardableResult
+    func rename(space old: URL, to name: String) -> URL? {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let old = workspace.root
-        guard !name.isEmpty, !name.contains("/"), name != old.lastPathComponent else { return }
+        let old = old.standardizedFileURL
+        guard !name.isEmpty, !name.contains("/"), name != old.lastPathComponent else { return nil }
         let target = old.deletingLastPathComponent().appendingPathComponent(name).standardizedFileURL
         // Case-only renames hit the same folder on case-insensitive volumes.
         let caseOnly = target.path.lowercased() == old.path.lowercased()
-        guard caseOnly || !FileManager.default.fileExists(atPath: target.path) else { return }
-        workspace.flushSaves()
+        guard caseOnly || !FileManager.default.fileExists(atPath: target.path) else {
+            let alert = NSAlert()
+            alert.messageText = "“\(name)” already exists."
+            alert.informativeText = "Choose a different name for the space."
+            alert.runModal()
+            return nil
+        }
+        let windows = controllers.filter { controller in
+            let root = controller.state.workspace?.root ?? controller.state.space.map(Workspace.root)
+            return root?.standardizedFileURL.path == old.path
+        }
+        windows.forEach { $0.state.workspace?.flushSaves() }
         do {
             try FileManager.default.moveItem(at: old, to: target)
         } catch {
             NSAlert(error: error).runModal()
-            return
+            return nil
         }
         // Persist under the old key first so the saved state moves along.
-        workspace.close()
+        windows.forEach { $0.state.workspace?.close() }
         SpaceStore.move(from: old, to: target)
         SpaceList.replace(old, with: target)
-        state.space = target
+        SyncService.shared.moved(from: old, to: target)
+        for window in windows {
+            // A window opened on a file inside the space keeps that file.
+            let space = window.state.space?.standardizedFileURL
+            if let space, space.path.hasPrefix(old.path + "/") {
+                window.state.space = URL(fileURLWithPath: target.path + space.path.dropFirst(old.path.count))
+            } else {
+                window.state.space = target
+            }
+        }
+        return target
     }
 }
 

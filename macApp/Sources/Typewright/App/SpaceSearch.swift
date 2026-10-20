@@ -155,6 +155,7 @@ struct SpaceSearchView: View {
             .frame(height: 32)
         }
         .frame(width: Self.width)
+        .onEscapeWhenUnfocused(onClose)
         .background {
             // ⌥⌘F shows the replace field while the search has focus.
             Button("") {
@@ -305,10 +306,9 @@ struct SpaceSearchView: View {
                     }
                 }
                 .padding(6)
-                .frame(width: Self.width)
+                // The visible width, which shrinks by the scroller when scroll bars always show.
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-            .frame(width: Self.width)
             .frame(minHeight: 100, idealHeight: 220, maxHeight: 220)
             .onChange(of: selection) { _, index in
                 if hits.indices.contains(index) { proxy.scrollTo(hits[index].id) }

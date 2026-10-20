@@ -104,6 +104,16 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
         send()
     }
 
+    /// Empties the pages when another file is previewed, so the old document never stands in for the new one.
+    func clear() {
+        pending = nil
+        pageCount = 0
+        pageWidth = nil
+        guard isReady, !sent.isEmpty else { return }
+        sent = []
+        view.callAsyncJavaScript("tw.update({}, 0)", in: nil, in: .page)
+    }
+
     /// Forcing light appearance makes `prefers-color-scheme` light inside the page.
     private func applyAppearance() {
         view.appearance = darkMode ? nil : NSAppearance(named: .aqua)
@@ -195,13 +205,13 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
             if (!animated) return this.layout();
             // Keep the middle of the view on the same spot of the document while the pages resize.
             const root = document.documentElement;
-            const anchor = (scrollY + innerHeight / 2) / root.scrollHeight;
+            const anchorY = (scrollY + innerHeight / 2) / root.scrollHeight;
             const anchorX = (scrollX + innerWidth / 2) / root.scrollWidth;
             root.classList.add('tw-animating');
             this.layout();
             const end = performance.now() + 260;
             const follow = () => {
-              scrollTo(anchorX * root.scrollWidth - innerWidth / 2, anchor * root.scrollHeight - innerHeight / 2);
+              scrollTo(anchorX * root.scrollWidth - innerWidth / 2, anchorY * root.scrollHeight - innerHeight / 2);
               if (performance.now() < end) requestAnimationFrame(follow);
               else root.classList.remove('tw-animating');
             };

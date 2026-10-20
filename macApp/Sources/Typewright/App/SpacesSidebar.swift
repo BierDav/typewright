@@ -12,7 +12,7 @@ struct SpacesSidebar: View {
             ZStack {
                 if let workspace {
                     SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) }) { name in
-                        Opener.shared.rename(workspace, to: name, in: state)
+                        Opener.shared.rename(space: workspace.root, to: name)
                     }
                     .id(ObjectIdentifier(workspace))
                     .transition(.opacity.combined(with: .scale(scale: 0.92)))
@@ -40,31 +40,43 @@ struct SpacesOverlay: View {
     var body: some View {
         // Without a space the selector always shows.
         let progress = workspace == nil ? 1 : state.spacesProgress
-        let frame = state.sidebarFrame
+        let frame = state.panelFrame
         let extra = WindowState.spacesExtra * progress
         // Always the open width, so labels never rewrap while it slides.
         let width = frame.width + WindowState.spacesExtra
+        let offset = frame.minX - width * (1 - progress)
         ZStack(alignment: .topLeading) {
             // Unmounted while closed: over the split view it would swallow the divider's hover, cursor and drags.
             if state.selectorMounted {
-                // Widens the sidebar's material into the detail column, which moves aside by as much.
-                SidebarMaterial()
-                    .frame(width: extra)
-                    .frame(maxHeight: .infinity)
-                    .offset(x: frame.maxX)
+                if state.sidebarVisible {
+                    // Widens the sidebar's material into the detail column, which moves aside by as much.
+                    SidebarMaterial()
+                        .frame(width: extra)
+                        .frame(maxHeight: .infinity)
+                        .offset(x: frame.maxX)
+                } else {
+                    // Without a sidebar underneath, the selector brings all of its material along.
+                    SidebarMaterial()
+                        .frame(width: width)
+                        .frame(maxHeight: .infinity)
+                        .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 1) }
+                        .offset(x: offset)
+                }
                 SpacesPane(state: state, current: workspace?.root.path, canClose: workspace != nil,
                            active: progress == 1, spaces: spaces) {
                     spaces = SpaceList.all
                 }
                     .frame(width: width, height: frame.height)
-                    .offset(x: frame.minX - width * (1 - progress), y: frame.minY)
+                    .offset(x: offset, y: frame.minY)
                     .allowsHitTesting(progress == 1)
             }
-            // Always shown, and it follows the selector's edge while that slides.
-            SidebarResizeHandle(state: state)
-                .frame(width: 9)
-                .frame(maxHeight: .infinity)
-                .offset(x: frame.maxX + extra - 4.5)
+            // Follows the selector's edge while that slides; a hidden sidebar has no divider to drag.
+            if state.sidebarVisible {
+                SidebarResizeHandle(state: state)
+                    .frame(width: 9)
+                    .frame(maxHeight: .infinity)
+                    .offset(x: frame.maxX + extra - 4.5)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .ignoresSafeArea()
@@ -185,6 +197,8 @@ private struct SpacesPane: View {
     @FocusState private var focused: Bool
     /// The pointer while folders from Finder hover the list.
     @State private var externalDrop: CGPoint?
+    /// The space whose name is being edited in place.
+    @State private var renaming: URL?
     private let sync = SyncService.shared
 
     private static let rowHeight: CGFloat = 42
@@ -230,8 +244,17 @@ private struct SpacesPane: View {
             LazyVStack(spacing: 2) {
                 ForEach(Array(spaces.enumerated()), id: \.element) { index, url in
                     SpaceRow(url: url, isCurrent: url.path == current, isHighlighted: focused && highlighted == url,
-                             isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url)) {
+                             isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url),
+                             isRenaming: renaming == url) {
                         open(url)
+                    } onStartRename: {
+                        renaming = url
+                    } onRename: { name in
+                        guard renaming == url else { return }
+                        renaming = nil
+                        if let name, Opener.shared.rename(space: url, to: name) != nil {
+                            withAnimation(.smooth(duration: 0.2)) { onChange() }
+                        }
                     } onForget: {
                         forget(url)
                     } onToggleSync: {
@@ -455,7 +478,10 @@ private struct SpaceRow: View {
     let isDragged: Bool
     let isSynced: Bool
     let isShared: Bool
+    let isRenaming: Bool
     let onOpen: () -> Void
+    let onStartRename: () -> Void
+    let onRename: (String?) -> Void
     let onForget: () -> Void
     let onToggleSync: () -> Void
     let onRemoveEverywhere: () -> Void
@@ -473,8 +499,12 @@ private struct SpaceRow: View {
             Image(systemName: isCurrent ? "folder.fill" : "folder")
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 1) {
-                Text(url.lastPathComponent)
-                    .lineLimit(1)
+                if isRenaming {
+                    RenameField(name: url.lastPathComponent, base: url.lastPathComponent, onRename: onRename)
+                } else {
+                    Text(url.lastPathComponent)
+                        .lineLimit(1)
+                }
                 Text(subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
@@ -519,11 +549,14 @@ private struct SpaceRow: View {
                     } else if abs(value.translation.width) < 40 {
                         onOpen()
                     }
-                }
+                },
+            // The name field gets its clicks while renaming.
+            including: isRenaming ? .subviews : .all
         )
         .contextMenu {
             Button("Open", action: onOpen)
             Button("Open in New Window") { Opener.shared.openInNewWindow(url) }
+            Button("Rename…", action: onStartRename)
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             Button("Copy Path") { copyPath(url) }
             Divider()
@@ -659,7 +692,8 @@ private struct SpaceSwipe: NSViewRepresentable {
         }
 
         private func handle(_ event: NSEvent) -> NSEvent? {
-            guard let state, event.window === window, event.hasPreciseScrollingDeltas, state.space != nil else { return event }
+            guard let state, event.window === window, event.hasPreciseScrollingDeltas, state.space != nil,
+                  state.overlay == nil || tracking == true else { return event }
             // The flick's momentum would otherwise scroll whatever is under the pointer.
             if event.momentumPhase != [] {
                 let swallow = swallowMomentum

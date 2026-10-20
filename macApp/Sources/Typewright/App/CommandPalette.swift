@@ -26,7 +26,7 @@ struct WindowOverlayView: View {
                     }
                 }
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.primary.opacity(0.12)))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.12)))
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .shadow(color: .black.opacity(0.3), radius: 30, y: 12)
                 .padding(.top, 72)
@@ -42,6 +42,36 @@ struct WindowOverlayView: View {
         state.overlay = nil
         // Back to the editor, which the palette's field took focus from.
         if let tv = workspace?.find.textView { tv.window?.makeFirstResponder(tv) }
+    }
+}
+
+/// Esc still reaches an overlay when none of its fields has focus, like after clicking a row or the material.
+private struct EscapeMonitor: ViewModifier {
+    let action: () -> Void
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                // Overlays open in the key window; others may have their own.
+                let window = NSApp.keyWindow
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    // Text views handle Esc themselves, like the fields' own handlers or Vim mode.
+                    guard event.keyCode == 53, event.window === window, !(window?.firstResponder is NSText) else { return event }
+                    action()
+                    return nil
+                }
+            }
+            .onDisappear {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                monitor = nil
+            }
+    }
+}
+
+extension View {
+    func onEscapeWhenUnfocused(_ action: @escaping () -> Void) -> some View {
+        modifier(EscapeMonitor(action: action))
     }
 }
 
@@ -92,6 +122,8 @@ struct CommandPalette: View {
     @State private var query = ""
     @State private var selection = 0
     @State private var pages: [PalettePage] = []
+    /// Where the pointer last moved over the list.
+    @State private var pointer = NSEvent.mouseLocation
     @FocusState private var focused: Bool
 
     private var page: PalettePage? { pages.last }
@@ -134,6 +166,7 @@ struct CommandPalette: View {
             footer
         }
         .frame(width: 640)
+        .onEscapeWhenUnfocused(back)
         // Swiping to the space overview or another space changes what the palette offers.
         .onChange(of: context) {
             pages = []
@@ -220,7 +253,12 @@ struct CommandPalette: View {
                                 selection = index
                                 run()
                             }
-                            .onHover { if $0 { selection = index } }
+                            .onContinuousHover { phase in
+                                // Rows scrolling under a resting pointer don't steal the keyboard's selection.
+                                guard case .active = phase, NSEvent.mouseLocation != pointer else { return }
+                                pointer = NSEvent.mouseLocation
+                                selection = index
+                            }
                     }
                     if items.isEmpty {
                         Text("No results")
@@ -231,11 +269,10 @@ struct CommandPalette: View {
                 }
                 .padding(.horizontal, 6)
                 .padding(.bottom, 6)
-                // Long titles truncate instead of widening the list, which would let it scroll sideways.
-                .frame(width: 640)
+                // The visible width, which shrinks by the scroller when scroll bars always show; a fixed width would scroll sideways.
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-            .frame(width: 640, height: 360)
+            .frame(height: 360)
             .onChange(of: selection) { _, index in
                 if items.indices.contains(index) { proxy.scrollTo(items[index].id) }
             }
@@ -412,6 +449,13 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "render.\(mode.rawValue)", title: "Render Preview as \(mode.rawValue.uppercased())",
                                      icon: "doc.richtext", section: "Space", action: .run { ws.renderMode = mode }))
         }
+        items.append(PaletteItem(id: "space.rename", title: "Rename \(ws.name)…", icon: "pencil", section: "Space",
+                                 keywords: ["rename space", "rename folder"],
+                                 action: .page(PalettePage(title: "Rename \(ws.name)", placeholder: "New name",
+                                                           kind: .input(initial: ws.name) { new in
+                                     // After the palette is gone; the window switches to the renamed folder.
+                                     DispatchQueue.main.async { Opener.shared.rename(space: ws.root, to: new) }
+                                 }))))
         items.append(PaletteItem(id: "space.finder", title: "Reveal \(ws.name) in Finder", icon: "folder", section: "Space",
                                  action: .run { NSWorkspace.shared.activateFileViewerSelecting([ws.root]) }))
         if SyncService.shared.isSynced(ws.root) {

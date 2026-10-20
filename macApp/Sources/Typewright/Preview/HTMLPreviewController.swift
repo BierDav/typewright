@@ -49,6 +49,8 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     }
 
     @ObservationIgnored private var loadedBase: URL?
+    /// The shell load in flight; an older load finishing must not mark the new shell ready.
+    @ObservationIgnored private var loading: WKNavigation?
     @ObservationIgnored private var isReady = false
     @ObservationIgnored private let scrollReporter = ScrollReporter()
     @ObservationIgnored private var scrollFraction = 0.0
@@ -140,10 +142,18 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             isReady = false
             sent = nil
             // A page loaded from a string can't read files; relative images and links go through the scheme instead.
-            view.loadHTMLString(shell, baseURL: LocalFileSchemeHandler.url(for: baseURL))
+            loading = view.loadHTMLString(shell, baseURL: LocalFileSchemeHandler.url(for: baseURL))
         } else {
             send()
         }
+    }
+
+    /// Empties the page when another file is previewed, so the old document never stands in for the new one.
+    func clear() {
+        pending = nil
+        guard isReady, sent != "" else { return }
+        sent = ""
+        view.callAsyncJavaScript("tw.update(html)", arguments: ["html": ""], in: nil, in: .page)
     }
 
     func zoomIn() {
@@ -434,7 +444,10 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard navigation == loading else { return }
         isReady = true
+        // The fresh shell is empty, whatever an older one was sent.
+        sent = nil
         updateFit()
         applyTextSize()
         applyFonts()
@@ -442,7 +455,8 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        // Start over with a fresh shell next time.
+        // Start over with a fresh shell next time; a load replaced by a newer one doesn't count.
+        guard navigation == loading else { return }
         loadedBase = nil
     }
 

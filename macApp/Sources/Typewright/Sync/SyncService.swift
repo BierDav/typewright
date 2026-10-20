@@ -218,6 +218,18 @@ final class SyncService {
         forget(id)
     }
 
+    /// Follows a space folder renamed here; its contents are unchanged, so nothing is synced for the move itself.
+    func moved(from old: URL, to new: URL) {
+        guard let id = spaceID(for: old) else { return }
+        remember(id, root: new)
+        guard watchers[id] != nil else { return }
+        watchers[id] = FolderWatcher(new.standardizedFileURL) { [weak self] in
+            MainActor.assumeIsolated { self?.scheduleScan(id) }
+        }
+        scheduleScan(id)
+        NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
+    }
+
     private func forget(_ id: String) {
         defer { NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil) }
         watchers[id] = nil

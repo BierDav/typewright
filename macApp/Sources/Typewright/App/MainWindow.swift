@@ -22,7 +22,13 @@ final class WindowState {
     var pendingReveal: SourceLocation?
     /// A file to select once the window opened its space, keeping its saved caret.
     var pendingFile: URL?
-    var sidebarVisible = true
+    var sidebarVisible = true {
+        didSet { if sidebarVisible { floatingSidebar = false } }
+    }
+    /// The hidden sidebar floating over the space while the pointer is near the window's left edge.
+    var floatingSidebar = false
+    /// The window's content size, to place the selector and floating sidebar while the sidebar is hidden.
+    var windowSize = CGSize(width: 1280, height: 820)
     /// The space shown, for menu commands.
     @ObservationIgnored weak var workspace: Workspace?
     /// Live selector progress while a two-finger swipe drives it.
@@ -34,11 +40,20 @@ final class WindowState {
         didSet {
             // Remembered across launches; only real resizes count, not the first layout pass.
             guard sidebarFrame.width != oldValue.width, sidebarFrame.width >= Self.minSidebarWidth else { return }
+            sidebarWidth = sidebarFrame.width
             UserDefaults.standard.set(Double(sidebarFrame.width), forKey: Self.sidebarWidthKey)
         }
     }
     /// The sidebar width the window opens with.
     let initialSidebarWidth: CGFloat
+    /// The last real sidebar width; collapsing reports bogus frames.
+    private var sidebarWidth: CGFloat
+
+    /// Where the selector and the floating sidebar sit: over the sidebar, or along the left edge while it's hidden.
+    var panelFrame: CGRect {
+        guard !sidebarVisible else { return sidebarFrame }
+        return CGRect(x: 0, y: sidebarFrame.minY, width: sidebarWidth, height: max(windowSize.height - sidebarFrame.minY, 0))
+    }
 
     static let minSidebarWidth: CGFloat = 180
     private static let sidebarWidthKey = "sidebarWidth"
@@ -51,6 +66,7 @@ final class WindowState {
         self.space = space
         let saved = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
         initialSidebarWidth = saved >= Self.minSidebarWidth ? saved : 220
+        sidebarWidth = initialSidebarWidth
     }
 
     /// Opens or closes the selector with its slide.
@@ -124,6 +140,15 @@ struct MainWindow: View {
             .overlay { dimming }
         }
         .toolbar(removing: .sidebarToggle)
+        .background {
+            GeometryReader { geo in
+                Color.clear.onChange(of: geo.size, initial: true) { _, size in state.windowSize = size }
+            }
+            .ignoresSafeArea()
+        }
+        .overlay {
+            if let workspace, !state.sidebarVisible { FloatingSidebar(state: state, workspace: workspace) }
+        }
         .overlay { SpacesOverlay(state: state, workspace: workspace) }
         .overlay { WindowOverlayView(state: state, workspace: workspace) }
         .background(HiddenTitleBar(title: workspace?.selectedFile?.lastPathComponent ?? workspace?.name ?? "Typewright",
@@ -178,6 +203,64 @@ struct MainWindow: View {
                 state.setSpacesOpen(false)
             }
             .allowsHitTesting(progress > 0)
+    }
+}
+
+/// The hidden sidebar as a floating card; it slides in while the pointer is at the window's left edge.
+private struct FloatingSidebar: View {
+    let state: WindowState
+    let workspace: Workspace
+    @State private var hideTask: Task<Void, Never>?
+
+    private static let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+
+    var body: some View {
+        let available = state.spacesProgress == 0 && state.overlay == nil
+        ZStack(alignment: .leading) {
+            if available {
+                // The strip that summons it; thin, so the editor's edge stays clickable.
+                Color.clear
+                    .frame(width: 6)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onHover { inside in inside ? show() : scheduleHide() }
+            }
+            if available && state.floatingSidebar {
+                SidebarView(workspace: workspace, onShowSpaces: {
+                    state.floatingSidebar = false
+                    state.setSpacesOpen(true)
+                }) { name in
+                    Opener.shared.rename(space: workspace.root, to: name)
+                }
+                .frame(width: state.panelFrame.width)
+                .background(SidebarMaterial())
+                .clipShape(Self.shape)
+                .overlay(Self.shape.stroke(Color.primary.opacity(0.12)))
+                .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
+                .padding([.leading, .bottom], 8)
+                .onHover { inside in inside ? show() : scheduleHide() }
+                .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .animation(.smooth(duration: 0.25), value: state.floatingSidebar)
+        .onDisappear { hideTask?.cancel() }
+    }
+
+    private func show() {
+        hideTask?.cancel()
+        hideTask = nil
+        state.floatingSidebar = true
+    }
+
+    /// A short grace period, so brushing past its edge doesn't close it.
+    private func scheduleHide() {
+        hideTask?.cancel()
+        hideTask = Task {
+            try? await Task.sleep(for: .seconds(0.35))
+            guard !Task.isCancelled else { return }
+            state.floatingSidebar = false
+        }
     }
 }
 

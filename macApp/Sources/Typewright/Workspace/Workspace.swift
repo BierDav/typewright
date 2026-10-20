@@ -44,6 +44,11 @@ final class Workspace: EditorLanguage {
             UserDefaults.standard.set(renderMode.rawValue, forKey: "renderMode")
             // The new format opens where the old one was.
             capturePreviewState(mode: oldValue)
+            // Output from the last time a format was shown is stale; it would flash an older document.
+            html = nil
+            svgPages = nil
+            htmlPreview.clear()
+            svgPreview.clear()
             restorePreviews(for: previewFile)
             invalidateCompile()
             scheduleCompile(delay: 0)
@@ -303,6 +308,9 @@ final class Workspace: EditorLanguage {
         html = nil
         svgPages = nil
         markdownHTML = nil
+        htmlPreview.clear()
+        svgPreview.clear()
+        markdownPreview.clear()
         failureLog = nil
         diagnostics = []
         lastDuration = nil
@@ -538,6 +546,7 @@ final class Workspace: EditorLanguage {
 
     private func relocate(_ url: URL, to target: URL) {
         flushSaves()
+        guard let references = referenceEdits(moving: url, to: target) else { return }
         do {
             try FileManager.default.moveItem(at: url, to: target)
         } catch {
@@ -563,7 +572,74 @@ final class Workspace: EditorLanguage {
             scheduleCompile(delay: 0)
         }
         reloadTree()
+        // Paths in the space's files follow the move.
+        for (file, edits) in references {
+            let file = moved(file)
+            guard let text = bufferText(file) else { continue }
+            updateBuffer(file, text: TypewrightCore.TextEdits.shared.apply(edits: edits, text: text))
+        }
+        if !references.isEmpty { flushSaves() }
         schedulePersist()
+    }
+
+    /// Edits that keep the space's paths pointing at `url` once it moves to `target`, keyed by the files before the move.
+    /// Paths that might not be references, like ones in comments or passed to other functions, are up to the user;
+    /// nil when they cancel the move.
+    private func referenceEdits(moving url: URL, to target: URL) -> [URL: [TypewrightCore.TextEdit]]? {
+        guard let from = relative(url), let to = relative(target) else { return [:] }
+        var found: [(file: URL, text: String, reference: PathReference)] = []
+        for node in Self.flatten(tree) where node.isTypst {
+            guard let path = relative(node.url), let text = bufferText(node.url) else { continue }
+            let references = PathReferences.shared.moved(text: text, file: path, from: from, to: to) { [root] path in
+                KotlinBoolean(bool: FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path))
+            }
+            found += references.map { (node.url, text, $0) }
+        }
+        let unsure = found.indices.filter { !found[$0].reference.certain }
+        var skipped = Set<Int>()
+        if !unsure.isEmpty {
+            guard let chosen = confirmReferences(unsure.map { found[$0] }, moving: url) else { return nil }
+            skipped = Set(unsure.enumerated().filter { !chosen.contains($0.offset) }.map(\.element))
+        }
+        var edits: [URL: [TypewrightCore.TextEdit]] = [:]
+        for (index, item) in found.enumerated() where !skipped.contains(index) {
+            edits[item.file, default: []].append(TypewrightCore.TextEdit(range: item.reference.range, newText: item.reference.newPath))
+        }
+        return edits
+    }
+
+    /// Asks which of the uncertain references to update; nil cancels the move.
+    private func confirmReferences(_ items: [(file: URL, text: String, reference: PathReference)], moving url: URL) -> Set<Int>? {
+        let alert = NSAlert()
+        alert.messageText = items.count == 1 ? "Update this path to “\(url.lastPathComponent)”?"
+            : "Update these paths to “\(url.lastPathComponent)”?"
+        alert.informativeText = "They look like paths to it, but sit in comments, raw text or calls to functions that may "
+            + "resolve paths differently, like ones from packages. Imports, includes and images are updated either way."
+        let boxes = items.map { item in
+            let line = Self.lineText(Int(item.reference.line), in: item.text as NSString).trimmingCharacters(in: .whitespaces)
+            let title = "\(relative(item.file) ?? item.file.lastPathComponent):\(item.reference.line + 1)  \(line)"
+            let box = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+            box.state = item.reference.inComment ? .off : .on
+            box.lineBreakMode = .byTruncatingTail
+            box.toolTip = "\(item.reference.oldPath) → \(item.reference.newPath)"
+            return box
+        }
+        let stack = NSStackView(views: boxes)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
+        stack.frame.size = stack.fittingSize
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: min(stack.fittingSize.height, 220)))
+        scroll.documentView = stack
+        scroll.hasVerticalScroller = stack.fittingSize.height > 220
+        scroll.drawsBackground = false
+        boxes.forEach { $0.widthAnchor.constraint(lessThanOrEqualToConstant: 370).isActive = true }
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Move")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return Set(boxes.indices.filter { boxes[$0].state == .on })
     }
 
     private static func unique(in dir: URL, name: String, ext: String?) -> URL {
