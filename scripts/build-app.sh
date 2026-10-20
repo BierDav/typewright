@@ -2,7 +2,8 @@
 # Builds a universal Typewright.app and zips it into dist/.
 # Signed with Developer ID and the passkey entitlement when TYPEWRIGHT_SIGN_IDENTITY and
 # TYPEWRIGHT_PROVISIONING_PROFILE (a .provisionprofile path) are set, ad-hoc otherwise (no passkeys, no sync).
-# Notarized when TYPEWRIGHT_NOTARY_APPLE_ID, TYPEWRIGHT_NOTARY_PASSWORD and TYPEWRIGHT_NOTARY_TEAM are set too.
+# Notarized when TYPEWRIGHT_NOTARY_APPLE_ID, TYPEWRIGHT_NOTARY_PASSWORD and TYPEWRIGHT_NOTARY_TEAM are set too,
+# or locally with a `notarytool store-credentials` profile named in TYPEWRIGHT_NOTARY_PROFILE.
 # Usage: build-app.sh <version> [build-number]
 set -euo pipefail
 version=$1
@@ -28,14 +29,21 @@ if [ -n "${TYPEWRIGHT_SIGN_IDENTITY:-}" ] && [ -n "${TYPEWRIGHT_PROVISIONING_PRO
   entitlements=$(mktemp -t typewright).plist
   sed "s/\$(TYPEWRIGHT_PASSKEY_DOMAIN)/$domain/" "$root/macApp/Resources/Passkeys.entitlements" > "$entitlements"
   # Restricted entitlements only count with the profile's app and team identifiers alongside.
-  plutil -insert com.apple.application-identifier -string "$team.$bundle" "$entitlements"
-  plutil -insert com.apple.developer.team-identifier -string "$team" "$entitlements"
+  # PlistBuddy, since plutil reads the dots in these keys as a key path.
+  /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string $team.$bundle" \
+    -c "Add :com.apple.developer.team-identifier string $team" "$entitlements"
   cp "$TYPEWRIGHT_PROVISIONING_PROFILE" "$app/Contents/embedded.provisionprofile"
-  codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$TYPEWRIGHT_SIGN_IDENTITY" "$app"
-  if [ -n "${TYPEWRIGHT_NOTARY_APPLE_ID:-}" ]; then
+  # A dedicated keychain (TYPEWRIGHT_SIGN_KEYCHAIN) avoids the login keychain's access prompts.
+  codesign --force --options runtime --timestamp --entitlements "$entitlements" \
+    ${TYPEWRIGHT_SIGN_KEYCHAIN:+--keychain "$TYPEWRIGHT_SIGN_KEYCHAIN"} --sign "$TYPEWRIGHT_SIGN_IDENTITY" "$app"
+  if [ -n "${TYPEWRIGHT_NOTARY_APPLE_ID:-}" ] || [ -n "${TYPEWRIGHT_NOTARY_PROFILE:-}" ]; then
     ditto -c -k --keepParent "$app" "$zip"
-    xcrun notarytool submit "$zip" --apple-id "$TYPEWRIGHT_NOTARY_APPLE_ID" --password "$TYPEWRIGHT_NOTARY_PASSWORD" \
-      --team-id "$TYPEWRIGHT_NOTARY_TEAM" --wait >&2
+    if [ -n "${TYPEWRIGHT_NOTARY_PROFILE:-}" ]; then
+      xcrun notarytool submit "$zip" --keychain-profile "$TYPEWRIGHT_NOTARY_PROFILE" --wait >&2
+    else
+      xcrun notarytool submit "$zip" --apple-id "$TYPEWRIGHT_NOTARY_APPLE_ID" --password "$TYPEWRIGHT_NOTARY_PASSWORD" \
+        --team-id "$TYPEWRIGHT_NOTARY_TEAM" --wait >&2
+    fi
     xcrun stapler staple "$app" >&2
     rm -f "$zip"
     spctl --assess --type execute --verbose "$app" >&2

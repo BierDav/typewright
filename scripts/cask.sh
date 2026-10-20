@@ -17,11 +17,6 @@ $( [ -n "$conflict" ] && echo "  conflicts_with cask: \"$conflict\"" )
 
   app "Typewright.app"
 
-  # Ad-hoc signed; clear quarantine so Gatekeeper lets it launch.
-  postflight_steps do
-    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Typewright.app"]
-  end
-
   zap trash: [
     "~/Library/Application Support/Typewright",
     "~/Library/Preferences/dev.bierdav.Typewright.plist",
