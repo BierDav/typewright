@@ -220,6 +220,7 @@ final class LanguageClient {
                                                        "resolveSupport": ["properties": ["documentation", "detail"]]]],
                     "definition": ["linkSupport": true],
                     "hover": ["contentFormat": ["markdown", "plaintext"]],
+                    "signatureHelp": ["signatureInformation": ["documentationFormat": ["markdown", "plaintext"]]],
                 ],
             ],
         ]
@@ -305,6 +306,22 @@ final class LanguageClient {
         return Self.markdown(resolved?["documentation"])
     }
 
+    /// Docs of a completion as its hover shows them, for servers that leave them out of the list and resolve, like tinymist.
+    /// Hovers the item's name in a hidden copy of the file with the name filled in, so imports still count.
+    func hoverDocumentation(of item: CompletionItem, in url: URL, text: NSString) async -> String? {
+        guard var range = item.range, NSMaxRange(range) <= text.length, !item.label.isEmpty else { return nil }
+        // The list stays open while typing, so the range may end before the rest of the word typed since.
+        let word = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-."))
+        while NSMaxRange(range) < text.length, let scalar = UnicodeScalar(text.character(at: NSMaxRange(range))),
+              word.contains(scalar) { range.length += 1 }
+        let filled = text.replacingCharacters(in: range, with: item.label) as NSString
+        // Beside the file, so relative imports resolve the same; it never reaches the disk.
+        let scratch = url.deletingLastPathComponent().appendingPathComponent(".typewright-docs-\(url.lastPathComponent)")
+        open(scratch, text: filled as String)
+        let offset = range.location + (item.label as NSString).length - 1
+        return await hover(in: scratch, text: filled, at: offset)?.markdown
+    }
+
     /// A string or MarkupContent; nil when empty.
     private static func markdown(_ value: Any?) -> String? {
         let text = value as? String ?? (value as? [String: Any])?["value"] as? String
@@ -345,6 +362,22 @@ final class LanguageClient {
         let markdown = (contents as? [Any]).map { $0.compactMap(plain).joined(separator: "\n\n") } ?? plain(contents)
         guard let markdown, !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return (markdown, (result["range"] as? [String: Any]).flatMap { Self.range($0, in: text) })
+    }
+
+    /// Docs of the named argument at `offset`, like `unit` in `solve(x, unit: "min")`, which hover doesn't cover.
+    func parameterDocs(in url: URL, text: NSString, at offset: Int) async -> (markdown: String, range: NSRange?)? {
+        guard let argument = Arguments.shared.namedArgument(text: text as String, offset: Int32(clamping: offset)),
+              let result = await request("textDocument/signatureHelp", Self.position(url, text, offset)) as? [String: Any],
+              let signatures = result["signatures"] as? [[String: Any]], !signatures.isEmpty else { return nil }
+        let signature = signatures[min(result["activeSignature"] as? Int ?? 0, signatures.count - 1)]
+        let label = signature["label"] as? String ?? ""
+        let parameters = signature["parameters"] as? [[String: Any]] ?? []
+        guard let parameter = parameters.first(where: { ($0["label"] as? String)?.trimmingCharacters(in: [":"]) == argument.name })
+        else { return nil }
+        let docs = parameter["documentation"].flatMap { ($0 as? String) ?? ($0 as? [String: Any])?["value"] as? String } ?? ""
+        let type = Arguments.shared.parameterType(signature: label, name: argument.name).map { ": \($0)" } ?? ""
+        let range = NSRange(location: Int(argument.range.location), length: Int(argument.range.length))
+        return ("```typc\n\(argument.name)\(type)\n```" + (docs.isEmpty ? "" : "\n\n" + docs), range)
     }
 
     /// Every use of the symbol at `offset` in the same file, its definition included.

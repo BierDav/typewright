@@ -15,7 +15,7 @@ struct SpacesSidebar: View {
                         Opener.shared.rename(space: workspace.root, to: name)
                     }
                     .id(ObjectIdentifier(workspace))
-                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                    .transition(state.switchForward == nil ? .opacity.combined(with: .scale(scale: 0.92)) : state.spaceTransition)
                     .scaleEffect(1 - 0.08 * progress)
                     .opacity(1 - progress)
                     .allowsHitTesting(progress == 0)
@@ -199,6 +199,9 @@ private struct SpacesPane: View {
     @State private var externalDrop: CGPoint?
     /// The space whose name is being edited in place.
     @State private var renaming: URL?
+    /// Shows each row's ⌘ number while ⌘ is held.
+    @State private var commandDown = false
+    @State private var flagsMonitor: Any?
     private let sync = SyncService.shared
 
     private static let rowHeight: CGFloat = 42
@@ -237,6 +240,18 @@ private struct SpacesPane: View {
         .onChange(of: spaces) {
             if let highlighted, !spaces.contains(highlighted) { self.highlighted = nil }
         }
+        .onAppear {
+            flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+                let down = event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command
+                if down != commandDown { withAnimation(.easeOut(duration: 0.12)) { commandDown = down } }
+                return event
+            }
+        }
+        .onDisappear {
+            if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
+            flagsMonitor = nil
+            commandDown = false
+        }
     }
 
     private var list: some View {
@@ -245,7 +260,7 @@ private struct SpacesPane: View {
                 ForEach(Array(spaces.enumerated()), id: \.element) { index, url in
                     SpaceRow(url: url, isCurrent: url.path == current, isHighlighted: focused && highlighted == url,
                              isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url),
-                             isRenaming: renaming == url) {
+                             isRenaming: renaming == url, shortcut: commandDown && index < 9 ? index + 1 : nil) {
                         open(url)
                     } onStartRename: {
                         renaming = url
@@ -479,6 +494,8 @@ private struct SpaceRow: View {
     let isSynced: Bool
     let isShared: Bool
     let isRenaming: Bool
+    /// The ⌘ number shown while ⌘ is held.
+    let shortcut: Int?
     let onOpen: () -> Void
     let onStartRename: () -> Void
     let onRename: (String?) -> Void
@@ -512,7 +529,15 @@ private struct SpaceRow: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 0)
-            if isSynced {
+            if let shortcut {
+                Text("⌘\(shortcut)")
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            } else if isSynced {
                 Image(systemName: isShared ? "person.2" : "arrow.triangle.2.circlepath")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)

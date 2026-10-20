@@ -379,6 +379,18 @@ pub unsafe extern "C" fn tw_highlight_free(runs: *mut u32, count: usize) {
     drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(runs, count)) });
 }
 
+/// Hidden syntax for the editor; see `conceal_runs`. Free with `tw_highlight_free`.
+///
+/// # Safety
+/// `text` must point to `len` bytes of UTF-8 and `count` be valid for writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_conceal(text: *const u8, len: usize, count: *mut usize) -> *mut u32 {
+    let bytes = if len == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(text, len) } };
+    let runs = crate::conceal_runs(&String::from_utf8_lossy(bytes)).into_boxed_slice();
+    unsafe { *count = runs.len() };
+    Box::into_raw(runs) as *mut u32
+}
+
 // MARK: - Packages
 
 fn obtain_package(spec: &str) -> Result<String, String> {

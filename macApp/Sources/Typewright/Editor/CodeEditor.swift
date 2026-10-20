@@ -34,7 +34,7 @@ extension EditorLanguage {
     func documentation(of item: CompletionItem) async -> String? { item.documentation }
 }
 
-final class TypstTextView: NSTextView {
+final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     /// Color literals that get a clickable swatch in the gap kerned in before them.
     var swatches: [ColorLiteral] = [] {
         didSet { if swatches != oldValue { needsDisplay = true } }
@@ -55,6 +55,244 @@ final class TypstTextView: NSTextView {
     /// Opens find, with the replace field when true.
     var onFind: ((Bool) -> Void)?
     var onFindStep: ((Int) -> Void)?
+    // MARK: Auto-closing
+
+    /// Openers and the closers typed along with them; empty turns it off.
+    var autoPairs: [Character: Character] = [:]
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        guard !autoPairs.isEmpty, !hasMarkedText(), replacementRange.location == NSNotFound || replacementRange == selectedRange(),
+              let typed = (string as? String) ?? (string as? NSAttributedString)?.string, typed.count == 1,
+              let c = typed.first, isEditable else { return super.insertText(string, replacementRange: replacementRange) }
+        let s = self.string as NSString
+        let selection = selectedRange()
+        let next = NSMaxRange(selection) < s.length ? Character(UnicodeScalar(s.character(at: NSMaxRange(selection))) ?? " ") : nil
+        let previous = selection.location > 0 ? Character(UnicodeScalar(s.character(at: selection.location - 1)) ?? " ") : nil
+        let closers = Set(autoPairs.values)
+        // Typing the closer that's already there steps over it.
+        if selection.length == 0, closers.contains(c), next == c, previous != "\\" {
+            return setSelectedRange(NSRange(location: selection.location + 1, length: 0))
+        }
+        guard let closer = autoPairs[c], previous != "\\" else { return super.insertText(string, replacementRange: replacementRange) }
+        // A selection gets wrapped and stays selected.
+        if selection.length > 0 {
+            let inner = s.substring(with: selection)
+            super.insertText(String(c) + inner + String(closer), replacementRange: selection)
+            return setSelectedRange(NSRange(location: selection.location + 1, length: selection.length))
+        }
+        // Only before whitespace, a closer or punctuation, so typing in front of a word doesn't add a stray closer.
+        let symmetric = c == closer
+        let freeAfter = next.map { $0.isWhitespace || closers.contains($0) || ",;:.".contains($0) } ?? true
+        let freeBefore = !symmetric || !(previous.map { $0.isLetter || $0.isNumber } ?? false)
+        guard freeAfter, freeBefore else { return super.insertText(string, replacementRange: replacementRange) }
+        super.insertText(String(c) + String(closer), replacementRange: selection)
+        setSelectedRange(NSRange(location: selection.location + 1, length: 0))
+    }
+
+    /// Backspace in an empty pair takes the closer along.
+    override func deleteBackward(_ sender: Any?) {
+        let s = string as NSString
+        let selection = selectedRange()
+        if !autoPairs.isEmpty, selection.length == 0, selection.location > 0, selection.location < s.length,
+           let open = UnicodeScalar(s.character(at: selection.location - 1)).map(Character.init),
+           let close = UnicodeScalar(s.character(at: selection.location)).map(Character.init),
+           autoPairs[open] == close {
+            let pair = NSRange(location: selection.location - 1, length: 2)
+            if shouldChangeText(in: pair, replacementString: "") {
+                replaceCharacters(in: pair, with: "")
+                didChangeText()
+                setSelectedRange(NSRange(location: pair.location, length: 0))
+            }
+            return
+        }
+        super.deleteBackward(sender)
+    }
+
+    // MARK: Hidden syntax
+
+    /// Math shows as it renders, like `$12"k"Omega$` as `$12kΩ$`, except the piece the caret touches.
+    var concealsMath = false {
+        didSet {
+            guard concealsMath != oldValue else { return }
+            layoutManager?.delegate = self
+            observeStorage()
+            conceals = concealsMath ? Highlighter.conceals(in: string) : []
+            invalidateGlyphs(in: NSRange(location: 0, length: (string as NSString).length))
+            updateRevealedEquation()
+        }
+    }
+
+    /// Sorted by location; found again while each edit is processed, before anything is laid out with stale positions.
+    private(set) var conceals: [Highlighter.Conceal] = [] {
+        didSet { pieces = Self.pieces(of: conceals) }
+    }
+
+    /// What reveals as one: a symbol, or a string with both its quotes. `box` is the part that stays visible.
+    private struct Piece {
+        let range: NSRange
+        let box: NSRange
+    }
+    private var pieces: [Piece] = []
+
+    private static func pieces(of conceals: [Highlighter.Conceal]) -> [Piece] {
+        var pieces: [Piece] = []
+        var i = 0
+        while i < conceals.count {
+            let c = conceals[i]
+            i += 1
+            // Hidden quotes come in pairs.
+            if c.replacement == 0, i < conceals.count, conceals[i].replacement == 0, conceals[i].equation == c.equation {
+                let close = conceals[i].range
+                i += 1
+                pieces.append(Piece(range: NSRange(location: c.range.location, length: NSMaxRange(close) - c.range.location),
+                                    box: NSRange(location: NSMaxRange(c.range), length: close.location - NSMaxRange(c.range))))
+            } else {
+                pieces.append(Piece(range: c.range, box: NSRange(location: c.range.location, length: c.replacement == 0 ? 0 : 1)))
+            }
+        }
+        return pieces
+    }
+    private var storageObserver: (any NSObjectProtocol)?
+    /// The conceals before the edits not yet compared, and how much those edits changed the length.
+    private var pendingConceals: (old: [Highlighter.Conceal], delta: Int)?
+
+    private func observeStorage() {
+        guard storageObserver == nil, let storage = textStorage else { return }
+        storageObserver = NotificationCenter.default.addObserver(
+            forName: NSTextStorage.didProcessEditingNotification, object: storage, queue: nil
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.storageDidProcessEditing() } }
+    }
+
+    deinit {
+        if let storageObserver { NotificationCenter.default.removeObserver(storageObserver) }
+    }
+
+    /// Runs before the layout manager hears of the edit, so its new glyphs see the new conceals.
+    private func storageDidProcessEditing() {
+        guard concealsMath, let storage = textStorage, storage.editedMask.contains(.editedCharacters) else { return }
+        let first = pendingConceals == nil
+        pendingConceals = (pendingConceals?.old ?? conceals, (pendingConceals?.delta ?? 0) + storage.changeInLength)
+        conceals = Highlighter.conceals(in: storage.string)
+        // Other changed equations, like everything after a new `$`, once the layout manager caught up with the edit.
+        guard first else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let pending = self.pendingConceals else { return }
+            self.pendingConceals = nil
+            self.invalidateChangedConceals(from: pending.old, delta: pending.delta)
+            self.updateRevealedEquation()
+        }
+    }
+
+    /// The piece the caret is in or right next to, shown as typed.
+    private var revealedPiece: NSRange?
+
+    func updateRevealedEquation() {
+        let selection = selectedRange()
+        let piece = pieces.first {
+            $0.range.location <= selection.location && NSMaxRange(selection) <= NSMaxRange($0.range)
+        }?.range
+        guard piece != revealedPiece else { return }
+        let old = revealedPiece
+        revealedPiece = piece
+        if let old { invalidateGlyphs(in: old) }
+        if let piece { invalidateGlyphs(in: piece) }
+    }
+
+    /// Only what differs is laid out again: the lists match at the start, and at the end once shifted by the edit.
+    private func invalidateChangedConceals(from old: [Highlighter.Conceal], delta: Int) {
+        guard concealsMath else { return }
+        let new = conceals
+        var prefix = 0
+        while prefix < old.count, prefix < new.count, old[prefix] == new[prefix] { prefix += 1 }
+        func shifted(_ c: Highlighter.Conceal) -> Highlighter.Conceal {
+            Highlighter.Conceal(range: NSRange(location: c.range.location + delta, length: c.range.length),
+                                replacement: c.replacement,
+                                equation: NSRange(location: c.equation.location + delta, length: c.equation.length))
+        }
+        var suffix = 0
+        while suffix < old.count - prefix, suffix < new.count - prefix,
+              shifted(old[old.count - 1 - suffix]) == new[new.count - 1 - suffix] { suffix += 1 }
+        guard prefix + suffix < max(old.count, new.count) else { return }
+        let changed = (new[prefix..<(new.count - suffix)].map(\.equation)
+            + old[prefix..<(old.count - suffix)].map { shifted($0).equation })
+        guard let start = changed.map(\.location).min(), let end = changed.map(NSMaxRange).max() else { return }
+        invalidateGlyphs(in: NSRange(location: start, length: end - start))
+    }
+
+    private func invalidateGlyphs(in range: NSRange) {
+        guard let lm = layoutManager else { return }
+        let length = (string as NSString).length
+        let start = min(max(range.location, 0), length)
+        let clamped = NSRange(location: start, length: min(max(NSMaxRange(range), start), length) - start)
+        lm.invalidateGlyphs(forCharacterRange: clamped, changeInLength: 0, actualCharacterRange: nil)
+        lm.invalidateLayout(forCharacterRange: clamped, actualCharacterRange: nil)
+        needsDisplay = true
+    }
+
+    /// The conceal around a character, unless its equation is shown as typed.
+    private func conceal(at index: Int) -> Highlighter.Conceal? {
+        var low = 0, high = conceals.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            let c = conceals[mid]
+            if index < c.range.location { high = mid - 1 } else if index >= NSMaxRange(c.range) { low = mid + 1 } else {
+                return revealedPiece.map { NSLocationInRange(index, $0) } == true ? nil : c
+            }
+        }
+        return nil
+    }
+
+    /// A quiet box around each piece shown differently from its source, like IntelliJ's folded code.
+    private func drawConcealBoxes(in rect: NSRect, boxes: ([NSRange]) -> [NSRect]) {
+        guard concealsMath, !conceals.isEmpty, let lm = layoutManager, let container = textContainer else { return }
+        let visible = lm.characterRange(forGlyphRange: lm.glyphRange(
+            forBoundingRect: rect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y), in: container), actualGlyphRange: nil)
+        NSColor.secondaryLabelColor.withAlphaComponent(0.14).setFill()
+        for piece in pieces where piece.box.length > 0 && piece.range != revealedPiece
+            && NSIntersectionRange(piece.range, visible).length > 0 {
+            for box in boxes([piece.box]) where box.intersects(rect) {
+                NSBezierPath(roundedRect: box.insetBy(dx: -1, dy: 1), xRadius: 3, yRadius: 3).fill()
+            }
+        }
+    }
+
+    func layoutManager(_ layoutManager: NSLayoutManager, shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+                       properties: UnsafePointer<NSLayoutManager.GlyphProperty>, characterIndexes: UnsafePointer<Int>,
+                       font: NSFont, forGlyphRange glyphRange: NSRange) -> Int {
+        guard concealsMath, !conceals.isEmpty, glyphRange.length > 0 else { return 0 }
+        var newGlyphs: [CGGlyph]?
+        var newProperties: [NSLayoutManager.GlyphProperty] = []
+        // A symbol the font can't draw keeps its name.
+        var symbolGlyphs: [Int: CGGlyph] = [:]
+        for i in 0..<glyphRange.length {
+            let index = characterIndexes[i]
+            guard let c = conceal(at: index) else { continue }
+            var glyph: CGGlyph = 0
+            if c.replacement != 0 {
+                if let known = symbolGlyphs[c.range.location] { glyph = known } else {
+                    var character = c.replacement
+                    if !CTFontGetGlyphsForCharacters(font, &character, &glyph, 1) { glyph = 0 }
+                    symbolGlyphs[c.range.location] = glyph
+                }
+                if glyph == 0 { continue }
+            }
+            if newGlyphs == nil {
+                newGlyphs = Array(UnsafeBufferPointer(start: glyphs, count: glyphRange.length))
+                newProperties = Array(UnsafeBufferPointer(start: properties, count: glyphRange.length))
+            }
+            if c.replacement != 0, index == c.range.location {
+                newGlyphs?[i] = glyph
+                newProperties[i] = []
+            } else {
+                newProperties[i] = .null
+            }
+        }
+        guard let newGlyphs else { return 0 }
+        layoutManager.setGlyphs(newGlyphs, properties: newProperties, characterIndexes: characterIndexes, font: font,
+                                forGlyphRange: glyphRange)
+        return glyphRange.length
+    }
+
     var findMatches: [NSRange] = [] {
         didSet { if findMatches != oldValue { needsDisplay = true } }
     }
@@ -101,6 +339,10 @@ final class TypstTextView: NSTextView {
     /// Reports a column picked by ⌘-dragging the guide.
     var onWrapColumnChange: ((Int) -> Void)?
     private var isDraggingGuide = false
+    /// ⌘ is down with the pointer on the guide, so it shows it can be dragged.
+    private var guideHovered = false {
+        didSet { if guideHovered != oldValue { needsDisplay = true } }
+    }
 
     override var font: NSFont? {
         didSet { updateWrapWidth() }
@@ -161,8 +403,8 @@ final class TypstTextView: NSTextView {
         guard let window, wrapColumn > 0 else { return }
         // Holding ⌘ over the guide shows it can be dragged.
         let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        if isOnGuide(point, flags: event.modifierFlags) { NSCursor.resizeLeftRight.set() } else if visibleRect.contains(point) { NSCursor.iBeam.set() }
-        needsDisplay = true
+        guideHovered = visibleRect.contains(point) && isOnGuide(point, flags: event.modifierFlags)
+        if guideHovered { NSCursor.resizeLeftRight.set() } else if visibleRect.contains(point) { NSCursor.iBeam.set() }
     }
 
     // MARK: Gliding caret
@@ -281,6 +523,7 @@ final class TypstTextView: NSTextView {
 
     // NSTextView sets the I-beam on every move, even under floating controls.
     override func mouseMoved(with event: NSEvent) {
+        guideHovered = isOnGuide(convert(event.locationInWindow, from: nil), flags: event.modifierFlags)
         if let cursor = cursor(for: event) { cursor.set() } else { super.mouseMoved(with: event) }
         onPointerMoved?(convert(event.locationInWindow, from: nil))
     }
@@ -297,13 +540,14 @@ final class TypstTextView: NSTextView {
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
+        guideHovered = false
         onPointerExited?()
     }
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         if let x = guideX, x < bounds.maxX {
-            let active = isDraggingGuide || NSEvent.modifierFlags.contains(.command)
+            let active = isDraggingGuide || guideHovered
             (active ? NSColor.controlAccentColor.withAlphaComponent(0.7) : NSColor.separatorColor).setFill()
             NSRect(x: x.rounded(), y: rect.minY, width: active ? 2 : 1, height: rect.height).fill()
         }
@@ -320,6 +564,7 @@ final class TypstTextView: NSTextView {
         let visible = layoutManager.flatMap { lm in textContainer.map { lm.characterRange(
             forGlyphRange: lm.glyphRange(forBoundingRect: rect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y), in: $0),
             actualGlyphRange: nil) } } ?? NSRange(location: 0, length: length)
+        drawConcealBoxes(in: rect, boxes: boxes)
         let shown = findMatches.filter { NSIntersectionRange($0, visible).length > 0 || NSLocationInRange($0.location, visible) }
         for box in boxes(shown) where box.intersects(rect) {
             NSColor.systemYellow.withAlphaComponent(0.28).setFill()
@@ -726,6 +971,10 @@ struct CodeEditor: NSViewRepresentable {
     /// Lines wrap at this column, drawn as a guide; 0 wraps at the view's edge.
     var wrapColumn = 0
     var vim = false
+    /// Shows math as it renders while the caret is elsewhere.
+    var concealsMath = false
+    /// Types the closing bracket or quote along with the opening one.
+    var autoClose = false
     var find: FindModel?
     let highlights: Bool
     /// Colours Markdown; `highlights` is for Typst.
@@ -818,6 +1067,9 @@ struct CodeEditor: NSViewRepresentable {
         c.occurrenceProvider = language.map { l in { await l.occurrences(at: $0) } }
         guard let tv = c.textView as? TypstTextView else { return }
         tv.glidingCaret = glidingCursor
+        tv.concealsMath = concealsMath && highlights
+        tv.autoPairs = !autoClose ? [:] : highlights ? ["(": ")", "[": "]", "{": "}", "\"": "\"", "$": "$", "`": "`"]
+            : markdown ? ["(": ")", "[": "]", "{": "}", "\"": "\"", "`": "`"] : [:]
         tv.wrapColumn = wrapColumn
         tv.onWrapColumnChange = { UserDefaults.standard.set($0, forKey: "wrapColumn") }
         tv.configureVim(vim, completion: c.completion, onModeChange: onVimModeChange)
@@ -911,7 +1163,10 @@ struct CodeEditor: NSViewRepresentable {
         for d in diagnostics {
             guard let range = Self.lineRange(d.line, in: s) else { continue }
             let tint: NSColor = d.severity == .error ? .systemRed : .systemYellow
-            lm.addTemporaryAttributes([.backgroundColor: tint.withAlphaComponent(0.12)], forCharacterRange: range)
+            // Warnings only get their underline; errors tint the whole line.
+            if d.severity == .error {
+                lm.addTemporaryAttributes([.backgroundColor: tint.withAlphaComponent(0.12)], forCharacterRange: range)
+            }
             let start = min(range.location + max(d.column - 1, 0), NSMaxRange(range))
             let underline = NSRange(location: start, length: NSMaxRange(range) - start)
             lm.addTemporaryAttributes([.underlineStyle: NSUnderlineStyle.patternDot.rawValue | NSUnderlineStyle.single.rawValue,
@@ -1117,6 +1372,7 @@ struct CodeEditor: NSViewRepresentable {
                 if sel.location < p.location || NSMaxRange(sel) > NSMaxRange(p) { commitRename() }
             }
             completion?.selectionDidChange()
+            (textView as? TypstTextView)?.updateRevealedEquation()
             updateHighlights()
             report()
         }

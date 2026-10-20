@@ -29,6 +29,17 @@ final class WindowState {
     var floatingSidebar = false
     /// The window's content size, to place the selector and floating sidebar while the sidebar is hidden.
     var windowSize = CGSize(width: 1280, height: 820)
+    /// Set while switching with ⌘1–9: true moves to a later space in the list, so the new one slides in from the right.
+    var switchForward: Bool?
+
+    /// Spaces zoom in from behind the selector, or slide sideways when switched by number.
+    var spaceTransition: AnyTransition {
+        guard let switchForward else { return .opacity.combined(with: .scale(scale: 0.96)) }
+        let shift: CGFloat = switchForward ? 70 : -70
+        return .asymmetric(insertion: .offset(x: shift).combined(with: .opacity),
+                           removal: .offset(x: -shift).combined(with: .opacity))
+    }
+
     /// The space shown, for menu commands.
     @ObservationIgnored weak var workspace: Workspace?
     /// Live selector progress while a two-finger swipe drives it.
@@ -129,10 +140,10 @@ struct MainWindow: View {
                 if let workspace {
                     SpaceView(workspace: workspace)
                         .id(ObjectIdentifier(workspace))
-                        .transition(Self.enter)
+                        .transition(state.spaceTransition)
                 } else {
                     NoSpaceView()
-                        .transition(Self.enter)
+                        .transition(state.spaceTransition)
                 }
             }
             // Shifted, not squeezed; the window's edge cuts off what moves past it.
@@ -171,12 +182,16 @@ struct MainWindow: View {
             }
             previous?.close()
             Opener.shared.saveSession()
+            // Back to the zoom once the slide has played.
+            if state.switchForward != nil {
+                Task {
+                    try? await Task.sleep(for: .seconds(0.5))
+                    if state.space == url { state.switchForward = nil }
+                }
+            }
         }
         .onDisappear { workspace?.close() }
     }
-
-    /// Spaces grow into place from slightly behind the selector.
-    private static let enter = AnyTransition.opacity.combined(with: .scale(scale: 0.96))
 
     /// Blurs and darkens the space behind the selector; clicking it returns to the space.
     private var dimming: some View {

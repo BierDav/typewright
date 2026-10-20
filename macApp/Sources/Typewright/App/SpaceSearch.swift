@@ -308,6 +308,7 @@ struct SpaceSearchView: View {
                 .padding(6)
                 // The visible width, which shrinks by the scroller when scroll bars always show.
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .background(OverlayScrollers())
             }
             .frame(minHeight: 100, idealHeight: 220, maxHeight: 220)
             .onChange(of: selection) { _, index in

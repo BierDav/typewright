@@ -77,13 +77,16 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
                                                                queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.viewWidth = self?.view.bounds.width ?? 0 }
         }
-        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
+        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .scrollWheel]) { [weak self] event in
             let handled = MainActor.assumeIsolated {
                 guard let self, event.window === self.view.window else { return false }
                 let point = self.view.convert(event.locationInWindow, from: nil)
                 guard self.view.bounds.contains(point) else { return false }
+                // ⌘-scroll zooms like pinching.
+                let factor = event.type == .magnify ? 1 + event.magnification : event.commandZoomFactor
+                guard let factor else { return false }
                 // WKWebView is flipped, so this is already the page's client position.
-                self.setScale(self.effectiveScale * (1 + event.magnification), animated: false, around: point)
+                self.setScale(self.effectiveScale * factor, animated: false, around: point)
                 return true
             }
             return handled ? nil : event

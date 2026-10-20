@@ -49,7 +49,7 @@ struct SidebarView: View {
                 SpaceHeader(name: workspace.name, isDropTarget: dropTarget?.path == workspace.root.path,
                             canReveal: workspace.selectedFile.map(isInTree) ?? false,
                             onReveal: { revealSelected(proxy) },
-                            onRename: onRenameSpace, menuItems: spaceMenuItems)
+                            onRename: onRenameSpace, onShowSpaces: onShowSpaces, menuItems: spaceMenuItems)
                     .padding(.horizontal, 8)
                     .padding(.bottom, 2)
             }
@@ -479,16 +479,22 @@ private struct SpaceHeader: View {
     let canReveal: Bool
     let onReveal: () -> Void
     let onRename: (String) -> Void
+    let onShowSpaces: () -> Void
     let menuItems: (_ rename: @escaping () -> Void) -> [SidebarMenuItem]
     @State private var renaming = false
     @State private var hovered = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
+            Button(action: onShowSpaces) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(ZenPressStyle())
+            .help("Spaces (⌥⌘S)")
             if renaming {
                 RenameField(name: name, base: name) { new in
                     guard renaming else { return }

@@ -20,7 +20,7 @@ pub use web::*;
 use parking_lot::Mutex;
 use serde::Serialize;
 use typst::diag::{FileResult, Severity, SourceDiagnostic};
-use typst::foundations::Bytes;
+use typst::foundations::{Bytes, Value};
 use typst::syntax::{FileId, LinkedNode, Lines, Source, SyntaxKind, Tag, VirtualRoot};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World, WorldExt};
@@ -279,6 +279,120 @@ pub(crate) fn highlight_runs(text: &str, code: bool) -> Vec<u32> {
     runs
 }
 
+// MARK: - Hidden syntax
+
+/// Math the editor shows as it renders while the caret is elsewhere: symbol names and shorthands as their symbol,
+/// text without its quotes. Five UTF-16 values per entry: start, length, replacement character (0 hides the range),
+/// and the start and end of the equation it belongs to.
+pub(crate) fn conceal_runs(text: &str) -> Vec<u32> {
+    // UTF-16 offset of every byte offset, since the tree counts bytes.
+    let mut utf16 = vec![0u32; text.len() + 1];
+    let mut count = 0u32;
+    for (i, c) in text.char_indices() {
+        for b in 0..c.len_utf8() {
+            utf16[i + b] = count;
+        }
+        count += c.len_utf16() as u32;
+    }
+    utf16[text.len()] = count;
+    let root = typst::syntax::parse(text);
+    let mut out = Vec::new();
+    find_equations(&LinkedNode::new(&root), text, &utf16, &mut out);
+    out
+}
+
+fn find_equations(node: &LinkedNode, src: &str, utf16: &[u32], out: &mut Vec<u32>) {
+    if node.kind() == SyntaxKind::Escape {
+        // An escape is its own group, revealed on its own.
+        let range = node.range();
+        return conceal_escape(node, (utf16[range.start], utf16[range.end]), utf16, out);
+    }
+    if node.kind() == SyntaxKind::Equation {
+        let range = node.range();
+        let equation = (utf16[range.start], utf16[range.end]);
+        for child in node.children() {
+            conceal_math(&child, src, equation, utf16, out);
+        }
+        return;
+    }
+    for child in node.children() {
+        find_equations(&child, src, utf16, out);
+    }
+}
+
+fn conceal_math(node: &LinkedNode, src: &str, equation: (u32, u32), utf16: &[u32], out: &mut Vec<u32>) {
+    // `#` switches to code, where strings are strings.
+    if node.prev_sibling_kind() == Some(SyntaxKind::Hash) || node.kind() == SyntaxKind::Hash {
+        return;
+    }
+    let range = node.range();
+    let text = &src[range.clone()];
+    let mut push = |start: usize, end: usize, replacement: u32| {
+        out.extend([utf16[start], utf16[end] - utf16[start], replacement, equation.0, equation.1]);
+    };
+    match node.kind() {
+        SyntaxKind::Str => {
+            if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+                push(range.start, range.start + 1, 0);
+                push(range.end - 1, range.end, 0);
+            }
+        }
+        SyntaxKind::MathIdent => {
+            if let Some(c) = math_symbol(text, &[]) {
+                push(range.start, range.end, c);
+            }
+        }
+        SyntaxKind::Escape => conceal_escape(node, equation, utf16, out),
+        SyntaxKind::MathShorthand => {
+            if let Some(shorthand) = node.cast::<typst::syntax::ast::MathShorthand>() {
+                let c = shorthand.get() as u32;
+                if c <= 0xFFFF {
+                    push(range.start, range.end, c);
+                }
+            }
+        }
+        SyntaxKind::MathFieldAccess => {
+            // `arrow.r.double`: a symbol with modifiers, shown whole or not at all.
+            let mut parts = text.split('.');
+            let base = parts.next().unwrap_or_default();
+            let modifiers: Vec<&str> = parts.collect();
+            let simple = node.children().all(|c| {
+                matches!(c.kind(), SyntaxKind::MathIdent | SyntaxKind::Dot | SyntaxKind::MathFieldAccess)
+            });
+            if simple && let Some(c) = math_symbol(base, &modifiers) {
+                push(range.start, range.end, c);
+            }
+        }
+        _ => {
+            for child in node.children() {
+                conceal_math(&child, src, equation, utf16, out);
+            }
+        }
+    }
+}
+
+/// `\.` as `.`, `\u{2014}` as `—`: the escaped character in place of its source.
+fn conceal_escape(node: &LinkedNode, group: (u32, u32), utf16: &[u32], out: &mut Vec<u32>) {
+    let Some(escape) = node.cast::<typst::syntax::ast::Escape>() else { return };
+    let c = escape.get() as u32;
+    let range = node.range();
+    if c <= 0xFFFF && c != 0 {
+        out.extend([utf16[range.start], utf16[range.end] - utf16[range.start], c, group.0, group.1]);
+    }
+}
+
+/// The single BMP character a math symbol name like `Omega` or `arrow` with `["r"]` stands for.
+fn math_symbol(name: &str, modifiers: &[&str]) -> Option<u32> {
+    let Value::Symbol(symbol) = LIBRARY.math.scope().get(name)?.read() else { return None };
+    let mut symbol = symbol.clone();
+    for modifier in modifiers {
+        symbol = symbol.modified((), modifier).ok()?;
+    }
+    let mut chars = symbol.get().chars();
+    let c = chars.next()? as u32;
+    (chars.next().is_none() && c <= 0xFFFF).then_some(c)
+}
+
 // MARK: - Refactoring
 
 #[derive(serde::Deserialize)]
@@ -311,5 +425,35 @@ pub(crate) fn refactor_json(request: &str) -> String {
             serde_json::to_string(&response).unwrap_or_default()
         }
         Err(e) => format!("{{\"error\":\"{e}\"}}"),
+    }
+}
+
+#[cfg(test)]
+mod conceal_tests {
+    use super::conceal_runs;
+
+    fn shown(text: &str) -> String {
+        let runs = conceal_runs(text);
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut result = Vec::new();
+        let mut i = 0;
+        for run in runs.chunks(5) {
+            let (start, len, c) = (run[0] as usize, run[1] as usize, run[2]);
+            result.extend_from_slice(&units[i..start]);
+            if c != 0 {
+                result.push(c as u16);
+            }
+            i = start + len;
+        }
+        result.extend_from_slice(&units[i..]);
+        String::from_utf16(&result).unwrap()
+    }
+
+    #[test]
+    fn conceals_math() {
+        assert_eq!(shown(r#"R = $12"k"Omega$ and "k" Omega"#), r#"R = $12kΩ$ and "k" Omega"#);
+        assert_eq!(shown("$a -> b != c, arrow.r.double, alpha sqrt(x)$"), "$a → b ≠ c, ⇒, α sqrt(x)$");
+        assert_eq!(shown(r#"$#"x" + "y"$"#), r#"$#"x" + y$"#);
+        assert_eq!(shown(r"1\. Rechenübung \# \u{2014} $a \$ b$ #raw(`\.`) \"), r"1. Rechenübung # — $a $ b$ #raw(`\.`) \");
     }
 }

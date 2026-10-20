@@ -14,6 +14,8 @@ final class BuiltinCompiler: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.bierdav.Typewright.typst", qos: .userInitiated)
     private let world: OpaquePointer
     private var overlays: Set<String> = []
+    /// Main files whose HTML fails with the font spans; they compile without them from then on.
+    private var unwrapped: Set<String> = []
 
     init(root: URL) {
         world = tw_world_new(root.path)
@@ -63,9 +65,19 @@ final class BuiltinCompiler: @unchecked Sendable {
 
     private func run(main: String, buffers: [String: String], format: RenderMode) -> CompileResult {
         let start = Date()
+        let result = run(main: main, buffers: buffers, format: format, wrapped: format == .html && !unwrapped.contains(main),
+                         start: start)
+        // The font spans are invalid in some places, like raw text elements; plain output beats none.
+        guard format == .html, result.output == nil, result.wrapperFailed else { return result.compiled }
+        unwrapped.insert(main)
+        return run(main: main, buffers: buffers, format: format, wrapped: false, start: start).compiled
+    }
+
+    private func run(main: String, buffers: [String: String], format: RenderMode, wrapped: Bool,
+                     start: Date) -> (compiled: CompileResult, output: Data?, wrapperFailed: Bool) {
         var buffers = buffers
         var main = main
-        if format == .html {
+        if wrapped {
             // Included rather than edited, so diagnostics keep pointing at the user's file and lines.
             let quoted = main.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
             buffers[Self.htmlWrapper] = Self.htmlPrelude + "#include \"/\(quoted)\"\n"
@@ -91,7 +103,8 @@ final class BuiltinCompiler: @unchecked Sendable {
         // Diagnostics without a location can't be listed per file, so they become the failure log.
         let located = all.filter { !$0.path.isEmpty && $0.path != Self.htmlWrapper }
         let log = all.filter { $0.path.isEmpty || $0.path == Self.htmlWrapper }.map { "\($0.severity): \($0.message)" }.joined(separator: "\n")
-        return CompileResult(
+        let wrapperFailed = all.contains { $0.path == Self.htmlWrapper && $0.severity == "error" }
+        let compiled = CompileResult(
             output: output,
             diagnostics: located.map {
                 Diagnostic(path: $0.path, line: $0.line, column: $0.column,
@@ -100,6 +113,7 @@ final class BuiltinCompiler: @unchecked Sendable {
             log: log,
             duration: Date().timeIntervalSince(start)
         )
+        return (compiled, output, wrapperFailed)
     }
 
     private struct Entry: Decodable {

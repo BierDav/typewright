@@ -59,6 +59,33 @@ final class Opener {
         keyState?.space = nil
     }
 
+    /// ⌘1–9 switch the window to the space at that place in the list, in any window showing spaces.
+    func installSpaceShortcuts() {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let handled = MainActor.assumeIsolated {
+                guard event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command,
+                      let digit = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(digit),
+                      let state = self.controllers.first(where: { $0.window === event.window })?.state,
+                      state.overlay == nil else { return false }
+                self.switchToSpace(at: digit - 1, in: state)
+                return true
+            }
+            return handled ? nil : event
+        }
+    }
+
+    /// Slides to the space at `index` in the list, in the direction of its place relative to the current one.
+    func switchToSpace(at index: Int, in state: WindowState) {
+        let spaces = SpaceList.all
+        guard spaces.indices.contains(index) else { return NSSound.beep() }
+        let target = spaces[index]
+        let current = (state.workspace?.root ?? state.space.map(Workspace.root))?.resolvingSymlinksInPath().path
+        guard target.path != current else { return state.setSpacesOpen(false) }
+        state.switchForward = spaces.firstIndex { $0.path == current }.map { index > $0 } ?? true
+        // The old space takes on the slide before it's replaced.
+        DispatchQueue.main.async { state.space = target.standardizedFileURL }
+    }
+
     func toggleSpaces() {
         guard let state = keyState, state.space != nil else { return }
         // A hidden sidebar stays hidden; the selector slides in along the window's edge instead.

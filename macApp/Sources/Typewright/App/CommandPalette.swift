@@ -48,6 +48,7 @@ struct WindowOverlayView: View {
 /// Esc still reaches an overlay when none of its fields has focus, like after clicking a row or the material.
 private struct EscapeMonitor: ViewModifier {
     let action: () -> Void
+    let accepts: (NSResponder?) -> Bool
     @State private var monitor: Any?
 
     func body(content: Content) -> some View {
@@ -56,8 +57,7 @@ private struct EscapeMonitor: ViewModifier {
                 // Overlays open in the key window; others may have their own.
                 let window = NSApp.keyWindow
                 monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                    // Text views handle Esc themselves, like the fields' own handlers or Vim mode.
-                    guard event.keyCode == 53, event.window === window, !(window?.firstResponder is NSText) else { return event }
+                    guard event.keyCode == 53, event.window === window, accepts(window?.firstResponder) else { return event }
                     action()
                     return nil
                 }
@@ -70,8 +70,44 @@ private struct EscapeMonitor: ViewModifier {
 }
 
 extension View {
-    func onEscapeWhenUnfocused(_ action: @escaping () -> Void) -> some View {
-        modifier(EscapeMonitor(action: action))
+    /// By default anything but a text view counts; those handle Esc themselves, like the fields' own handlers or Vim mode.
+    func onEscapeWhenUnfocused(accepts: @escaping (NSResponder?) -> Bool = { !($0 is NSText) },
+                               _ action: @escaping () -> Void) -> some View {
+        modifier(EscapeMonitor(action: action, accepts: accepts))
+    }
+}
+
+/// Keeps the enclosing scroll view's scrollers floating over the content, so always-visible scroll bars don't narrow the rows.
+struct OverlayScrollers: NSViewRepresentable {
+    func makeNSView(context: Context) -> ScrollerView { ScrollerView() }
+    func updateNSView(_ view: ScrollerView, context: Context) { view.apply() }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ScrollerView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+
+    final class ScrollerView: NSView {
+        private var observer: (any NSObjectProtocol)?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+            // AppKit puts the user's style back whenever the preference or a mouse changes.
+            if observer == nil {
+                observer = NotificationCenter.default.addObserver(
+                    forName: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil, queue: .main
+                ) { [weak self] _ in DispatchQueue.main.async { self?.apply() } }
+            }
+        }
+
+        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+
+        func apply() {
+            guard let scroll = enclosingScrollView, scroll.scrollerStyle != .overlay else { return }
+            scroll.scrollerStyle = .overlay
+        }
     }
 }
 
@@ -269,8 +305,9 @@ struct CommandPalette: View {
                 }
                 .padding(.horizontal, 6)
                 .padding(.bottom, 6)
-                // The visible width, which shrinks by the scroller when scroll bars always show; a fixed width would scroll sideways.
+                // The visible width; a fixed width would scroll sideways.
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .background(OverlayScrollers())
             }
             .frame(height: 360)
             .onChange(of: selection) { _, index in
@@ -359,16 +396,20 @@ struct CommandPalette: View {
                 items += spaceItems(ws)
             }
         }
-        let spaces = SpaceList.all.filter { $0.path != workspace?.root.path }
+        let all = SpaceList.all
+        let spaces = all.filter { $0.path != workspace?.root.path }
         items += spaces.map { url in
-            PaletteItem(id: "space:\(url.path)", title: "Open \(url.lastPathComponent)",
-                        subtitle: url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"),
-                        icon: "square.stack", section: "Spaces", action: .run { Opener.shared.open(url, in: state) })
+            let index = all.firstIndex(of: url) ?? 9
+            return PaletteItem(id: "space:\(url.path)", title: "Open \(url.lastPathComponent)",
+                               subtitle: url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"),
+                               icon: "square.stack", shortcut: index < 9 ? "⌘\(index + 1)" : nil, section: "Spaces",
+                               action: .run { Opener.shared.switchToSpace(at: index, in: state) })
         }
         items = Self.emphasizingNames(items, names: [workspace?.selectedFile?.lastPathComponent,
                                                      workspace?.selectedFile?.deletingLastPathComponent().lastPathComponent,
                                                      workspace?.name] + spaces.map(\.lastPathComponent))
         items += fontItems
+        items += settingsItems
         items += [
             PaletteItem(id: "spaces.open", title: "Open Space…", icon: "folder.badge.plus", shortcut: "⌘O", section: "Spaces",
                         action: .run { Opener.shared.openPanel(in: state) }),
@@ -554,6 +595,78 @@ struct CommandPalette: View {
                         subtitle: dir == ws.root ? nil : ws.relativePath(of: dir), icon: "folder", section: "Folders",
                         action: .run { withAnimation(.smooth(duration: 0.25)) { ws.move(file, into: dir) } })
         }
+    }
+
+    // MARK: Settings
+
+    /// Settings that make sense as one command; the rest open their tab.
+    private var settingsItems: [PaletteItem] {
+        let defaults = UserDefaults.standard
+        func toggle(_ id: String, _ name: String, key: String, default value: Bool, icon: String,
+                    keywords: [String] = []) -> PaletteItem {
+            let on = defaults.object(forKey: key) as? Bool ?? value
+            return PaletteItem(id: "settings.\(id)", title: "\(on ? "Turn Off" : "Turn On") \(name)", icon: icon,
+                               section: "Settings", keywords: keywords + ["setting", "toggle", "enable", "disable"],
+                               action: .run { defaults.set(!on, forKey: key) })
+        }
+        var items = [
+            toggle("vim", "Vim Mode", key: "vimMode", default: false, icon: "keyboard", keywords: ["vim key bindings", "modal"]),
+            toggle("glide", "Gliding Cursor", key: "glidingCursor", default: true, icon: "character.cursor.ibeam",
+                   keywords: ["caret", "animation"]),
+            toggle("autoClose", "Closing Brackets and Quotes", key: "autoClose", default: true, icon: "parentheses",
+                   keywords: ["auto close", "auto pair", "brackets", "quotes"]),
+            toggle("conceal", "Math and Escapes as Rendered", key: "concealMath", default: true, icon: "function",
+                   keywords: ["hidden syntax", "conceal", "symbols", "escapes", "backslash", "live preview"]),
+            toggle("wrap", "Wrap Guide", key: "wrapGuide", default: false, icon: "text.word.spacing",
+                   keywords: ["wrap lines at a column", "ruler", "line length"]),
+            toggle("libraryWarnings", "Ignoring Library Warnings", key: "ignoreLibraryWarnings", default: true,
+                   icon: "exclamationmark.triangle", keywords: ["packages", "diagnostics"]),
+        ]
+        let server = LanguageServerManager.shared
+        items.append(PaletteItem(id: "settings.lsp", title: "\(server.isEnabled ? "Turn Off" : "Turn On") Completions and Go to Definition",
+                                 icon: "text.badge.plus", section: "Settings",
+                                 keywords: ["tinymist", "language server", "lsp", "autocomplete", "setting"],
+                                 action: .run { server.isEnabled.toggle() }))
+        let size = defaults.object(forKey: "editorFontSize") as? Double ?? 14
+        items += [
+            PaletteItem(id: "settings.bigger", title: "Increase Editor Font Size", subtitle: "\(Int(size)) pt", icon: "textformat.size.larger",
+                        section: "Settings", keywords: ["zoom in", "text size", "setting"],
+                        action: .stay { defaults.set(min(size + 1, 32), forKey: "editorFontSize") }),
+            PaletteItem(id: "settings.smaller", title: "Decrease Editor Font Size", subtitle: "\(Int(size)) pt", icon: "textformat.size.smaller",
+                        section: "Settings", keywords: ["zoom out", "text size", "setting"],
+                        action: .stay { defaults.set(max(size - 1, 9), forKey: "editorFontSize") }),
+        ]
+        let appearance = defaults.string(forKey: "appearance") ?? Appearance.system.rawValue
+        for mode in Appearance.allCases where mode.rawValue != appearance {
+            items.append(PaletteItem(id: "settings.appearance.\(mode.rawValue)", title: "Use \(mode.title) Appearance",
+                                     icon: mode == .dark ? "moon" : mode == .light ? "sun.max" : "circle.lefthalf.filled",
+                                     section: "Settings", keywords: ["theme", "dark mode", "light mode", "setting"],
+                                     action: .run {
+                                         defaults.set(mode.rawValue, forKey: "appearance")
+                                         Appearance.apply(mode.rawValue)
+                                     }))
+        }
+        if let ws = workspace {
+            let html = ws.htmlPreview, svg = ws.svgPreview
+            items.append(PaletteItem(id: "settings.htmlDark", title: "\(html.darkMode ? "Turn Off" : "Turn On") Dark HTML Preview",
+                                     icon: "doc.richtext", section: "Settings", keywords: ["preview", "invert", "setting"],
+                                     action: .run { html.darkMode.toggle() }))
+            items.append(PaletteItem(id: "settings.svgDark", title: "\(svg.darkMode ? "Turn Off" : "Turn On") Dark SVG Preview",
+                                     icon: "doc.richtext", section: "Settings", keywords: ["preview", "invert", "setting"],
+                                     action: .run { svg.darkMode.toggle() }))
+            items.append(PaletteItem(id: "settings.htmlPages", title: "\(html.pages ? "Turn Off" : "Turn On") A4 Pages in HTML Preview",
+                                     icon: "doc.plaintext", section: "Settings", keywords: ["preview", "paginate", "setting"],
+                                     action: .run { html.pages.toggle() }))
+        }
+        let tabs = [("General", "gearshape", 0, ["compiler", "typst version", "theme"]),
+                    ("Editor", "textformat", 1, ["font size", "cursor", "wrapping", "vim", "tinymist"]),
+                    ("Package", "shippingbox", 3, ["packages", "preview packages", "cache"]),
+                    ("Device", "arrow.triangle.2.circlepath", 4, ["sync", "devices", "passkey", "account"])]
+        items += tabs.map { name, icon, tab, keywords in
+            PaletteItem(id: "settings.tab.\(tab)", title: "\(name) Settings…", icon: icon, section: "Settings",
+                        keywords: keywords + ["preferences"], action: .run { SettingsWindowController.shared.show(tab: tab) })
+        }
+        return items
     }
 
     // MARK: Fonts

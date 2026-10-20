@@ -168,6 +168,8 @@ struct EditorSettings: View {
     @AppStorage("wrapGuide") private var wrapGuide = false
     @AppStorage("wrapColumn") private var wrapColumn = 80
     @AppStorage("vimMode") private var vimMode = false
+    @AppStorage("concealMath") private var concealMath = true
+    @AppStorage("autoClose") private var autoClose = true
 
     var body: some View {
         Form {
@@ -183,6 +185,18 @@ struct EditorSettings: View {
                     .foregroundStyle(.secondary)
                 Toggle("Vim key bindings", isOn: $vimMode)
                 Text("Normal, insert and visual modes with Vim's motions and operators. ⌘ shortcuts keep working.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Typing") {
+                Toggle("Close brackets and quotes", isOn: $autoClose)
+                Text("Typing ( [ { \" $ or ` adds its closer, typing the closer steps over it, and a selection gets wrapped.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Math") {
+                Toggle("Show math and escapes as rendered", isOn: $concealMath)
+                Text("Symbol names show as their symbol, text in math loses its quotes and escapes their backslash, like $12\"k\"Omega$ as $12kΩ$ and 1\\. as 1., except right at the cursor.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

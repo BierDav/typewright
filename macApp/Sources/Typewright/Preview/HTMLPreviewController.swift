@@ -109,14 +109,17 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             MainActor.assumeIsolated { self?.updateFit() }
         }
         // Pinching zooms A4 pages and resizes reflowing text, instead of scaling the page as a picture.
-        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
+        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .scrollWheel]) { [weak self] event in
             let handled = MainActor.assumeIsolated {
                 guard let self, event.window === self.view.window,
                       self.view.bounds.contains(self.view.convert(event.locationInWindow, from: nil)) else { return false }
+                // ⌘-scroll zooms like pinching.
+                let factor = event.type == .magnify ? 1 + event.magnification : event.commandZoomFactor
+                guard let factor else { return false }
                 if self.paged {
-                    self.setScale(self.effectiveScale * (1 + event.magnification), animated: false)
+                    self.setScale(self.effectiveScale * factor, animated: false)
                 } else {
-                    PreviewTextSize.shared.size *= 1 + event.magnification
+                    PreviewTextSize.shared.size *= factor
                 }
                 return true
             }

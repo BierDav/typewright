@@ -68,6 +68,27 @@ enum Highlighter {
         }
     }
 
+    /// A stretch of math shown as it renders, like `Omega` as `Ω` or the quotes of `"k"` hidden.
+    struct Conceal: Equatable {
+        let range: NSRange
+        /// The character shown instead; 0 hides the range.
+        let replacement: unichar
+        /// The equation, `$` included; while the caret touches it, it shows its source.
+        let equation: NSRange
+    }
+
+    static func conceals(in text: String) -> [Conceal] {
+        var text = text
+        var count = 0
+        let values = text.withUTF8 { tw_conceal($0.baseAddress, $0.count, &count) }
+        defer { tw_highlight_free(values, count) }
+        return stride(from: 0, to: count - 4, by: 5).map { i in
+            Conceal(range: NSRange(location: Int(values[i]), length: Int(values[i + 1])),
+                    replacement: unichar(clamping: values[i + 2]),
+                    equation: NSRange(location: Int(values[i + 3]), length: Int(values[i + 4] - values[i + 3])))
+        }
+    }
+
     /// Highlighted text for SwiftUI, e.g. code samples in the docs popup.
     static func highlighted(_ text: String, code: Bool, size: CGFloat) -> AttributedString {
         let font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)

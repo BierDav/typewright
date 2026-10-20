@@ -11,6 +11,8 @@ struct SpaceView: View {
     @AppStorage("wrapGuide") private var wrapGuide = false
     @AppStorage("wrapColumn") private var wrapColumn = 80
     @AppStorage("vimMode") private var vimBindings = false
+    @AppStorage("concealMath") private var concealMath = true
+    @AppStorage("autoClose") private var autoClose = true
     @State private var vimMode: String?
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
     private var compilers: CompilerManager { .shared }
@@ -202,6 +204,8 @@ struct SpaceView: View {
                     glidingCursor: glidingCursor,
                     wrapColumn: wrapGuide ? wrapColumn : 0,
                     vim: vimBindings,
+                    concealsMath: concealMath,
+                    autoClose: autoClose,
                     find: workspace.selectedKind?.isEditable == true ? workspace.find : nil,
                     highlights: workspace.selectedKind == .typst,
                     markdown: workspace.selectedFile.map(MarkdownRenderer.isMarkdown) ?? false,

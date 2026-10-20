@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await LanguageServerManager.shared.setUp() }
         SyncService.shared.restart()
         Opener.shared.restoreSession()
+        Opener.shared.installSpaceShortcuts()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {

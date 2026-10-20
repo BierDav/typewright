@@ -217,8 +217,10 @@ struct FindBar: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .background(CursorArea())
         .onExitCommand(perform: find.close)
+        // Checkboxes and buttons with keyboard focus don't pass Esc on to SwiftUI.
+        .onEscapeWhenUnfocused(accepts: { $0 is NSButton }, find.close)
         .onChange(of: find.focusRequest, initial: true) {
-            focus = .search
+            focusSearch()
         }
         .background {
             // Shortcuts that work while the bar has focus.
@@ -227,10 +229,21 @@ struct FindBar: View {
                 Button("") { find.previous() }.keyboardShortcut("g", modifiers: [.command, .shift])
                 Button("") { withAnimation(.smooth(duration: 0.2)) { find.showsReplace = true }; focus = .replace }
                     .keyboardShortcut("f", modifiers: [.command, .option])
-                Button("") { focus = .search }.keyboardShortcut("f")
+                Button("") { focusSearch() }.keyboardShortcut("f")
             }
             .opacity(0)
             .allowsHitTesting(false)
+        }
+    }
+
+    /// The editor holds on to first responder until it's released; then the field can take focus.
+    private func focusSearch() {
+        if !(find.textView?.window?.firstResponder is NSText) || find.textView?.window?.firstResponder === find.textView {
+            find.textView?.window?.makeFirstResponder(nil)
+        }
+        Task {
+            try? await Task.sleep(for: .milliseconds(30))
+            focus = .search
         }
     }
 }

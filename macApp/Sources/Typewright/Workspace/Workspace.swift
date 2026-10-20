@@ -790,7 +790,10 @@ final class Workspace: EditorLanguage {
     }
 
     func documentation(of item: CompletionItem) async -> String? {
-        await languageClient()?.documentation(of: item) ?? item.documentation
+        guard let client = languageClient() else { return item.documentation }
+        if let docs = await client.documentation(of: item) { return docs }
+        guard let file = selectedFile, selectedKind == .typst else { return nil }
+        return await client.hoverDocumentation(of: item, in: file, text: text as NSString)
     }
 
     func completions(at offset: Int) async -> [CompletionItem] {
@@ -818,7 +821,8 @@ final class Workspace: EditorLanguage {
 
     func hover(at offset: Int) async -> (markdown: String, range: NSRange?)? {
         guard let file = selectedFile, selectedKind == .typst else { return nil }
-        let docs = await languageClient()?.hover(in: file, text: text as NSString, at: offset)
+        var docs = await languageClient()?.hover(in: file, text: text as NSString, at: offset)
+        if docs == nil { docs = await languageClient()?.parameterDocs(in: file, text: text as NSString, at: offset) }
         // A path to an image shows the image above the docs.
         guard let (url, range) = imageReference(at: offset) else { return docs }
         let image = "![](\(url.absoluteString))"

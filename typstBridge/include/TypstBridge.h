@@ -52,6 +52,11 @@ void tw_result_free(TWResult result);
 uint32_t *_Nonnull tw_highlight(const uint8_t *_Nullable text, size_t len, bool code, size_t *_Nonnull count);
 void tw_highlight_free(uint32_t *_Nonnull runs, size_t count);
 
+/// Math the editor shows as rendered while the caret is elsewhere: `count` values, five per entry of UTF-16 start,
+/// UTF-16 length, replacement character (0 hides the range), and the UTF-16 start and end of its equation.
+/// Free with `tw_highlight_free`.
+uint32_t *_Nonnull tw_conceal(const uint8_t *_Nullable text, size_t len, size_t *_Nonnull count);
+
 /// Downloads a package like `@preview/cetz:0.3.1` (or the newest `@preview/cetz`) into typst's package cache.
 /// Returns "ok:<spec>" or "error:<message>"; free with `tw_string_free`. Blocks on the network.
 char *_Nonnull tw_package_download(const char *_Nonnull spec);

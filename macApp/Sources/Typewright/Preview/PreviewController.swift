@@ -53,14 +53,21 @@ final class PreviewController {
             },
         ]
         // Pinching zooms manually, so it ends fit-to-width before PDFView handles it.
-        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .smartMagnify]) { [weak self] event in
-            MainActor.assumeIsolated {
-                guard let self, self.view.autoScales, event.window === self.view.window,
-                      self.view.bounds.contains(self.view.convert(event.locationInWindow, from: nil)) else { return }
+        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .smartMagnify, .scrollWheel]) { [weak self] event in
+            let handled = MainActor.assumeIsolated {
+                guard let self, event.window === self.view.window, self.view.document != nil,
+                      self.view.bounds.contains(self.view.convert(event.locationInWindow, from: nil)) else { return false }
+                // ⌘-scroll zooms around the pointer, like pinching.
+                if let factor = event.commandZoomFactor {
+                    self.zoom(by: factor, at: event.locationInWindow)
+                    return true
+                }
+                guard event.type != .scrollWheel, self.view.autoScales else { return false }
                 self.view.autoScales = false
                 self.sync()
+                return false
             }
-            return event
+            return handled ? nil : event
         }
     }
 
@@ -141,6 +148,25 @@ final class PreviewController {
         view.layoutDocumentView()
         guard let page = doc.page(at: min(state.page, doc.pageCount - 1)) else { return }
         view.go(to: PDFDestination(page: page, at: NSPoint(x: state.x, y: state.y)))
+        sync()
+    }
+
+    /// Keeps the spot under `windowPoint` in place while the scale changes.
+    private func zoom(by factor: CGFloat, at windowPoint: NSPoint) {
+        let point = view.convert(windowPoint, from: nil)
+        guard let page = view.page(for: point, nearest: true),
+              let clip = view.documentView?.enclosingScrollView?.contentView else { return }
+        let pagePoint = view.convert(point, to: page)
+        let before = clip.convert(point, from: view)
+        view.autoScales = false
+        view.scaleFactor = min(max(view.scaleFactor * factor, view.minScaleFactor), view.maxScaleFactor)
+        view.layoutDocumentView()
+        let after = clip.convert(view.convert(pagePoint, from: page), from: view)
+        var origin = clip.bounds.origin
+        origin.x += after.x - before.x
+        origin.y += after.y - before.y
+        clip.scroll(to: origin)
+        clip.enclosingScrollView?.reflectScrolledClipView(clip)
         sync()
     }
 
