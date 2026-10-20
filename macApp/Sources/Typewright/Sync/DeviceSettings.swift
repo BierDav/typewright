@@ -65,6 +65,9 @@ struct DeviceSettings: View {
                             HStack {
                                 Button { NSWorkspace.shared.activateFileViewerSelecting([root]) } label: { Image(systemName: "folder") }
                                     .buttonStyle(.borderless)
+                                Button { Invites.copyLink(for: root) } label: { Image(systemName: "person.badge.plus") }
+                                    .buttonStyle(.borderless)
+                                    .help("Copy Invite Link")
                                 Menu("Stop Syncing") {
                                     Button("On This Mac") { sync.stopSyncing(root) }
                                     Button("On All Devices") { sync.removeEverywhere(id) }
@@ -73,7 +76,7 @@ struct DeviceSettings: View {
                             }
                         } label: {
                             Text(root.lastPathComponent)
-                            Text(root.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                            Text((sync.isShared(root) ? "Shared · " : "") + root.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
                         }
                     }
                     if sync.spaces.isEmpty {
@@ -87,7 +90,7 @@ struct DeviceSettings: View {
                     if let error = sync.lastError {
                         Text(error).foregroundStyle(.secondary)
                     } else {
-                        Text("The whole folder syncs, except what its .gitignore files exclude.")
+                        Text("The whole folder syncs, except what its .gitignore files exclude. Invite links let other people's accounts sync a space too; anyone with a link can edit it.")
                             .foregroundStyle(.secondary)
                     }
                 }

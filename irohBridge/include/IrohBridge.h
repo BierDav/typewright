@@ -17,6 +17,11 @@ char *_Nonnull tws_device_id(const TWSyncNode *_Nonnull node);
 
 /// Lists the space for all devices of the account and starts syncing it here.
 void tws_share_space(const TWSyncNode *_Nonnull node, const char *_Nonnull space, const char *_Nonnull name);
+/// The hex secret an invite link carries; marks the space shared for all devices of the account. Free with `tws_string_free`.
+char *_Nonnull tws_invite(const TWSyncNode *_Nonnull node, const char *_Nonnull space, const char *_Nonnull name);
+/// Starts syncing a space from another account's invite; `hints` are comma separated endpoint ids to dial first.
+void tws_join_space(const TWSyncNode *_Nonnull node, const char *_Nonnull space, const char *_Nonnull name,
+                    const char *_Nonnull secret, const char *_Nonnull hints);
 /// Starts syncing a space listed by the account; answers with an `entries` event.
 void tws_open_space(const TWSyncNode *_Nonnull node, const char *_Nonnull space);
 /// Stops syncing a space on this device; the other devices keep it. A space nobody syncs leaves the account.

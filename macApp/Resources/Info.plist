@@ -28,6 +28,19 @@
 	<string>$(TYPEWRIGHT_PASSKEY_DOMAIN)</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT License</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Typewright Invite</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>typewright</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

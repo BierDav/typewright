@@ -1,11 +1,15 @@
-//! Syncs space folders between the devices of one account over iroh.
+//! Syncs space folders between the devices of one account over iroh, and with the other accounts a
+//! space was shared with through an invite link.
 //!
 //! Every key is derived from the account secret (the passkey's PRF output), so each device of the
 //! account finds the others and opens the same replicas without exchanging anything:
 //! - a pkarr record lists the account's devices, for dialing,
-//! - an account replica lists the synced spaces (`space/<id>` → `{"name": …}`),
-//! - one replica per space maps relative paths to blob hashes; all devices write as one author,
-//!   so the newest write of a path wins,
+//! - an account replica lists the synced spaces (`space/<id>` → `{"name": …}`, plus `"shared"` once
+//!   an invite exists and the namespace `"secret"` for spaces joined from another account's link),
+//! - one replica per space maps relative paths to blob hashes; everyone writes as one author derived
+//!   from the space's secret, so the newest write of a path wins,
+//! - shared spaces have their own pkarr record, keyed by the space's secret, listing every device
+//!   (of any account) syncing them,
 //! - one gossip topic per space carries live edits and cursors of open files (see `live`).
 //!
 //! Events reach Swift as JSON strings through one callback, on arbitrary threads.
@@ -65,7 +69,11 @@ struct Inner {
     account: [u8; 32],
     account_doc: Doc,
     gossip: Gossip,
-    spaces: Mutex<HashMap<String, Doc>>,
+    spaces: Mutex<HashMap<String, Space>>,
+    /// What the account replica says about each space's keys.
+    infos: Mutex<HashMap<String, SpaceInfo>>,
+    /// Devices of other accounts syncing a shared space, from its record or the invite's hints.
+    space_devices: Mutex<HashMap<String, Vec<EndpointId>>>,
     topics: Mutex<HashMap<String, live::Topic>>,
     live: Mutex<HashMap<(String, String), live::Session>>,
     /// Serializes opening spaces, so each is subscribed once.
@@ -74,6 +82,19 @@ struct Inner {
     devices: Mutex<Vec<EndpointId>>,
     callback: EventCallback,
     context: usize,
+}
+
+#[derive(Clone)]
+struct Space {
+    doc: Doc,
+    author: AuthorId,
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct SpaceInfo {
+    /// Set for spaces joined from a link; others derive theirs from the account.
+    secret: Option<[u8; 32]>,
+    shared: bool,
 }
 
 impl Inner {
@@ -89,15 +110,42 @@ impl Inner {
     fn status(&self) {
         let peers: Vec<String> = self.neighbors.lock().unwrap().iter().map(|p| p.to_string()).collect();
         let devices: Vec<String> = self.devices.lock().unwrap().iter().map(|p| p.to_string()).collect();
+        // Devices of any account listed for each shared space.
+        let shared: HashMap<String, Vec<String>> = self
+            .space_devices
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, devices)| (id.clone(), devices.iter().map(|d| d.to_string()).collect()))
+            .collect();
         self.emit(json!({
-            "type": "status", "device": self.endpoint.id().to_string(), "peers": peers, "devices": devices,
+            "type": "status", "device": self.endpoint.id().to_string(), "peers": peers, "devices": devices, "shared": shared,
         }));
     }
-
 
     fn peer_addrs(&self) -> Vec<EndpointAddr> {
         let me = self.endpoint.id();
         self.devices.lock().unwrap().iter().filter(|d| **d != me).map(|d| EndpointAddr::from(*d)).collect()
+    }
+
+    /// The account's devices plus, for shared spaces, everyone else syncing it.
+    fn space_peers(&self, id: &str) -> Vec<EndpointId> {
+        let me = self.endpoint.id();
+        let mut peers: Vec<EndpointId> = self.devices.lock().unwrap().clone();
+        if self.is_shared(id) {
+            peers.extend(self.space_devices.lock().unwrap().get(id).cloned().unwrap_or_default());
+        }
+        let mut seen = HashSet::new();
+        peers.retain(|p| *p != me && seen.insert(*p));
+        peers
+    }
+
+    fn namespace(&self, id: &str) -> [u8; 32] {
+        self.infos.lock().unwrap().get(id).and_then(|info| info.secret).unwrap_or_else(|| space_secret(&self.account, id))
+    }
+
+    fn is_shared(&self, id: &str) -> bool {
+        self.infos.lock().unwrap().get(id).is_some_and(|info| info.shared || info.secret.is_some())
     }
 }
 
@@ -109,8 +157,42 @@ fn derive(context: &str, parts: &[&[u8]]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn space_secret(account: &[u8; 32], id: &str) -> NamespaceSecret {
-    NamespaceSecret::from_bytes(&derive("typewright 2026-10 space v0", &[account, id.as_bytes()]))
+fn space_secret(account: &[u8; 32], id: &str) -> [u8; 32] {
+    derive("typewright 2026-10 space v0", &[account, id.as_bytes()])
+}
+
+/// Everyone with the space's secret writes as this author; entries of the account author from
+/// before still count, as the newest entry of a key wins across authors.
+fn space_author(secret: &[u8; 32]) -> Author {
+    Author::from_bytes(&derive("typewright 2026-10 space author v0", &[secret]))
+}
+
+/// Key of the shared space's pkarr record listing the devices syncing it.
+fn space_directory_key(secret: &[u8; 32]) -> SecretKey {
+    SecretKey::from_bytes(&derive("typewright 2026-10 space directory v0", &[secret]))
+}
+
+fn parse_hex32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A space's keys as its `space/<id>` entry in the account replica describes them.
+fn space_info(value: &serde_json::Value) -> SpaceInfo {
+    SpaceInfo {
+        secret: value["secret"].as_str().and_then(parse_hex32),
+        shared: value["shared"].as_bool().unwrap_or(false),
+    }
 }
 
 fn tombstone_hash() -> Hash {
@@ -165,6 +247,8 @@ async fn start(data_dir: PathBuf, account: [u8; 32], callback: EventCallback, co
         account_doc,
         gossip,
         spaces: Mutex::new(HashMap::new()),
+        infos: Mutex::new(HashMap::new()),
+        space_devices: Mutex::new(HashMap::new()),
         topics: Mutex::new(HashMap::new()),
         live: Mutex::new(HashMap::new()),
         opening: tokio::sync::Mutex::new(()),
@@ -173,13 +257,18 @@ async fn start(data_dir: PathBuf, account: [u8; 32], callback: EventCallback, co
         callback,
         context,
     });
+    // Joined spaces' secrets have to be known before Swift opens them.
+    if let Err(err) = emit_spaces(&inner).await {
+        inner.error("account replica", err);
+    }
     tokio::spawn(watch_account(inner.clone()));
     tokio::spawn(directory_loop(inner.clone()));
     inner.status();
     Ok(inner)
 }
 
-/// Keeps this device in the account's pkarr record and syncs every replica with the devices listed there.
+/// Keeps this device in the account's pkarr record, and in those of its shared spaces, and syncs
+/// every replica with the devices listed there.
 async fn directory_loop(inner: Arc<Inner>) {
     let key = SecretKey::from_bytes(&derive("typewright 2026-10 directory v0", &[&inner.account]));
     let mut round = 0u32;
@@ -192,38 +281,92 @@ async fn directory_loop(inner: Arc<Inner>) {
     }
 }
 
-async fn refresh_directory(inner: &Inner, key: &SecretKey, republish: bool) -> Result<()> {
-    let client = PkarrRelayClient::new(
+fn pkarr_client(inner: &Inner) -> Result<PkarrRelayClient> {
+    Ok(PkarrRelayClient::new(
         N0_DNS_PKARR_RELAY_PROD.parse()?,
         inner.endpoint.tls_config().clone(),
         inner.endpoint.dns_resolver()?.clone(),
-    );
+    ))
+}
+
+/// Adds this device to the record (or takes it out with `leave`) and returns the devices it lists.
+async fn update_record(
+    inner: &Inner,
+    client: &PkarrRelayClient,
+    key: &SecretKey,
+    republish: bool,
+    leave: bool,
+) -> Result<Vec<EndpointId>> {
     let mut ids: Vec<String> = match client.resolve(key.public()).await {
         Ok(packet) => packet.txt_records(DIRECTORY_NAME),
         Err(_) => Vec::new(),
     };
     let me = inner.endpoint.id().to_string();
-    // Concurrent publishes can drop a device; it adds itself back on its next round.
-    if !ids.contains(&me) || republish {
+    let changed = if leave {
+        let listed = ids.contains(&me);
+        ids.retain(|id| *id != me);
+        listed
+    } else if !ids.contains(&me) || republish {
+        // Concurrent publishes can drop a device; it adds itself back on its next round.
         ids.retain(|id| *id != me);
         ids.push(me);
         while ids.len() > MAX_DEVICES {
             ids.remove(0);
         }
+        true
+    } else {
+        false
+    };
+    if changed {
         let packet = SignedPacket::from_txt_strings(key, DIRECTORY_NAME, &ids, 3600)?;
         client.publish(&packet).await?;
     }
-    *inner.devices.lock().unwrap() = ids.iter().filter_map(|id| EndpointId::from_str(id).ok()).collect();
+    Ok(ids.iter().filter_map(|id| EndpointId::from_str(id).ok()).collect())
+}
+
+async fn refresh_directory(inner: &Inner, key: &SecretKey, republish: bool) -> Result<()> {
+    let client = pkarr_client(inner)?;
+    *inner.devices.lock().unwrap() = update_record(inner, &client, key, republish, false).await?;
     let peers = inner.peer_addrs();
     if !peers.is_empty() {
-        inner.account_doc.start_sync(peers.clone()).await?;
-        let spaces: Vec<Doc> = inner.spaces.lock().unwrap().values().cloned().collect();
-        for doc in spaces {
-            doc.start_sync(peers.clone()).await?;
+        inner.account_doc.start_sync(peers).await?;
+    }
+    let spaces: Vec<(String, Doc)> = inner.spaces.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.doc.clone())).collect();
+    for (id, doc) in spaces {
+        if inner.is_shared(&id) {
+            refresh_space_directory(inner, &client, &id, republish).await;
         }
-        live::add_peers(inner, peers.iter().map(|addr| addr.id).collect()).await;
+        sync_space(inner, &id, &doc).await?;
     }
     inner.status();
+    Ok(())
+}
+
+/// Keeps this device listed in a shared space's record and remembers who else is.
+async fn refresh_space_directory(inner: &Inner, client: &PkarrRelayClient, id: &str, republish: bool) {
+    let key = space_directory_key(&inner.namespace(id));
+    match update_record(inner, client, &key, republish, false).await {
+        Ok(devices) => {
+            let me = inner.endpoint.id();
+            let mut all = inner.space_devices.lock().unwrap();
+            let known = all.entry(id.to_string()).or_default();
+            // The invite's hints stay until the record lists someone else.
+            if devices.iter().any(|d| *d != me) || known.is_empty() {
+                *known = devices;
+            }
+        }
+        Err(err) => inner.error("space directory", err),
+    }
+}
+
+/// Syncs the replica and the live topic with everyone known to sync the space. With nobody listed,
+/// iroh-docs still dials the peers it last synced the replica with (it keeps a few per replica).
+async fn sync_space(inner: &Inner, id: &str, doc: &Doc) -> Result<()> {
+    let peers = inner.space_peers(id);
+    doc.start_sync(peers.iter().map(|p| EndpointAddr::from(*p)).collect()).await?;
+    if !peers.is_empty() {
+        live::add_peers(inner, id, peers).await;
+    }
     Ok(())
 }
 
@@ -234,7 +377,8 @@ async fn watch_account(inner: Arc<Inner>) {
         while let Some(event) = events.next().await {
             match event? {
                 LiveEvent::InsertLocal { .. } | LiveEvent::InsertRemote { .. } | LiveEvent::ContentReady { .. } => {
-                    emit_spaces(&inner).await?
+                    emit_spaces(&inner).await?;
+                    live::retopic(&inner).await;
                 }
                 LiveEvent::NeighborUp(peer) => track(&inner, peer, true),
                 LiveEvent::NeighborDown(peer) => track(&inner, peer, false),
@@ -257,7 +401,7 @@ fn track(inner: &Inner, peer: EndpointId, up: bool) {
 }
 
 /// Lists the account's spaces with the devices syncing each (`member/<space>/<device>`), and the
-/// spaces removed from all devices (`removed/<space>`).
+/// spaces removed from all devices (`removed/<space>`); remembers the spaces' keys on the way.
 async fn emit_spaces(inner: &Inner) -> Result<()> {
     let mut members: HashMap<String, Vec<String>> = HashMap::new();
     let mut removed = Vec::new();
@@ -275,6 +419,7 @@ async fn emit_spaces(inner: &Inner) -> Result<()> {
         }
     }
     let mut spaces = Vec::new();
+    let mut infos = HashMap::new();
     let entries = inner.account_doc.get_many(Query::single_latest_per_key().key_prefix("space/").build()).await?;
     tokio::pin!(entries);
     while let Some(entry) = entries.next().await {
@@ -283,9 +428,23 @@ async fn emit_spaces(inner: &Inner) -> Result<()> {
         // Content arrives after the entry; the next ContentReady lists it.
         let Ok(bytes) = inner.blobs.get_bytes(entry.content_hash()).await else { continue };
         let Ok(mut info) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        let keys = space_info(&info);
+        info["shared"] = json!(keys.shared || keys.secret.is_some());
+        if let Some(fields) = info.as_object_mut() {
+            fields.remove("secret");
+        }
+        infos.insert(id.clone(), keys);
         info["members"] = json!(members.remove(&id).unwrap_or_default());
         info["id"] = json!(id);
         spaces.push(info);
+    }
+    {
+        // Spaces syncing here keep their keys while their entry is missing, and joined secrets stay
+        // known, as a join writes its entry after opening may already have asked.
+        let mut known = inner.infos.lock().unwrap();
+        let open = inner.spaces.lock().unwrap();
+        known.retain(|id, info| (open.contains_key(id) || info.secret.is_some()) && !infos.contains_key(id));
+        known.extend(infos);
     }
     inner.emit(json!({"type": "spaces", "spaces": spaces, "removed": removed}));
     Ok(())
@@ -298,9 +457,17 @@ fn member_key(inner: &Inner, space: &str) -> String {
 /// Stops syncing here; a space nobody syncs anymore leaves the account.
 async fn leave_space(inner: Arc<Inner>, id: String) -> Result<()> {
     live::leave(&inner, &id);
-    let doc = inner.spaces.lock().unwrap().remove(&id);
-    if let Some(doc) = doc {
-        doc.leave().await?;
+    let space = inner.spaces.lock().unwrap().remove(&id);
+    if let Some(space) = space {
+        space.doc.leave().await?;
+    }
+    // Others sharing the space stop dialing this device.
+    if inner.is_shared(&id) {
+        let key = space_directory_key(&inner.namespace(&id));
+        if let Err(err) = update_record(&inner, &pkarr_client(&inner)?, &key, false, true).await {
+            inner.error("space directory", err);
+        }
+        inner.space_devices.lock().unwrap().remove(&id);
     }
     inner.account_doc.del(inner.author, member_key(&inner, &id)).await?;
     let others = inner.account_doc.get_many(Query::single_latest_per_key().key_prefix(format!("member/{id}/")).build()).await?;
@@ -320,22 +487,33 @@ async fn remove_space(inner: Arc<Inner>, id: String) -> Result<()> {
 }
 
 /// The space's replica, opened, watched and syncing on first use.
-async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Doc> {
+async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Space> {
     let _guard = inner.opening.lock().await;
-    if let Some(doc) = inner.spaces.lock().unwrap().get(id).cloned() {
-        return Ok(doc);
+    if let Some(space) = inner.spaces.lock().unwrap().get(id).cloned() {
+        return Ok(space);
     }
-    let doc = inner.docs.import_namespace(Capability::Write(space_secret(&inner.account, id))).await?;
+    let secret = inner.namespace(id);
+    let author = space_author(&secret);
+    inner.docs.author_import(author.clone()).await?;
+    let doc = inner.docs.import_namespace(Capability::Write(NamespaceSecret::from_bytes(&secret))).await?;
     let events = doc.subscribe().await?;
     tokio::spawn(watch_space(inner.clone(), id.to_string(), doc.clone(), events));
-    inner.spaces.lock().unwrap().insert(id.to_string(), doc.clone());
+    let space = Space { doc: doc.clone(), author: author.id() };
+    inner.spaces.lock().unwrap().insert(id.to_string(), space.clone());
     inner.account_doc.set_bytes(inner.author, member_key(inner, id), b"1".to_vec()).await?;
     live::join(inner, id).await?;
-    let peers = inner.peer_addrs();
-    if !peers.is_empty() {
-        doc.start_sync(peers).await?;
+    sync_space(inner, id, &doc).await?;
+    if inner.is_shared(id) {
+        // Listing this device and finding the others shouldn't wait for the next directory round.
+        let inner = inner.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            let Ok(client) = pkarr_client(&inner) else { return };
+            refresh_space_directory(&inner, &client, &id, false).await;
+            let _ = sync_space(&inner, &id, &doc).await;
+        });
     }
-    Ok(doc)
+    Ok(space)
 }
 
 async fn open_space(inner: Arc<Inner>, id: String) -> Result<()> {
@@ -366,8 +544,8 @@ async fn watch_space(
             }
             LiveEvent::ContentReady { hash } => {
                 for key in pending.remove(&hash).unwrap_or_default() {
-                    // Only if nothing newer replaced it meanwhile.
-                    if let Ok(Some(entry)) = doc.get_exact(inner.author, &key, true).await {
+                    // Only if nothing newer, by any author, replaced it meanwhile.
+                    if let Ok(Some(entry)) = latest(&doc, &key).await {
                         if entry.content_hash() == hash {
                             inner.emit(remote(&id, &key, hash, entry.content_len()));
                         }
@@ -381,6 +559,10 @@ async fn watch_space(
     }
 }
 
+async fn latest(doc: &Doc, key: &[u8]) -> Result<Option<iroh_docs::Entry>> {
+    doc.get_one(Query::single_latest_per_key().key_exact(key).include_empty().build()).await
+}
+
 fn remote(space: &str, key: &[u8], hash: Hash, size: u64) -> serde_json::Value {
     let mut event = entry_json(space, key, hash, size);
     event["type"] = json!("remote");
@@ -388,7 +570,7 @@ fn remote(space: &str, key: &[u8], hash: Hash, size: u64) -> serde_json::Value {
 }
 
 async fn list_space(inner: &Arc<Inner>, id: &str) -> Result<()> {
-    let doc = space_doc(inner, id).await?;
+    let doc = space_doc(inner, id).await?.doc;
     let stream = doc.get_many(Query::single_latest_per_key().include_empty().build()).await?;
     tokio::pin!(stream);
     let mut entries = Vec::new();
@@ -412,10 +594,41 @@ async fn share_space(inner: Arc<Inner>, id: String, name: String) -> Result<()> 
     open_space(inner, id).await
 }
 
+/// Marks an own space shared, so all devices of the account list themselves in its record.
+async fn invite(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
+    let key = format!("space/{id}");
+    let stored = match inner.account_doc.get_exact(inner.author, key.clone(), false).await? {
+        Some(entry) => inner.blobs.get_bytes(entry.content_hash()).await.ok(),
+        None => None,
+    };
+    let mut info: serde_json::Value =
+        stored.and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_else(|| json!({"name": name}));
+    if info["shared"].as_bool() != Some(true) {
+        info["shared"] = json!(true);
+        inner.account_doc.set_bytes(inner.author, key, serde_json::to_vec(&info)?).await?;
+    }
+    inner.infos.lock().unwrap().entry(id.clone()).or_default().shared = true;
+    live::retopic(&inner).await;
+    refresh_space_directory(&inner, &pkarr_client(&inner)?, &id, true).await;
+    Ok(())
+}
+
+/// Starts syncing a space from another account's invite; the account replica keeps its secret for
+/// this account's other devices.
+async fn join_space(inner: Arc<Inner>, id: String, name: String, secret: [u8; 32]) -> Result<()> {
+    // Joining again after "Remove From All Devices" brings it back.
+    inner.account_doc.del(inner.author, format!("removed/{id}")).await?;
+    inner.account_doc.set_bytes(inner.author, member_key(&inner, &id), b"1".to_vec()).await?;
+    let info = serde_json::to_vec(&json!({"name": name, "secret": hex(&secret), "shared": true}))?;
+    inner.account_doc.set_bytes(inner.author, format!("space/{id}"), info).await?;
+    open_space(inner, id).await
+}
+
 async fn publish(inner: Arc<Inner>, id: String, path: String, file: PathBuf) -> Result<()> {
-    let doc = space_doc(&inner, &id).await?;
-    let outcome = doc
-        .import_file(&inner.blobs, inner.author, Bytes::from(path.clone().into_bytes()), file, ImportMode::Copy)
+    let space = space_doc(&inner, &id).await?;
+    let outcome = space
+        .doc
+        .import_file(&inner.blobs, space.author, Bytes::from(path.clone().into_bytes()), file, ImportMode::Copy)
         .await?
         .await?;
     let mut event = entry_json(&id, path.as_bytes(), outcome.hash, outcome.size);
@@ -425,8 +638,8 @@ async fn publish(inner: Arc<Inner>, id: String, path: String, file: PathBuf) -> 
 }
 
 async fn unpublish(inner: Arc<Inner>, id: String, path: String) -> Result<()> {
-    let doc = space_doc(&inner, &id).await?;
-    let hash = doc.set_bytes(inner.author, Bytes::from(path.clone().into_bytes()), TOMBSTONE).await?;
+    let space = space_doc(&inner, &id).await?;
+    let hash = space.doc.set_bytes(space.author, Bytes::from(path.clone().into_bytes()), TOMBSTONE).await?;
     let mut event = entry_json(&id, path.as_bytes(), hash, 0);
     event["type"] = json!("published");
     inner.emit(event);
@@ -523,6 +736,39 @@ pub unsafe extern "C" fn tws_share_space(node: *const TWSyncNode, space: *const 
     let node = unsafe { &*node };
     let (id, name) = unsafe { (string(space), string(name)) };
     node.spawn("share space", share_space(node.inner.clone(), id, name));
+}
+
+/// The secret (hex) an invite link to the space carries; marks the space shared for all devices of
+/// the account. Free with `tws_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tws_invite(node: *const TWSyncNode, space: *const c_char, name: *const c_char) -> *mut c_char {
+    let node = unsafe { &*node };
+    let (id, name) = unsafe { (string(space), string(name)) };
+    let secret = node.inner.namespace(&id);
+    node.spawn("invite", invite(node.inner.clone(), id, name));
+    CString::new(hex(&secret)).unwrap_or_default().into_raw()
+}
+
+/// Starts syncing a space from an invite: `secret` is hex and `hints` comma separated endpoint ids
+/// to dial first. Answers with an `entries` event.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tws_join_space(
+    node: *const TWSyncNode,
+    space: *const c_char,
+    name: *const c_char,
+    secret: *const c_char,
+    hints: *const c_char,
+) {
+    let node = unsafe { &*node };
+    let (id, name, secret, hints) = unsafe { (string(space), string(name), string(secret), string(hints)) };
+    let Some(secret) = parse_hex32(&secret) else {
+        return node.inner.error("join space", anyhow::anyhow!("invalid secret"));
+    };
+    let hints = hints.split(',').filter_map(|h| EndpointId::from_str(h.trim()).ok()).collect();
+    // Known before returning, so Swift's next calls open the right replica.
+    node.inner.infos.lock().unwrap().insert(id.clone(), SpaceInfo { secret: Some(secret), shared: true });
+    node.inner.space_devices.lock().unwrap().insert(id.clone(), hints);
+    node.spawn("join space", join_space(node.inner.clone(), id, name, secret));
 }
 
 /// Starts syncing a space listed by the account; answers with an `entries` event.
@@ -648,5 +894,62 @@ pub unsafe extern "C" fn tws_hash_file(path: *const c_char) -> *mut c_char {
 pub unsafe extern "C" fn tws_string_free(s: *mut c_char) {
     if !s.is_null() {
         drop(unsafe { CString::from_raw(s) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_round_trips_and_rejects_junk() {
+        let bytes: [u8; 32] = std::array::from_fn(|i| (i * 9) as u8);
+        assert_eq!(parse_hex32(&hex(&bytes)), Some(bytes));
+        assert_eq!(parse_hex32(&hex(&bytes).to_uppercase()), Some(bytes));
+        assert_eq!(parse_hex32("00"), None);
+        assert_eq!(parse_hex32(&"zz".repeat(32)), None);
+        assert_eq!(parse_hex32(&"é".repeat(32)), None);
+    }
+
+    #[test]
+    fn reads_space_keys_from_account_entries() {
+        let secret = [3u8; 32];
+        let joined = space_info(&json!({"name": "A", "secret": hex(&secret), "shared": true}));
+        assert!(joined.secret == Some(secret) && joined.shared);
+        assert!(space_info(&json!({"name": "B"})) == SpaceInfo::default());
+    }
+
+    #[test]
+    fn own_spaces_keep_their_replica() {
+        // Changing this derivation would orphan every synced space.
+        let id = NamespaceSecret::from_bytes(&space_secret(&[7u8; 32], "abc")).id();
+        let expected = NamespaceSecret::from_bytes(&derive("typewright 2026-10 space v0", &[&[7u8; 32], b"abc"])).id();
+        assert_eq!(id, expected);
+        assert_ne!(space_author(&[1u8; 32]).id(), space_author(&[2u8; 32]).id());
+    }
+
+    #[tokio::test]
+    async fn newest_entry_wins_across_authors() -> Result<()> {
+        let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
+        let blobs = iroh_blobs::store::mem::MemStore::new();
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let docs = Docs::memory().spawn(endpoint.clone(), (*blobs).clone(), gossip).await?;
+        let doc = docs.import_namespace(Capability::Write(NamespaceSecret::from_bytes(&[5u8; 32]))).await?;
+        // Entries of the account author from before space authors still resolve by time.
+        let old = Author::from_bytes(&[1u8; 32]);
+        let new = space_author(&[5u8; 32]);
+        docs.author_import(old.clone()).await?;
+        docs.author_import(new.clone()).await?;
+        doc.set_bytes(old.id(), "main.typ", "old").await?;
+        doc.set_bytes(new.id(), "main.typ", "new").await?;
+        doc.set_bytes(new.id(), "other.typ", "x").await?;
+        doc.set_bytes(old.id(), "other.typ", "y").await?;
+        let main = latest(&doc, b"main.typ").await?.unwrap();
+        assert_eq!(main.content_hash(), Hash::new("new"));
+        assert_eq!(main.author(), new.id());
+        assert_eq!(latest(&doc, b"other.typ").await?.unwrap().content_hash(), Hash::new("y"));
+        assert!(latest(&doc, b"missing").await?.is_none());
+        endpoint.close().await;
+        Ok(())
     }
 }

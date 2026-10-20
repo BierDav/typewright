@@ -9,6 +9,8 @@ struct AccountSpace: Identifiable, Hashable {
     let name: String
     /// Devices syncing it.
     var members: [String] = []
+    /// Shared with other accounts through an invite link.
+    var shared = false
 }
 
 /// What `liveSync` reports about a file being edited on several devices.
@@ -38,8 +40,9 @@ struct LiveResult: Decodable {
     var undone = false
 }
 
-/// Syncs the spaces the user picked across all devices of their account: `irohBridge` moves the
-/// data, `SpaceSync` from the Kotlin core decides what to do, and this applies it to the folders.
+/// Syncs the spaces the user picked across all devices of their account, and with the people they
+/// invited: `irohBridge` moves the data, `SpaceSync` from the Kotlin core decides what to do, and
+/// this applies it to the folders.
 @MainActor @Observable
 final class SyncService {
     static let shared = SyncService()
@@ -114,6 +117,12 @@ final class SyncService {
 
     func spaceID(for root: URL) -> String? {
         spaces.first { $0.value.standardizedFileURL.path == root.standardizedFileURL.path }?.key
+    }
+
+    /// Whether other accounts sync the space too.
+    func isShared(_ root: URL) -> Bool {
+        guard let id = spaceID(for: root) else { return false }
+        return accountSpaces.contains { $0.id == id && $0.shared }
     }
 
     // MARK: - Lifecycle
@@ -220,20 +229,47 @@ final class SyncService {
 
     /// Downloads a space from the other devices into a new folder inside `parent`.
     func join(_ space: AccountSpace, in parent: URL) -> URL? {
-        guard node != nil else { return nil }
-        let name = Paths.shared.uniqueName(name: space.name, ext: nil) {
+        guard node != nil, let root = makeFolder(space.name, in: parent) else { return nil }
+        remember(space.id, root: root)
+        open(space.id, root: root)
+        return root
+    }
+
+    /// An invite link to the space; anyone holding it can sync and edit the space from their account.
+    func inviteLink(for root: URL) -> String? {
+        guard let node, let id = spaceID(for: root) else { return nil }
+        let raw = tws_invite(node, id, root.lastPathComponent)
+        defer { tws_string_free(raw) }
+        // This Mac first: it's online right now, so the first join doesn't wait for the space's record.
+        let hints = [deviceID].compactMap { $0 } + devices.filter { $0 != deviceID }
+        let invite = SpaceInvite(id: id, name: root.lastPathComponent, secret: String(cString: raw), hints: hints)
+        return SpaceInvites.shared.link(invite: invite)
+    }
+
+    /// Downloads a space from an invite into a new folder inside `parent`; the account lists it for this user's other devices.
+    func join(_ invite: SpaceInvite, in parent: URL) -> URL? {
+        guard let node else { return nil }
+        if let root = spaces[invite.id] { return root }
+        guard let root = makeFolder(invite.name, in: parent) else { return nil }
+        remember(invite.id, root: root)
+        tws_join_space(node, invite.id, invite.name, invite.secret, invite.hints.joined(separator: ","))
+        open(invite.id, root: root, announce: false)
+        NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
+        return root
+    }
+
+    private func makeFolder(_ name: String, in parent: URL) -> URL? {
+        let name = Paths.shared.uniqueName(name: name, ext: nil) {
             KotlinBoolean(bool: FileManager.default.fileExists(atPath: parent.appendingPathComponent($0).path))
         }
         let root = parent.appendingPathComponent(name, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            return root
         } catch {
             lastError = error.localizedDescription
             return nil
         }
-        remember(space.id, root: root)
-        open(space.id, root: root)
-        return root
     }
 
     private func remember(_ id: String, root: URL) {
@@ -308,6 +344,7 @@ final class SyncService {
             let id: String
             let name: String?
             let members: [String]?
+            let shared: Bool?
         }
 
         struct Entry: Decodable {
@@ -325,7 +362,7 @@ final class SyncService {
             connected = Set(event.peers ?? [])
             devices = event.devices ?? []
         case "spaces":
-            accountSpaces = (event.spaces ?? []).map { AccountSpace(id: $0.id, name: $0.name ?? "Space", members: $0.members ?? []) }
+            accountSpaces = (event.spaces ?? []).map { AccountSpace(id: $0.id, name: $0.name ?? "Space", members: $0.members ?? [], shared: $0.shared ?? false) }
                 .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             // Removed from all devices elsewhere: stop here too, keeping the files.
             for id in event.removed ?? [] where spaces[id] != nil {

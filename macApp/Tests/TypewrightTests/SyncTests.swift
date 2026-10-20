@@ -200,6 +200,33 @@ final class SyncNetworkTests: XCTestCase {
         }
     }
 
+    func testSharesASpaceWithAnotherAccountByLink() async throws {
+        let a = try await device("a", account: Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }))
+        let b = try await device("b", account: Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }))
+        let rootA = dir.appendingPathComponent("A/Paper", isDirectory: true)
+        try FileManager.default.createDirectory(at: rootA, withIntermediateDirectories: true)
+        try "= Draft\n".write(to: rootA.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
+        a.share(rootA)
+
+        let link = try XCTUnwrap(a.inviteLink(for: rootA))
+        let invite = try XCTUnwrap(SpaceInvites.shared.parse(link: link))
+        XCTAssertEqual(invite.name, "Paper")
+        XCTAssertTrue(b.elsewhere.isEmpty)
+        let parentB = dir.appendingPathComponent("B", isDirectory: true)
+        try FileManager.default.createDirectory(at: parentB, withIntermediateDirectories: true)
+        let rootB = try XCTUnwrap(b.join(invite, in: parentB))
+        XCTAssertEqual(rootB.lastPathComponent, "Paper")
+
+        try await eventually("file on b") { read(rootB.appendingPathComponent("main.typ")) == "= Draft\n" }
+        try "notes".write(to: rootB.appendingPathComponent("notes.typ"), atomically: true, encoding: .utf8)
+        try await eventually("file from b on a") { read(rootA.appendingPathComponent("notes.typ")) == "notes" }
+        try await eventually("shared on both") { a.isShared(rootA) && b.isShared(rootB) }
+
+        // Leaving only stops b; a keeps syncing.
+        b.stopSyncing(rootB)
+        XCTAssertTrue(a.isSynced(rootA))
+    }
+
     func testSpacesNobodySyncsLeaveTheAccount() async throws {
         let (a, rootA, b, rootB) = try await sharedSpace("x\n")
         b.stopSyncing(rootB)

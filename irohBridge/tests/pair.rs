@@ -1,4 +1,4 @@
-//! Two devices of one account over the real n0 relays: a shared space reaches the second device,
+//! Devices over the real n0 relays: a space reaches a second device of the account, or another account by invite;
 //! a file follows, and so does its deletion. Needs network; run with `cargo test -- --ignored`.
 
 use std::{
@@ -35,7 +35,7 @@ fn wait(device: &Device, what: &str, matches: impl Fn(&serde_json::Value) -> boo
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         if let Ok(event) = device.events.recv_timeout(Duration::from_secs(1)) {
-            if event["type"] == "error" {
+            if event["type"] == "error" || std::env::var("TWS_DEBUG").is_ok() {
                 eprintln!("{what}: {event}");
             }
             if matches(&event) {
@@ -80,6 +80,57 @@ fn syncs_a_space_between_two_devices() {
 
     unsafe { tws_unpublish(a.node, c(&space).as_ptr(), c("main.typ").as_ptr()) };
     wait(&b, "deletion on b", |e| e["type"] == "remote" && e["path"] == "main.typ" && e["deleted"] == true);
+
+    unsafe {
+        tws_stop(a.node);
+        tws_stop(b.node);
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Two accounts: `a` invites, `b` joins with the secret and no hints, so it finds `a` through the space's record.
+#[test]
+#[ignore]
+fn shares_a_space_with_another_account() {
+    let root = std::env::temp_dir().join(format!("tws-invite-{}", std::process::id()));
+    let seed = std::process::id() as u8;
+    let a = device(&root.join("a"), &std::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(seed)));
+    let b = device(&root.join("b"), &std::array::from_fn(|i| (i as u8).wrapping_mul(29).wrapping_add(seed)));
+
+    let space = format!("space-{}", std::process::id());
+    unsafe { tws_share_space(a.node, c(&space).as_ptr(), c("Paper").as_ptr()) };
+    let secret = unsafe { tws_invite(a.node, c(&space).as_ptr(), c("Paper").as_ptr()) };
+    let secret_text = unsafe { CStr::from_ptr(secret) }.to_str().unwrap().to_string();
+    unsafe { tws_string_free(secret) };
+    wait(&a, "shared on a", |e| {
+        e["type"] == "spaces" && e["spaces"].as_array().unwrap().iter().any(|s| s["id"] == space.as_str() && s["shared"] == true)
+    });
+
+    let file = root.join("main.typ");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&file, "= Shared").unwrap();
+    unsafe { tws_publish(a.node, c(&space).as_ptr(), c("main.typ").as_ptr(), c(file.to_str().unwrap()).as_ptr()) };
+
+    unsafe { tws_join_space(b.node, c(&space).as_ptr(), c("Paper").as_ptr(), c(&secret_text).as_ptr(), c("").as_ptr()) };
+    // The listing and the file arrive in either order.
+    let (listed, arrived) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
+    wait(&b, "file and listing on b", |e| {
+        if e["type"] == "spaces" && e["spaces"].as_array().unwrap().iter().any(|s| s["id"] == space.as_str() && s["shared"] == true) {
+            listed.set(true);
+        }
+        if (e["type"] == "remote" && e["path"] == "main.typ" && e["space"] == space.as_str())
+            || (e["type"] == "entries" && e["entries"].as_array().unwrap().iter().any(|x| x["path"] == "main.typ"))
+        {
+            arrived.set(true);
+        }
+        listed.get() && arrived.get()
+    });
+
+    // Writes of the joined account reach the owner.
+    let other = root.join("notes.typ");
+    std::fs::write(&other, "notes").unwrap();
+    unsafe { tws_publish(b.node, c(&space).as_ptr(), c("notes.typ").as_ptr(), c(other.to_str().unwrap()).as_ptr()) };
+    wait(&a, "file on a", |e| e["type"] == "remote" && e["path"] == "notes.typ");
 
     unsafe {
         tws_stop(a.node);

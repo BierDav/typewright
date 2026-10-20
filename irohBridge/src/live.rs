@@ -60,6 +60,7 @@ enum Body {
 
 /// The space's gossip topic: messages go out in order through one task.
 pub(crate) struct Topic {
+    id: TopicId,
     outbox: mpsc::UnboundedSender<Bytes>,
     sender: iroh_gossip::api::GossipSender,
     tasks: Vec<JoinHandle<()>>,
@@ -220,8 +221,13 @@ fn now_key() -> SessionKey {
     (millis, rand::random())
 }
 
-fn topic_id(account: &[u8; 32], space: &str) -> TopicId {
-    TopicId::from_bytes(derive("typewright 2026-10 live v0", &[account, space.as_bytes()]))
+/// Shared spaces' topics derive from the space's secret, so every account lands on the same one.
+fn topic_id(inner: &Inner, space: &str) -> TopicId {
+    if inner.is_shared(space) {
+        TopicId::from_bytes(derive("typewright 2026-10 shared live v0", &[&inner.namespace(space)]))
+    } else {
+        TopicId::from_bytes(derive("typewright 2026-10 live v0", &[&inner.account, space.as_bytes()]))
+    }
 }
 
 impl Inner {
@@ -242,13 +248,13 @@ impl Inner {
     }
 }
 
-/// Joins the space's topic with the account's other devices.
+/// Joins the space's topic with the other devices syncing it.
 pub(crate) async fn join(inner: &Arc<Inner>, space: &str) -> anyhow::Result<()> {
     if inner.topics.lock().unwrap().contains_key(space) {
         return Ok(());
     }
-    let peers: Vec<EndpointId> = inner.peer_addrs().into_iter().map(|addr| addr.id).collect();
-    let (sender, mut receiver) = inner.gossip.subscribe(topic_id(&inner.account, space), peers).await?.split();
+    let id = topic_id(inner, space);
+    let (sender, mut receiver) = inner.gossip.subscribe(id, inner.space_peers(space)).await?.split();
     let (outbox, mut queue) = mpsc::unbounded_channel::<Bytes>();
     let out = sender.clone();
     let writer = tokio::spawn(async move {
@@ -283,8 +289,23 @@ pub(crate) async fn join(inner: &Arc<Inner>, space: &str) -> anyhow::Result<()> 
             }
         })
     };
-    inner.topics.lock().unwrap().insert(space.to_string(), Topic { outbox, sender, tasks: vec![writer, reader, heartbeat] });
+    inner.topics.lock().unwrap().insert(space.to_string(), Topic { id, outbox, sender, tasks: vec![writer, reader, heartbeat] });
     Ok(())
+}
+
+/// Moves spaces that became shared to their shared topic; open sessions carry over and meet the others there.
+pub(crate) async fn retopic(inner: &Arc<Inner>) {
+    let moved: Vec<String> = {
+        let mut topics = inner.topics.lock().unwrap();
+        let moved: Vec<String> = topics.iter().filter(|(space, topic)| topic.id != topic_id(inner, space)).map(|(s, _)| s.clone()).collect();
+        moved.iter().for_each(|space| drop(topics.remove(space)));
+        moved
+    };
+    for space in moved {
+        if let Err(err) = join(inner, &space).await {
+            inner.error("live topic", err);
+        }
+    }
 }
 
 pub(crate) fn leave(inner: &Inner, space: &str) {
@@ -292,11 +313,11 @@ pub(crate) fn leave(inner: &Inner, space: &str) {
     inner.live.lock().unwrap().retain(|(s, _), _| s != space);
 }
 
-/// Dials devices that showed up in the directory since the topic was joined.
-pub(crate) async fn add_peers(inner: &Inner, peers: Vec<EndpointId>) {
-    let senders: Vec<_> = inner.topics.lock().unwrap().values().map(|t| t.sender.clone()).collect();
-    for sender in senders {
-        let _ = sender.join_peers(peers.clone()).await;
+/// Dials devices that showed up in a directory since the topic was joined.
+pub(crate) async fn add_peers(inner: &Inner, space: &str, peers: Vec<EndpointId>) {
+    let sender = inner.topics.lock().unwrap().get(space).map(|t| t.sender.clone());
+    if let Some(sender) = sender {
+        let _ = sender.join_peers(peers).await;
     }
 }
 
@@ -355,6 +376,11 @@ fn receive(inner: &Inner, space: &str, envelope: Envelope) {
         }
         Body::Sync { session: key, state } => {
             seen(session);
+            // Sessions that met without anyone typing, as after moving topics: the older one hands over its state.
+            if key > session.key && !session.adopting {
+                inner.send(space, path, Body::State { session: session.key, update: session.state(), reply: false });
+                return;
+            }
             if key != session.key || session.adopting {
                 return;
             }

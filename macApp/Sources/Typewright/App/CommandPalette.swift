@@ -412,6 +412,12 @@ struct CommandPalette: View {
         }
         items.append(PaletteItem(id: "space.finder", title: "Reveal \(ws.name) in Finder", icon: "folder", section: "Space",
                                  action: .run { NSWorkspace.shared.activateFileViewerSelecting([ws.root]) }))
+        if SyncService.shared.isSynced(ws.root) {
+            // The confirmation alert waits until the palette is gone.
+            items.append(PaletteItem(id: "space.invite", title: "Copy Invite Link to \(ws.name)…", icon: "person.badge.plus", section: "Space",
+                                     keywords: ["share", "collaborate", "invite", "link"],
+                                     action: .run { DispatchQueue.main.async { Invites.copyLink(for: ws.root) } }))
+        }
         items.append(PaletteItem(id: "space.spaces", title: "Show Spaces", icon: "square.stack", shortcut: "⌥⌘S", section: "Space",
                                  action: .run { state.setSpacesOpen(true) }))
         items.append(PaletteItem(id: "space.close", title: "Close \(ws.name)", icon: "xmark", shortcut: "⌃⌘W", section: "Space",

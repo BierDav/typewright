@@ -22,7 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        urls.forEach { Opener.shared.open($0) }
+        for url in urls {
+            if Invites.handles(url) { Invites.open(url) } else { Opener.shared.open(url) }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

@@ -230,7 +230,7 @@ private struct SpacesPane: View {
             LazyVStack(spacing: 2) {
                 ForEach(Array(spaces.enumerated()), id: \.element) { index, url in
                     SpaceRow(url: url, isCurrent: url.path == current, isHighlighted: focused && highlighted == url,
-                             isDragged: drag?.url == url, isSynced: sync.isSynced(url)) {
+                             isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url)) {
                         open(url)
                     } onForget: {
                         forget(url)
@@ -238,6 +238,8 @@ private struct SpacesPane: View {
                         toggleSync(url)
                     } onRemoveEverywhere: {
                         if let id = sync.spaceID(for: url) { removeEverywhere(id, name: url.lastPathComponent) }
+                    } onInvite: {
+                        Invites.copyLink(for: url)
                     } onDrag: { offset in
                         drag = (url, offset)
                     } onDrop: {
@@ -414,6 +416,9 @@ private struct SpacesPane: View {
         let alert = NSAlert()
         alert.messageText = "Remove “\(name)” from all devices?"
         alert.informativeText = "Your devices stop syncing this space. Their copies of the files stay where they are."
+        if sync.accountSpaces.contains(where: { $0.id == id && $0.shared }) {
+            alert.informativeText += " Others it's shared with keep syncing it among themselves."
+        }
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
@@ -449,10 +454,12 @@ private struct SpaceRow: View {
     let isHighlighted: Bool
     let isDragged: Bool
     let isSynced: Bool
+    let isShared: Bool
     let onOpen: () -> Void
     let onForget: () -> Void
     let onToggleSync: () -> Void
     let onRemoveEverywhere: () -> Void
+    let onInvite: () -> Void
     let onDrag: (CGFloat) -> Void
     let onDrop: () -> Void
     @State private var hovered = false
@@ -476,10 +483,10 @@ private struct SpaceRow: View {
             }
             Spacer(minLength: 0)
             if isSynced {
-                Image(systemName: "arrow.triangle.2.circlepath")
+                Image(systemName: isShared ? "person.2" : "arrow.triangle.2.circlepath")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
-                    .help("Synced across your devices")
+                    .help(isShared ? "Shared with others" : "Synced across your devices")
             }
         }
         .font(.system(size: 13))
@@ -520,7 +527,10 @@ private struct SpaceRow: View {
             Button("Copy Path") { copyPath(url) }
             Divider()
             Button(isSynced ? "Stop Syncing on This Mac" : "Sync Across Devices", action: onToggleSync)
-            if isSynced { Button("Remove From All Devices…", action: onRemoveEverywhere) }
+            if isSynced {
+                Button("Remove From All Devices…", action: onRemoveEverywhere)
+                Button("Copy Invite Link…", action: onInvite)
+            }
             Divider()
             Button("Forget Space", action: onForget)
         }
