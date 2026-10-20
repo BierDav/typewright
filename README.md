@@ -18,9 +18,21 @@ Want alpha and release-candidate builds? Install `bierdav/tap/typewright@beta` i
 
 Typewright needs macOS 26 or newer. On first launch it downloads the official Typst compiler. You can switch between Typst versions in Settings.
 
+## Web app
+
+[bierdav.github.io/typewright](https://bierdav.github.io/typewright/) runs Typewright in the browser. Spaces stay in the browser's storage and sync with your Mac through the same passkey.
+
 ## Build from source
 
 Install Rust (`cargo`) and a JDK 21, then open `macApp/Typewright.xcodeproj` in Xcode and run the `Typewright` scheme.
+
+For the web app, also install [Bun](https://bun.sh) and Homebrew's `llvm`, then:
+
+```sh
+sharedKotlin/gradlew -p sharedKotlin jsBrowserProductionLibraryDistribution
+scripts/build-web-wasm.sh
+cd webApp && bun install && bun run dev
+```
 
 ## License
 

@@ -2,3 +2,4 @@
 dist/
 xcuserdata/
 .DS_Store
+target/

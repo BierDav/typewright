@@ -13,10 +13,16 @@ import kotlin.js.JsExport
  */
 data class SpaceInvite(val id: String, val name: String, val secret: String, val hints: List<String>)
 
-/** `typewright://join/<payload>` links; the payload is base64url of a small binary layout. */
+/**
+ * `typewright://join/<payload>` links; the payload is base64url of a small binary layout. Web links
+ * (`<web app>/join#<payload>`) carry the same payload and join in the browser.
+ */
 object SpaceInvites {
     const val SCHEME = "typewright"
+    /** Where the web app is hosted (GitHub Pages). */
+    const val WEB_APP = "https://bierdav.github.io/typewright/"
     private const val PREFIX = "$SCHEME://join/"
+    private const val WEB_PATH = "join#"
     private const val VERSION: Byte = 1
     /** Keeps links short enough for chat apps. */
     const val MAX_HINTS = 3
@@ -35,9 +41,21 @@ object SpaceInvites {
         return PREFIX + base64.encode(bytes)
     }
 
-    /** Null for anything that isn't a well-formed invite link. */
+    /** The web app's form of `link`, below `webApp` (ending in `/`). */
+    fun webLink(link: String, webApp: String = WEB_APP): String? {
+        if (!link.startsWith(PREFIX)) return null
+        return webApp + WEB_PATH + link.removePrefix(PREFIX)
+    }
+
+    /** Null for anything that isn't a well-formed invite link, app or web. */
     fun parse(link: String): SpaceInvite? {
-        val payload = link.trim().takeIf { it.startsWith(PREFIX) }?.removePrefix(PREFIX)?.trimEnd('/') ?: return null
+        val text = link.trim()
+        val payload = when {
+            text.startsWith(PREFIX) -> text.removePrefix(PREFIX).trimEnd('/')
+            text.startsWith("https://") || text.startsWith("http://") ->
+                text.substringAfter("/$WEB_PATH", "").takeIf { it.isNotEmpty() } ?: return null
+            else -> return null
+        }
         val bytes = try { base64.decode(payload) } catch (_: IllegalArgumentException) { return null }
         if (bytes.size < 35 || bytes[0] != VERSION) return null
         var at = 33

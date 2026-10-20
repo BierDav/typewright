@@ -1,0 +1,270 @@
+import { closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { markdown } from "@codemirror/lang-markdown";
+import { bracketMatching, HighlightStyle, indentOnInput, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
+import { type Diagnostic as LintDiagnostic, lintGutter, lintKeymap, setDiagnostics } from "@codemirror/lint";
+import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
+import { Compartment, EditorSelection, EditorState, type Extension } from "@codemirror/state";
+import {
+  crosshairCursor,
+  drawSelection,
+  dropCursor,
+  EditorView,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  highlightSpecialChars,
+  keymap,
+  lineNumbers,
+  rectangularSelection,
+} from "@codemirror/view";
+import { tags } from "@lezer/highlight";
+import { vim } from "@replit/codemirror-vim";
+import { createEffect, on, onCleanup, onMount } from "solid-js";
+import { setEditorView } from "~/lib/app";
+import * as commands from "~/lib/commands";
+import { colorSwatches } from "~/lib/editor/colors";
+import { typstHighlighting } from "~/lib/editor/highlight";
+import { typstLanguage } from "~/lib/editor/language";
+import { liveEditing } from "~/lib/editor/live";
+import { download as downloadFont, googleFont, loadCatalog } from "~/lib/fonts";
+import { isEditable, isMarkdown } from "~/lib/kinds";
+import { settings } from "~/lib/settings";
+import { extension } from "~/lib/storage";
+import type { Workspace } from "~/lib/workspace";
+
+/** Typst for CodeMirror's commands: comments, brackets and indentation; colours come from typst itself. */
+const typstSyntax = StreamLanguage.define({
+  token(stream) {
+    stream.skipToEnd();
+    return null;
+  },
+  languageData: {
+    commentTokens: { line: "//", block: { open: "/*", close: "*/" } },
+    closeBrackets: { brackets: ["(", "[", "{", '"', "$"] },
+    indentOnInput: /^\s*[\]})]$/,
+  },
+});
+
+const markdownStyle = HighlightStyle.define([
+  { tag: tags.heading, class: "tw-keyword tw-bold" },
+  { tag: tags.emphasis, class: "tw-italic" },
+  { tag: tags.strong, class: "tw-bold" },
+  { tag: [tags.link, tags.url], class: "tw-link" },
+  { tag: [tags.monospace, tags.string], class: "tw-string" },
+  { tag: [tags.processingInstruction, tags.list, tags.quote], class: "tw-keyword" },
+  { tag: tags.comment, class: "tw-comment" },
+]);
+
+function languageFor(path: string): Extension {
+  const ext = extension(path);
+  if (ext === "typ" || ext === "typc") {
+    return [typstSyntax, typstHighlighting(ext === "typc"), typstLanguage(commands.languageContext()), colorSwatches];
+  }
+  if (isMarkdown(path)) return [markdown(), syntaxHighlighting(markdownStyle)];
+  return [];
+}
+
+function theme(): Extension {
+  return EditorView.theme({
+    "&": { fontSize: `${settings.fontSize}px` },
+  });
+}
+
+function wrapping(): Extension {
+  if (!settings.wrapGuide) return [];
+  // Lines wrap at the guide, or at the edge when the editor is narrower.
+  return [EditorView.lineWrapping, EditorView.theme({ ".cm-content": { maxWidth: `${settings.wrapColumn}ch` } }), EditorView.editorAttributes.of({ class: "tw-wrap-guide" })];
+}
+
+/** A diagnostic's line and column (from 1, UTF-16) as a range over the token there. */
+function diagnosticRange(state: EditorState, line: number, column: number): { from: number; to: number } {
+  const l = state.doc.line(Math.min(Math.max(line, 1), state.doc.lines));
+  const from = Math.min(l.from + Math.max(column - 1, 0), l.to);
+  const rest = state.sliceDoc(from, l.to);
+  const word = /^[\p{L}\p{N}_-]+/u.exec(rest)?.[0].length ?? 1;
+  return { from, to: Math.min(from + word, l.to) };
+}
+
+export default function Editor(props: { workspace: Workspace }) {
+  let host!: HTMLDivElement;
+  let view: EditorView | undefined;
+  const ws = props.workspace;
+  const states = new Map<string, EditorState>();
+  const language = new Compartment();
+  const live = new Compartment();
+  const themeSlot = new Compartment();
+  const vimSlot = new Compartment();
+  const wrapSlot = new Compartment();
+  let current: string | null = null;
+  let applyingExternal = false;
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function extensions(path: string): Extension[] {
+    return [
+      vimSlot.of(settings.vim ? vim() : []),
+      lineNumbers(),
+      highlightActiveLineGutter(),
+      highlightSpecialChars(),
+      history(),
+      drawSelection(),
+      dropCursor(),
+      EditorState.allowMultipleSelections.of(true),
+      indentOnInput(),
+      bracketMatching(),
+      closeBrackets(),
+      rectangularSelection(),
+      crosshairCursor(),
+      highlightActiveLine(),
+      highlightSelectionMatches(),
+      search({ top: true }),
+      lintGutter(),
+      keymap.of([
+        { key: "Shift-F6", run: () => (commands.rename(), true) },
+        { key: "F2", run: () => (commands.rename(), true) },
+        { key: "Mod-Alt-v", run: () => (void commands.extractVariable(), true) },
+        { key: "Mod-Alt-m", run: () => (void commands.extractFunction(), true) },
+        { key: "Mod-Alt-Shift-m", run: () => (void commands.extractFunction(true), true) },
+        { key: "Mod-Alt-n", run: () => (commands.inlineVariable(), true) },
+        { key: "Mod-Alt-f", run: () => (commands.find(true), true) },
+        ...closeBracketsKeymap,
+        ...defaultKeymap,
+        ...searchKeymap,
+        ...historyKeymap,
+        ...completionKeymap,
+        ...lintKeymap,
+        indentWithTab,
+      ]),
+      language.of(languageFor(path)),
+      live.of(liveEditing(ws.folder, path)),
+      themeSlot.of(theme()),
+      wrapSlot.of(wrapping()),
+      EditorView.updateListener.of((update) => {
+        if (current !== path) return;
+        if (update.docChanged && !applyingExternal) {
+          const immediate = update.transactions.some((tr) => tr.isUserEvent("input.color"));
+          ws.textDidChange(update.state.doc.toString(), immediate);
+        }
+        if (update.selectionSet || update.docChanged) {
+          const main = update.state.selection.main;
+          ws.setSelection(main.from, main.to);
+        }
+        if (update.selectionSet || update.geometryChanged) rememberState();
+      }),
+      EditorView.domEventHandlers({
+        scroll: () => rememberState(),
+      }),
+    ];
+  }
+
+  function rememberState() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (!view || !current) return;
+      const main = view.state.selection.main;
+      ws.saveEditorState(current, { anchor: main.anchor, head: main.head, scroll: view.scrollDOM.scrollTop });
+    }, 300);
+  }
+
+  function show(path: string | null, text: string) {
+    if (!view) return;
+    if (current) states.set(current, view.state);
+    // Other kinds show elsewhere; the editor keeps its states for when a text file returns.
+    current = path && isEditable(ws.state.selectedKind) ? path : null;
+    if (!path || !current) return;
+    let state = states.get(path);
+    if (!state || state.doc.toString() !== text) {
+      // A file changed elsewhere since it was shown starts a fresh history.
+      state = EditorState.create({ doc: text, extensions: extensions(path) });
+      const saved = ws.editorState(path);
+      if (saved && saved.head <= text.length && saved.anchor <= text.length) {
+        state = state.update({ selection: EditorSelection.single(saved.anchor, saved.head) }).state;
+      }
+    }
+    view.setState(state);
+    const saved = ws.editorState(path);
+    requestAnimationFrame(() => {
+      if (view && saved && current === path) view.scrollDOM.scrollTop = saved.scroll;
+    });
+  }
+
+  onMount(() => {
+    view = new EditorView({ parent: host });
+    setEditorView(view);
+    ws.currentText = () => (view && current === ws.state.selected ? view.state.doc.toString() : ws.state.text);
+    show(ws.state.selected, ws.state.text);
+    view.focus();
+  });
+
+  onCleanup(() => {
+    clearTimeout(saveTimer);
+    if (view && current) {
+      const main = view.state.selection.main;
+      ws.saveEditorState(current, { anchor: main.anchor, head: main.head, scroll: view.scrollDOM.scrollTop });
+    }
+    setEditorView(null);
+    view?.destroy();
+  });
+
+  createEffect(on(() => ws.state.selected, (path) => show(path, ws.state.text), { defer: true }));
+
+  // The file changed outside the editor: sync, another tab or a refactoring elsewhere.
+  createEffect(
+    on(
+      ws.external,
+      () => {
+        if (!view || current !== ws.state.selected) return;
+        const text = ws.state.text;
+        const old = view.state.doc.toString();
+        if (old === text) return;
+        let from = 0;
+        while (from < old.length && from < text.length && old[from] === text[from]) from++;
+        let end = 0;
+        while (end < old.length - from && end < text.length - from && old[old.length - 1 - end] === text[text.length - 1 - end]) end++;
+        applyingExternal = true;
+        view.dispatch({ changes: { from, to: old.length - end, insert: text.slice(from, text.length - end) }, userEvent: "external" });
+        applyingExternal = false;
+      },
+      { defer: true },
+    ),
+  );
+
+  createEffect(() => view?.dispatch({ effects: themeSlot.reconfigure(theme()) }));
+  createEffect(() => view?.dispatch({ effects: vimSlot.reconfigure(settings.vim ? vim() : []) }));
+  createEffect(() => view?.dispatch({ effects: wrapSlot.reconfigure(wrapping()) }));
+
+  // Diagnostics of the shown file, with fixes for missing fonts.
+  createEffect(() => {
+    const diagnostics = ws.state.diagnostics.filter((d) => d.path === ws.state.selected);
+    if (!view) return;
+    const state = view.state;
+    const items: LintDiagnostic[] = diagnostics.map((d) => {
+      const { from, to } = diagnosticRange(state, d.line, d.column);
+      const font = /^unknown font family: (.+)$/.exec(d.message)?.[1]?.trim();
+      const actions: NonNullable<LintDiagnostic["actions"]>[number][] = [];
+      if (font) {
+        void loadCatalog();
+        if (googleFont(font)) actions.push({ name: `Install “${googleFont(font)!.family}” from Google Fonts`, apply: () => void downloadFont(googleFont(font)!.family).then(() => ws.updateFonts()) });
+      }
+      return { from, to, severity: d.severity, message: d.message, actions };
+    });
+    view.dispatch(setDiagnostics(state, items));
+  });
+
+  // Reveals from diagnostics, search results and definitions.
+  createEffect(() => {
+    const reveal = ws.state.reveal;
+    if (!view || !reveal || reveal.path !== current) return;
+    const state = view.state;
+    let from = Math.min(reveal.from, state.doc.length);
+    let to = Math.min(reveal.to ?? from, state.doc.length);
+    if (reveal.line) {
+      const l = state.doc.line(Math.min(Math.max(reveal.line, 1), state.doc.lines));
+      from = Math.min(l.from + Math.max((reveal.column ?? 1) - 1, 0), l.to);
+      to = reveal.to ?? from;
+    }
+    view.dispatch({ selection: EditorSelection.single(from, to), effects: EditorView.scrollIntoView(from, { y: "center" }) });
+    view.focus();
+  });
+
+  return <div class="editor" ref={host} />;
+}

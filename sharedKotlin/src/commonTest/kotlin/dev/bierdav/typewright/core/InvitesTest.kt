@@ -20,6 +20,17 @@ class InvitesTest {
     }
 
     @Test
+    fun webLinksCarryTheSamePayload() {
+        val invite = SpaceInvite("space-1", "Thesis", secret, listOf(device))
+        val link = SpaceInvites.link(invite)!!
+        val web = SpaceInvites.webLink(link)!!
+        assertEquals(SpaceInvites.WEB_APP + "join#" + link.removePrefix("typewright://join/"), web)
+        assertEquals(invite, SpaceInvites.parse(web))
+        assertEquals(invite, SpaceInvites.parse(SpaceInvites.webLink(link, "http://localhost:5173/")!!))
+        assertNull(SpaceInvites.webLink("https://example.com"))
+    }
+
+    @Test
     fun cleansNamesAndDropsBadHints() {
         val link = SpaceInvites.link(SpaceInvite("x", "../a/b:c", secret.uppercase(), listOf("nope", device, device, device, device)))!!
         val parsed = SpaceInvites.parse(link)!!

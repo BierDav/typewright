@@ -9,8 +9,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+    };
 
 use bytes::Bytes;
 use iroh::EndpointId;
@@ -18,7 +17,11 @@ use iroh_gossip::{TopicId, api::Event};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::{sync::mpsc, task::JoinHandle};
+use n0_future::{
+    task::{JoinHandle, spawn},
+    time::{Duration, Instant, SystemTime, sleep},
+};
+use tokio::sync::mpsc;
 use yrs::{
     Any, Doc, GetString, Observable, OffsetKind, Options, Out, ReadTxn, StateVector, StickyIndex, Text,
     TextRef, Transact, Update, UndoManager,
@@ -128,7 +131,16 @@ impl Session {
                 }
             }
         });
-        let mut undo = UndoManager::with_options(undo::Options { capture_timeout_millis: 500, ..Default::default() });
+        // yrs has no default clock in browsers, so both platforms use the same one.
+        let undo_options = undo::Options {
+            capture_timeout_millis: 500,
+            tracked_origins: Default::default(),
+            capture_transaction: None,
+            timestamp: Arc::new(|| now_millis()),
+            init_undo_stack: Vec::new(),
+            init_redo_stack: Vec::new(),
+        };
+        let mut undo = UndoManager::with_options(undo_options);
         undo.expand_scope(&doc, &text);
         Session {
             key,
@@ -216,9 +228,12 @@ fn diff(old: &str, new: &str) -> (u32, u32, String) {
     (prefix as u32, (a.len() - suffix - prefix) as u32, inserted)
 }
 
+fn now_millis() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 fn now_key() -> SessionKey {
-    let millis = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    (millis, rand::random())
+    (now_millis(), rand::random())
 }
 
 /// Shared spaces' topics derive from the space's secret, so every account lands on the same one.
@@ -257,7 +272,7 @@ pub(crate) async fn join(inner: &Arc<Inner>, space: &str) -> anyhow::Result<()> 
     let (sender, mut receiver) = inner.gossip.subscribe(id, inner.space_peers(space)).await?.split();
     let (outbox, mut queue) = mpsc::unbounded_channel::<Bytes>();
     let out = sender.clone();
-    let writer = tokio::spawn(async move {
+    let writer = spawn(async move {
         while let Some(message) = queue.recv().await {
             let _ = out.broadcast(message).await;
         }
@@ -265,7 +280,7 @@ pub(crate) async fn join(inner: &Arc<Inner>, space: &str) -> anyhow::Result<()> 
     let reader = {
         let inner = inner.clone();
         let space = space.to_string();
-        tokio::spawn(async move {
+        spawn(async move {
             while let Some(event) = receiver.next().await {
                 match event {
                     Ok(Event::Received(message)) => {
@@ -282,9 +297,9 @@ pub(crate) async fn join(inner: &Arc<Inner>, space: &str) -> anyhow::Result<()> 
     let heartbeat = {
         let inner = inner.clone();
         let space = space.to_string();
-        tokio::spawn(async move {
+        spawn(async move {
             loop {
-                tokio::time::sleep(HEARTBEAT).await;
+                sleep(HEARTBEAT).await;
                 heartbeat(&inner, &space);
             }
         })

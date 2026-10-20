@@ -14,15 +14,18 @@ enum Invites {
         guard sync.isSynced(root) else { return }
         let alert = NSAlert()
         alert.messageText = "Invite others to “\(root.lastPathComponent)”?"
-        alert.informativeText = "Anyone with the link can download this space and edit its files, so only send it to people you trust. They need Typewright and a Typewright account to join."
+        alert.informativeText = "Anyone with the link can download this space and edit its files, so only send it to people you trust. They need a Typewright account to join, in the app or with the web link in their browser."
         alert.addButton(withTitle: "Copy Invite Link")
+        alert.addButton(withTitle: "Copy Web Link")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn || response == .alertSecondButtonReturn else { return }
         guard let link = sync.inviteLink(for: root) else {
             return message("Couldn't create an invite link.", "Syncing has to be running; check the Devices settings.")
         }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(link, forType: .string)
+        let web = response == .alertSecondButtonReturn ? SpaceInvites.shared.webLink(link: link, webApp: SpaceInvites.shared.WEB_APP) : nil
+        NSPasteboard.general.setString(web ?? link, forType: .string)
     }
 
     /// Joins the space a link invites to, after asking where its folder goes.

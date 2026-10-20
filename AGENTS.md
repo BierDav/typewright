@@ -20,10 +20,11 @@ Every module lives in its own top-level folder; `scripts/` is shared.
   - `Sources/Typewright/Editor` NSTextView based editor, highlighting, line numbers, tinymist language server client (`LanguageClient`, completions, go to definition) and color literal swatches with the color wheel.
   - `Sources/Typewright/Preview` PDF (PDFKit), HTML and SVG previews (shown as the inspector pane).
   - `Sources/Typewright/Sync` device sync: passkey account (`SyncIdentity`), `SyncService` applying sync actions to folders, `LiveEditing` (the shown file shared live with other devices, with their cursors), `Invites` (`typewright://join/…` links), `.gitignore`-aware `FolderScanner` and FSEvents `FolderWatcher`, Devices settings.
-- `sharedKotlin/` Kotlin Multiplatform logic layer (`dev.bierdav.typewright.core`), shared by the Mac app and the future SolidJS web app. Targets `macosArm64`/`macosX64` (static `TypewrightCore.framework`, built by `scripts/build-core.sh` as an Xcode build phase, needs a JDK) and `js` (ES module with TypeScript types). Only platform-free code lives here so far: diagnostics parsing, release picking, UTF-16 text positions and edits, file kinds, paths, space order, fuzzy matching, invite links. Swift keeps thin wrappers with the old APIs.
+- `sharedKotlin/` Kotlin Multiplatform logic layer (`dev.bierdav.typewright.core`), shared by the Mac app and the web app. Targets `macosArm64`/`macosX64` (static `TypewrightCore.framework`, built by `scripts/build-core.sh` as an Xcode build phase, needs a JDK) and `js` (ES module with TypeScript types). Only platform-free code lives here so far: diagnostics parsing, release picking, UTF-16 text positions and edits, file kinds, paths, space order, fuzzy matching, invite links. Swift keeps thin wrappers with the old APIs.
+- `webApp/` SolidStart (client only) web app on GitHub Pages: CodeMirror editor, spaces in origin storage (`lib/storage.ts`), typst in a worker (`workers/typst.worker.ts`), sync through the iroh bridge (`lib/sync.ts`), passkey account (`lib/identity.ts`). Uses the Kotlin core's JS build and both Rust bridges built for wasm into `src/wasm/` (git-ignored).
 - `typstBridge/` Rust static library linking typst in process; its `World` serves unsaved buffers from memory.
 - `irohBridge/` Rust static library syncing spaces between a user's devices (and invited accounts) with iroh-docs, iroh-blobs and iroh-gossip, plus live editing of open files (`live.rs`, yrs CRDT over gossip); events reach Swift as JSON through one C callback.
-- Both Rust bridges are built by `scripts/build-rust-bridge.sh <crate> <lib>` in one Xcode build phase (needs `cargo`).
+- Both Rust bridges are built by `scripts/build-rust-bridge.sh <crate> <lib>` in one Xcode build phase (needs `cargo`). Their C API lives in `ffi.rs`, the wasm-bindgen API in `web.rs`.
 - `scripts/` build phases, icon generation, release build, version calculation, cask generation.
 
 ## Commands
@@ -35,6 +36,7 @@ Run from the repository root.
 - Kotlin tests (macOS and Node): `sharedKotlin/gradlew -p sharedKotlin allTests`
 - Sync over the network (two devices in one process, real n0 relays): `TEST_RUNNER_TYPEWRIGHT_NETWORK_TESTS=1 xcodebuild -project macApp/Typewright.xcodeproj -scheme Typewright -derivedDataPath .build test -only-testing:TypewrightTests/SyncNetworkTests` and `cargo test --release --manifest-path irohBridge/Cargo.toml --target-dir .build/cargo -- --ignored`
 - Kotlin JS bundle: `sharedKotlin/gradlew -p sharedKotlin jsBrowserProductionLibraryDistribution` (output in `sharedKotlin/build/dist/js/productionLibrary`)
+- Web app: `scripts/build-web-wasm.sh` (needs Homebrew's `llvm`) and the Kotlin JS bundle first, then `bun install` and `bun run dev` / `bun run check` / `bun run build` in `webApp/`
 - Release bundle: `scripts/build-app.sh <version>`
 - Icon: `swift scripts/make-icon.swift`
 
@@ -59,6 +61,11 @@ Run from the repository root.
 - The typst CLI is downloaded to `~/Library/Application Support/Typewright/compilers/<version>/typst`.
 - tinymist (the language server) is downloaded to `~/Library/Application Support/Typewright/tinymist/tinymist`; a Homebrew install wins. One process runs per open space and gets full-text `didChange`s.
 
+- The web app derives the same account from the same passkey only on the relying party's domain, so it's hosted at `SpaceInvites.WEB_APP` (`bierdav.github.io/typewright`). One tab per browser runs the sync node (a Web Lock); other tabs show "Syncing in another tab".
+- Web invite links are `<web app>/join#<payload>`; GitHub Pages serves `404.html` (the app) for `/join`.
+
 ## Releases
 
 Run the `Release` workflow in GitHub Actions. Pick `alpha`, `rc` or `stable`, and tick `major` for breaking releases. `scripts/next-version.sh` computes the version from the last stable tag: a major bump if `major` is ticked, a minor bump if a `feat` commit landed since that tag, a patch bump otherwise. Pre-releases get `-alpha.N` / `-rc.N`. The workflow builds, creates the GitHub release and updates `Casks/typewright.rb` (stable) and `Casks/typewright@beta.rb` (every channel) in `BierDav/homebrew-tap`.
+
+The `Web App` workflow deploys `webApp/` to GitHub Pages on every push to `main` that touches it, the Kotlin core or the bridges (Pages has to be set to "GitHub Actions" in the repository settings).

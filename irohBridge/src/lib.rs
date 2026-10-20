@@ -12,12 +12,10 @@
 //!   (of any account) syncing them,
 //! - one gossip topic per space carries live edits and cursors of open files (see `live`).
 //!
-//! Events reach Swift as JSON strings through one callback, on arbitrary threads.
+//! Events reach Swift (`ffi`) or the web app (`web`) as JSON strings through one callback.
 
 use std::{
     collections::{HashMap, HashSet},
-    ffi::{CStr, CString, c_char, c_void},
-    path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -28,42 +26,64 @@ use bytes::Bytes;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, SecretKey,
     address_lookup::{N0_DNS_PKARR_RELAY_PROD, PkarrRelayClient},
-    endpoint::presets,
     protocol::Router,
 };
-use iroh_blobs::{BlobsProtocol, Hash, api::blobs::ImportMode, store::fs::FsStore};
+use iroh_blobs::{BlobsProtocol, Hash};
 use iroh_dns::pkarr::SignedPacket;
 use iroh_docs::{
     Author, AuthorId, Capability, ContentStatus, NamespaceSecret, api::Doc, engine::LiveEvent, protocol::Docs,
     store::Query,
 };
 use iroh_gossip::net::Gossip;
-use n0_future::StreamExt;
+use n0_future::{StreamExt, task::spawn, time::sleep};
 use serde_json::json;
-use tokio::runtime::Runtime;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod ffi;
 mod live;
+#[cfg(target_arch = "wasm32")]
+mod web;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use ffi::*;
+#[cfg(target_arch = "wasm32")]
+pub use web::*;
 
 /// Content of a path's entry once the file is deleted; empty entries can't mark deletions since
 /// empty files have them too.
-const TOMBSTONE: &[u8] = b"typewright:deleted:v0\0";
+pub(crate) const TOMBSTONE: &[u8] = b"typewright:deleted:v0\0";
 const DIRECTORY_NAME: &str = "_devices";
 /// Records hold at most 1000 bytes; the oldest devices drop out first.
 const MAX_DEVICES: usize = 12;
 /// Live sessions send whole documents when they meet; files larger than this sync on save only.
-const MAX_GOSSIP_MESSAGE: usize = 1 << 20;
+pub(crate) const MAX_GOSSIP_MESSAGE: usize = 1 << 20;
 
-pub type EventCallback = extern "C" fn(context: *mut c_void, event: *const c_char);
+/// Receives every event as JSON; the browser is single threaded, so its sink needn't be `Send`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type Sink = Box<dyn Fn(&str) + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type Sink = Box<dyn Fn(&str)>;
 
-pub struct TWSyncNode {
-    runtime: Runtime,
-    inner: Arc<Inner>,
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type Owner = Box<dyn std::any::Any + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type Owner = Box<dyn std::any::Any>;
+
+/// What a node runs on; the stores differ per platform.
+pub(crate) struct Parts {
+    pub endpoint: Endpoint,
+    /// Keeps the store's owner alive; `blobs` is its API.
+    pub store: Owner,
+    pub blobs: iroh_blobs::api::Store,
+    pub gossip: Gossip,
+    pub docs: Docs,
 }
 
-struct Inner {
+pub(crate) struct Inner {
     endpoint: Endpoint,
     _router: Router,
-    blobs: FsStore,
+    _store: Owner,
+    blobs: iroh_blobs::api::Store,
     docs: Docs,
     author: AuthorId,
     account: [u8; 32],
@@ -80,9 +100,14 @@ struct Inner {
     opening: tokio::sync::Mutex<()>,
     neighbors: Mutex<HashSet<EndpointId>>,
     devices: Mutex<Vec<EndpointId>>,
-    callback: EventCallback,
-    context: usize,
+    sink: Sink,
 }
+
+// The browser runs everything on one thread, where `Send` and `Sync` are never exercised.
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for Inner {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for Inner {}
 
 #[derive(Clone)]
 struct Space {
@@ -99,8 +124,7 @@ struct SpaceInfo {
 
 impl Inner {
     fn emit(&self, event: serde_json::Value) {
-        let Ok(text) = CString::new(event.to_string()) else { return };
-        (self.callback)(self.context as *mut c_void, text.as_ptr());
+        (self.sink)(&event.to_string());
     }
 
     fn error(&self, context: &str, err: anyhow::Error) {
@@ -149,7 +173,7 @@ impl Inner {
     }
 }
 
-fn derive(context: &str, parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn derive(context: &str, parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_derive_key(context);
     for part in parts {
         hasher.update(part);
@@ -163,7 +187,7 @@ fn space_secret(account: &[u8; 32], id: &str) -> [u8; 32] {
 
 /// Everyone with the space's secret writes as this author; entries of the account author from
 /// before still count, as the newest entry of a key wins across authors.
-fn space_author(secret: &[u8; 32]) -> Author {
+pub(crate) fn space_author(secret: &[u8; 32]) -> Author {
     Author::from_bytes(&derive("typewright 2026-10 space author v0", &[secret]))
 }
 
@@ -172,7 +196,7 @@ fn space_directory_key(secret: &[u8; 32]) -> SecretKey {
     SecretKey::from_bytes(&derive("typewright 2026-10 space directory v0", &[secret]))
 }
 
-fn parse_hex32(text: &str) -> Option<[u8; 32]> {
+pub(crate) fn parse_hex32(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 || !text.is_ascii() {
         return None;
     }
@@ -183,7 +207,7 @@ fn parse_hex32(text: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -199,7 +223,7 @@ fn tombstone_hash() -> Hash {
     Hash::new(TOMBSTONE)
 }
 
-fn entry_json(space: &str, key: &[u8], hash: Hash, size: u64) -> serde_json::Value {
+pub(crate) fn entry_json(space: &str, key: &[u8], hash: Hash, size: u64) -> serde_json::Value {
     let deleted = hash == tombstone_hash();
     json!({
         "space": space,
@@ -210,36 +234,31 @@ fn entry_json(space: &str, key: &[u8], hash: Hash, size: u64) -> serde_json::Val
     })
 }
 
-async fn start(data_dir: PathBuf, account: [u8; 32], callback: EventCallback, context: usize) -> Result<Arc<Inner>> {
-    tokio::fs::create_dir_all(data_dir.join("docs")).await?;
-    // The device key is this device's own; only the account keys are shared.
-    let key_path = data_dir.join("device.key");
-    let device_key = match tokio::fs::read(&key_path).await {
-        Ok(bytes) if bytes.len() == 32 => SecretKey::from_bytes(bytes.as_slice().try_into()?),
-        _ => {
-            let key = SecretKey::generate();
-            tokio::fs::write(&key_path, key.to_bytes()).await?;
-            key
-        }
-    };
-    let endpoint = Endpoint::builder(presets::N0).secret_key(device_key).bind().await?;
-    let blobs = FsStore::load(data_dir.join("blobs")).await?;
-    let gossip = Gossip::builder().max_message_size(MAX_GOSSIP_MESSAGE).spawn(endpoint.clone());
-    let docs = Docs::persistent(data_dir.join("docs")).spawn(endpoint.clone(), (*blobs).clone(), gossip.clone()).await?;
+pub(crate) fn account_author(account: &[u8; 32]) -> Author {
+    Author::from_bytes(&derive("typewright 2026-10 author v0", &[account]))
+}
+
+pub(crate) fn account_namespace(account: &[u8; 32]) -> NamespaceSecret {
+    NamespaceSecret::from_bytes(&derive("typewright 2026-10 account v0", &[account]))
+}
+
+/// Starts the node on platform specific parts; the device key is the endpoint's, only the account keys are shared.
+pub(crate) async fn start(parts: Parts, account: [u8; 32], sink: Sink) -> Result<Arc<Inner>> {
+    let Parts { endpoint, store, blobs, gossip, docs } = parts;
     let router = Router::builder(endpoint.clone())
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
         .accept(iroh_gossip::ALPN, gossip.clone())
         .accept(iroh_docs::ALPN, docs.clone())
         .spawn();
 
-    let author = Author::from_bytes(&derive("typewright 2026-10 author v0", &[&account]));
+    let author = account_author(&account);
     docs.author_import(author.clone()).await?;
-    let account_secret = NamespaceSecret::from_bytes(&derive("typewright 2026-10 account v0", &[&account]));
-    let account_doc = docs.import_namespace(Capability::Write(account_secret)).await?;
+    let account_doc = docs.import_namespace(Capability::Write(account_namespace(&account))).await?;
 
     let inner = Arc::new(Inner {
         endpoint,
         _router: router,
+        _store: store,
         blobs,
         docs,
         author: author.id(),
@@ -254,15 +273,14 @@ async fn start(data_dir: PathBuf, account: [u8; 32], callback: EventCallback, co
         opening: tokio::sync::Mutex::new(()),
         neighbors: Mutex::new(HashSet::new()),
         devices: Mutex::new(Vec::new()),
-        callback,
-        context,
+        sink,
     });
     // Joined spaces' secrets have to be known before Swift opens them.
     if let Err(err) = emit_spaces(&inner).await {
         inner.error("account replica", err);
     }
-    tokio::spawn(watch_account(inner.clone()));
-    tokio::spawn(directory_loop(inner.clone()));
+    spawn(watch_account(inner.clone()));
+    spawn(directory_loop(inner.clone()));
     inner.status();
     Ok(inner)
 }
@@ -277,16 +295,22 @@ async fn directory_loop(inner: Arc<Inner>) {
             inner.error("device directory", err);
         }
         round += 1;
-        tokio::time::sleep(Duration::from_secs(if round < 3 { 10 } else { 60 })).await;
+        sleep(Duration::from_secs(if round < 3 { 10 } else { 60 })).await;
     }
 }
 
 fn pkarr_client(inner: &Inner) -> Result<PkarrRelayClient> {
-    Ok(PkarrRelayClient::new(
+    #[cfg(not(target_arch = "wasm32"))]
+    return Ok(PkarrRelayClient::new(
         N0_DNS_PKARR_RELAY_PROD.parse()?,
         inner.endpoint.tls_config().clone(),
         inner.endpoint.dns_resolver()?.clone(),
-    ))
+    ));
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = inner;
+        Ok(PkarrRelayClient::new(N0_DNS_PKARR_RELAY_PROD.parse()?))
+    }
 }
 
 /// Adds this device to the record (or takes it out with `leave`) and returns the devices it lists.
@@ -455,7 +479,7 @@ fn member_key(inner: &Inner, space: &str) -> String {
 }
 
 /// Stops syncing here; a space nobody syncs anymore leaves the account.
-async fn leave_space(inner: Arc<Inner>, id: String) -> Result<()> {
+pub(crate) async fn leave_space(inner: Arc<Inner>, id: String) -> Result<()> {
     live::leave(&inner, &id);
     let space = inner.spaces.lock().unwrap().remove(&id);
     if let Some(space) = space {
@@ -479,7 +503,7 @@ async fn leave_space(inner: Arc<Inner>, id: String) -> Result<()> {
 }
 
 /// Takes the space off every device; each keeps its files.
-async fn remove_space(inner: Arc<Inner>, id: String) -> Result<()> {
+pub(crate) async fn remove_space(inner: Arc<Inner>, id: String) -> Result<()> {
     inner.account_doc.set_bytes(inner.author, format!("removed/{id}"), b"1".to_vec()).await?;
     inner.account_doc.del(inner.author, format!("space/{id}")).await?;
     inner.account_doc.del(inner.author, format!("member/{id}/")).await?;
@@ -487,7 +511,7 @@ async fn remove_space(inner: Arc<Inner>, id: String) -> Result<()> {
 }
 
 /// The space's replica, opened, watched and syncing on first use.
-async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Space> {
+pub(crate) async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Space> {
     let _guard = inner.opening.lock().await;
     if let Some(space) = inner.spaces.lock().unwrap().get(id).cloned() {
         return Ok(space);
@@ -497,7 +521,7 @@ async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Space> {
     inner.docs.author_import(author.clone()).await?;
     let doc = inner.docs.import_namespace(Capability::Write(NamespaceSecret::from_bytes(&secret))).await?;
     let events = doc.subscribe().await?;
-    tokio::spawn(watch_space(inner.clone(), id.to_string(), doc.clone(), events));
+    spawn(watch_space(inner.clone(), id.to_string(), doc.clone(), events));
     let space = Space { doc: doc.clone(), author: author.id() };
     inner.spaces.lock().unwrap().insert(id.to_string(), space.clone());
     inner.account_doc.set_bytes(inner.author, member_key(inner, id), b"1".to_vec()).await?;
@@ -507,7 +531,7 @@ async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Space> {
         // Listing this device and finding the others shouldn't wait for the next directory round.
         let inner = inner.clone();
         let id = id.to_string();
-        tokio::spawn(async move {
+        spawn(async move {
             let Ok(client) = pkarr_client(&inner) else { return };
             refresh_space_directory(&inner, &client, &id, false).await;
             let _ = sync_space(&inner, &id, &doc).await;
@@ -516,7 +540,7 @@ async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Space> {
     Ok(space)
 }
 
-async fn open_space(inner: Arc<Inner>, id: String) -> Result<()> {
+pub(crate) async fn open_space(inner: Arc<Inner>, id: String) -> Result<()> {
     space_doc(&inner, &id).await?;
     list_space(&inner, &id).await
 }
@@ -569,7 +593,7 @@ fn remote(space: &str, key: &[u8], hash: Hash, size: u64) -> serde_json::Value {
     event
 }
 
-async fn list_space(inner: &Arc<Inner>, id: &str) -> Result<()> {
+pub(crate) async fn list_space(inner: &Arc<Inner>, id: &str) -> Result<()> {
     let doc = space_doc(inner, id).await?.doc;
     let stream = doc.get_many(Query::single_latest_per_key().include_empty().build()).await?;
     tokio::pin!(stream);
@@ -586,7 +610,7 @@ async fn list_space(inner: &Arc<Inner>, id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn share_space(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
+pub(crate) async fn share_space(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
     // Membership lands before the listing, so no device sees the space without members.
     inner.account_doc.set_bytes(inner.author, member_key(&inner, &id), b"1".to_vec()).await?;
     let info = serde_json::to_vec(&json!({"name": name}))?;
@@ -595,7 +619,7 @@ async fn share_space(inner: Arc<Inner>, id: String, name: String) -> Result<()> 
 }
 
 /// Marks an own space shared, so all devices of the account list themselves in its record.
-async fn invite(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
+pub(crate) async fn invite(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
     let key = format!("space/{id}");
     let stored = match inner.account_doc.get_exact(inner.author, key.clone(), false).await? {
         Some(entry) => inner.blobs.get_bytes(entry.content_hash()).await.ok(),
@@ -615,7 +639,13 @@ async fn invite(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
 
 /// Starts syncing a space from another account's invite; the account replica keeps its secret for
 /// this account's other devices.
-async fn join_space(inner: Arc<Inner>, id: String, name: String, secret: [u8; 32]) -> Result<()> {
+/// Remembers a joined space's keys and the devices its invite named, before anything opens it.
+pub(crate) fn begin_join(inner: &Inner, id: &str, secret: [u8; 32], hints: Vec<EndpointId>) {
+    inner.infos.lock().unwrap().insert(id.to_string(), SpaceInfo { secret: Some(secret), shared: true });
+    inner.space_devices.lock().unwrap().insert(id.to_string(), hints);
+}
+
+pub(crate) async fn join_space(inner: Arc<Inner>, id: String, name: String, secret: [u8; 32]) -> Result<()> {
     // Joining again after "Remove From All Devices" brings it back.
     inner.account_doc.del(inner.author, format!("removed/{id}")).await?;
     inner.account_doc.set_bytes(inner.author, member_key(&inner, &id), b"1".to_vec()).await?;
@@ -624,282 +654,34 @@ async fn join_space(inner: Arc<Inner>, id: String, name: String, secret: [u8; 32
     open_space(inner, id).await
 }
 
-async fn publish(inner: Arc<Inner>, id: String, path: String, file: PathBuf) -> Result<()> {
-    let space = space_doc(&inner, &id).await?;
-    let outcome = space
-        .doc
-        .import_file(&inner.blobs, space.author, Bytes::from(path.clone().into_bytes()), file, ImportMode::Copy)
-        .await?
-        .await?;
-    let mut event = entry_json(&id, path.as_bytes(), outcome.hash, outcome.size);
+pub(crate) fn published(inner: &Inner, id: &str, path: &str, hash: Hash, size: u64) {
+    let mut event = entry_json(id, path.as_bytes(), hash, size);
     event["type"] = json!("published");
     inner.emit(event);
+}
+
+/// Writes `bytes` as the space's `path`; answers with a `published` event.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) async fn publish_bytes(inner: Arc<Inner>, id: String, path: String, bytes: Vec<u8>) -> Result<()> {
+    let space = space_doc(&inner, &id).await?;
+    let size = bytes.len() as u64;
+    let tag = inner.blobs.add_bytes(bytes).await?;
+    space.doc.set_hash(space.author, Bytes::from(path.clone().into_bytes()), tag.hash, size).await?;
+    published(&inner, &id, &path, tag.hash, size);
     Ok(())
 }
 
-async fn unpublish(inner: Arc<Inner>, id: String, path: String) -> Result<()> {
+pub(crate) async fn unpublish(inner: Arc<Inner>, id: String, path: String) -> Result<()> {
     let space = space_doc(&inner, &id).await?;
     let hash = space.doc.set_bytes(space.author, Bytes::from(path.clone().into_bytes()), TOMBSTONE).await?;
-    let mut event = entry_json(&id, path.as_bytes(), hash, 0);
-    event["type"] = json!("published");
-    inner.emit(event);
+    published(&inner, &id, &path, hash, 0);
     Ok(())
 }
 
-async fn export(inner: Arc<Inner>, hash: String, target: PathBuf, request: i64) {
-    let result: Result<()> = async {
-        let hash = Hash::from_str(&hash)?;
-        if let Some(dir) = target.parent() {
-            tokio::fs::create_dir_all(dir).await?;
-        }
-        inner.blobs.export(hash, &target).await?;
-        Ok(())
-    }
-    .await;
-    if let Err(err) = &result {
-        inner.error("export", anyhow::anyhow!("{err:#}"));
-    }
-    inner.emit(json!({"type": "exported", "request": request, "ok": result.is_ok()}));
-}
-
-// MARK: - C interface
-
-unsafe fn string(ptr: *const c_char) -> String {
-    if ptr.is_null() {
-        return String::new();
-    }
-    unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
-}
-
-impl TWSyncNode {
-    fn spawn<F>(&self, label: &'static str, task: F)
-    where
-        F: Future<Output = Result<()>> + Send + 'static,
-    {
-        let inner = self.inner.clone();
-        self.runtime.spawn(async move {
-            if let Err(err) = task.await {
-                inner.error(label, err);
-            }
-        });
-    }
-}
-
-/// Starts syncing for the account; NULL if the node can't start. `account` is 32 bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_start(
-    data_dir: *const c_char,
-    account: *const u8,
-    callback: EventCallback,
-    context: *mut c_void,
-) -> *mut TWSyncNode {
-    let dir = PathBuf::from(unsafe { string(data_dir) });
-    let mut secret = [0u8; 32];
-    secret.copy_from_slice(unsafe { std::slice::from_raw_parts(account, 32) });
-    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build() else {
-        return std::ptr::null_mut();
-    };
-    match runtime.block_on(start(dir, secret, callback, context as usize)) {
-        Ok(inner) => Box::into_raw(Box::new(TWSyncNode { runtime, inner })),
-        Err(err) => {
-            if let Ok(text) = CString::new(json!({"type": "error", "message": format!("start: {err:#}")}).to_string()) {
-                callback(context, text.as_ptr());
-            }
-            std::ptr::null_mut()
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_stop(node: *mut TWSyncNode) {
-    if node.is_null() {
-        return;
-    }
-    let node = unsafe { Box::from_raw(node) };
-    let inner = node.inner.clone();
-    node.runtime.block_on(async move {
-        inner.endpoint.close().await;
-    });
-    node.runtime.shutdown_timeout(Duration::from_secs(2));
-}
-
-/// This device's endpoint id; free with `tws_string_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_device_id(node: *const TWSyncNode) -> *mut c_char {
-    let node = unsafe { &*node };
-    CString::new(node.inner.endpoint.id().to_string()).unwrap_or_default().into_raw()
-}
-
-/// Lists the space for all devices of the account and starts syncing it here.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_share_space(node: *const TWSyncNode, space: *const c_char, name: *const c_char) {
-    let node = unsafe { &*node };
-    let (id, name) = unsafe { (string(space), string(name)) };
-    node.spawn("share space", share_space(node.inner.clone(), id, name));
-}
-
-/// The secret (hex) an invite link to the space carries; marks the space shared for all devices of
-/// the account. Free with `tws_string_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_invite(node: *const TWSyncNode, space: *const c_char, name: *const c_char) -> *mut c_char {
-    let node = unsafe { &*node };
-    let (id, name) = unsafe { (string(space), string(name)) };
-    let secret = node.inner.namespace(&id);
-    node.spawn("invite", invite(node.inner.clone(), id, name));
-    CString::new(hex(&secret)).unwrap_or_default().into_raw()
-}
-
-/// Starts syncing a space from an invite: `secret` is hex and `hints` comma separated endpoint ids
-/// to dial first. Answers with an `entries` event.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_join_space(
-    node: *const TWSyncNode,
-    space: *const c_char,
-    name: *const c_char,
-    secret: *const c_char,
-    hints: *const c_char,
-) {
-    let node = unsafe { &*node };
-    let (id, name, secret, hints) = unsafe { (string(space), string(name), string(secret), string(hints)) };
-    let Some(secret) = parse_hex32(&secret) else {
-        return node.inner.error("join space", anyhow::anyhow!("invalid secret"));
-    };
-    let hints = hints.split(',').filter_map(|h| EndpointId::from_str(h.trim()).ok()).collect();
-    // Known before returning, so Swift's next calls open the right replica.
-    node.inner.infos.lock().unwrap().insert(id.clone(), SpaceInfo { secret: Some(secret), shared: true });
-    node.inner.space_devices.lock().unwrap().insert(id.clone(), hints);
-    node.spawn("join space", join_space(node.inner.clone(), id, name, secret));
-}
-
-/// Starts syncing a space listed by the account; answers with an `entries` event.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_open_space(node: *const TWSyncNode, space: *const c_char) {
-    let node = unsafe { &*node };
-    let id = unsafe { string(space) };
-    node.spawn("open space", open_space(node.inner.clone(), id));
-}
-
-/// Stops syncing a space on this device; the other devices keep it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_close_space(node: *const TWSyncNode, space: *const c_char) {
-    let node = unsafe { &*node };
-    let id = unsafe { string(space) };
-    node.spawn("close space", leave_space(node.inner.clone(), id));
-}
-
-/// Stops syncing a space on every device of the account; the files stay everywhere.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_remove_space(node: *const TWSyncNode, space: *const c_char) {
-    let node = unsafe { &*node };
-    let id = unsafe { string(space) };
-    node.spawn("remove space", remove_space(node.inner.clone(), id));
-}
-
-/// Starts live editing of a file shown in an editor; `name` labels this device's cursor elsewhere.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_live_open(
-    node: *const TWSyncNode,
-    space: *const c_char,
-    path: *const c_char,
-    text: *const c_char,
-    name: *const c_char,
-) {
-    let node = unsafe { &*node };
-    let (space, path, text, name) = unsafe { (string(space), string(path), string(text), string(name)) };
-    let _guard = node.runtime.enter();
-    live::open(&node.inner, &space, &path, &text, &name);
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_live_close(node: *const TWSyncNode, space: *const c_char, path: *const c_char) {
-    let node = unsafe { &*node };
-    let (space, path) = unsafe { (string(space), string(path)) };
-    live::close(&node.inner, &space, &path);
-}
-
-/// Hands over the editor's text and selection (UTF-16) and returns what changed elsewhere as JSON:
-/// `edits` to apply in order, `adopted` texts to merge, the other `cursors` and the `peers` count.
-/// `step` 1 undoes and 2 redoes this device's last edit. Free with `tws_string_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_live_sync(
-    node: *const TWSyncNode,
-    space: *const c_char,
-    path: *const c_char,
-    text: *const c_char,
-    location: u32,
-    length: u32,
-    step: i32,
-) -> *mut c_char {
-    let node = unsafe { &*node };
-    let (space, path, text) = unsafe { (string(space), string(path), string(text)) };
-    let step = match step {
-        1 => live::Step::Undo,
-        2 => live::Step::Redo,
-        _ => live::Step::None,
-    };
-    let result = live::sync(&node.inner, &space, &path, &text, (location, length), step);
-    CString::new(result.to_string()).unwrap_or_default().into_raw()
-}
-
-/// Imports the file at `file` as the space's `path`; answers with a `published` event.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_publish(
-    node: *const TWSyncNode,
-    space: *const c_char,
-    path: *const c_char,
-    file: *const c_char,
-) {
-    let node = unsafe { &*node };
-    let (id, path, file) = unsafe { (string(space), string(path), PathBuf::from(string(file))) };
-    node.spawn("publish", publish(node.inner.clone(), id, path, file));
-}
-
-/// Marks the space's `path` deleted; answers with a `published` event.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_unpublish(node: *const TWSyncNode, space: *const c_char, path: *const c_char) {
-    let node = unsafe { &*node };
-    let (id, path) = unsafe { (string(space), string(path)) };
-    node.spawn("unpublish", unpublish(node.inner.clone(), id, path));
-}
-
-/// Writes a blob to `target`; answers with an `exported` event carrying `request`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_export(node: *const TWSyncNode, hash: *const c_char, target: *const c_char, request: i64) {
-    let node = unsafe { &*node };
-    let (hash, target) = unsafe { (string(hash), PathBuf::from(string(target))) };
-    node.runtime.spawn(export(node.inner.clone(), hash, target, request));
-}
-
-/// Re-sends the space's entries as an `entries` event.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_list_space(node: *const TWSyncNode, space: *const c_char) {
-    let node = unsafe { &*node };
-    let id = unsafe { string(space) };
-    let inner = node.inner.clone();
-    node.spawn("list space", async move { list_space(&inner, &id).await });
-}
-
-/// BLAKE3 of a file, hex encoded as blob hashes are; NULL if unreadable. Free with `tws_string_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_hash_file(path: *const c_char) -> *mut c_char {
-    let path = unsafe { string(path) };
-    let mut hasher = blake3::Hasher::new();
-    match hasher.update_mmap(&path) {
-        Ok(_) => CString::new(hasher.finalize().to_hex().to_string()).unwrap_or_default().into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tws_string_free(s: *mut c_char) {
-    if !s.is_null() {
-        drop(unsafe { CString::from_raw(s) });
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use iroh::endpoint::presets;
 
     #[test]
     fn hex_round_trips_and_rejects_junk() {
