@@ -39,6 +39,8 @@ final class LiveEditing {
     @ObservationIgnored private var observer: (any NSObjectProtocol)?
 
     var isActive: Bool { path != nil }
+    /// Files in a live session, as `root/path`.
+    private static var sessions: Set<String> = []
 
     init(root: URL) {
         self.root = root
@@ -64,6 +66,8 @@ final class LiveEditing {
         guard path != self.path else { return }
         close()
         guard let path, SyncService.shared.isRunning, SyncService.shared.isSynced(root), text.utf8.count <= SyncService.liveLimit else { return }
+        // The bridge keeps one session per file; another window with it open already shares it.
+        guard Self.sessions.insert(root.standardizedFileURL.path + "/" + path).inserted else { return }
         self.path = path
         selection = NSRange(location: 0, length: 0)
         SyncService.shared.liveOpen(root: root, path: path, text: text)
@@ -71,6 +75,7 @@ final class LiveEditing {
 
     func close() {
         guard let path else { return }
+        Self.sessions.remove(root.standardizedFileURL.path + "/" + path)
         SyncService.shared.liveClose(root: root, path: path)
         self.path = nil
         participants = []

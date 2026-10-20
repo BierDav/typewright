@@ -20,6 +20,11 @@ final class WindowState {
     var overlay: WindowOverlay?
     /// A file and line to show once the window switched to its space.
     var pendingReveal: SourceLocation?
+    /// A file to select once the window opened its space, keeping its saved caret.
+    var pendingFile: URL?
+    var sidebarVisible = true
+    /// The space shown, for menu commands.
+    @ObservationIgnored weak var workspace: Workspace?
     /// Live selector progress while a two-finger swipe drives it.
     var swipe: CGFloat?
     /// Whether the selector overlay is in the view tree; it stays a moment after closing to animate out.
@@ -99,8 +104,8 @@ struct MainWindow: View {
     @State private var workspace: Workspace?
 
     var body: some View {
-        // The sidebar can't be hidden: toggling and drag-collapsing have nothing to change.
-        NavigationSplitView(columnVisibility: .constant(.all)) {
+        NavigationSplitView(columnVisibility: Binding(get: { state.sidebarVisible ? .all : .detailOnly },
+                                                      set: { state.sidebarVisible = $0 != .detailOnly })) {
             SpacesSidebar(state: state, workspace: workspace)
                 .navigationSplitViewColumnWidth(min: WindowState.minSidebarWidth, ideal: state.initialSidebarWidth)
         } detail: {
@@ -131,6 +136,9 @@ struct MainWindow: View {
                 next.open(pending)
             }
             state.pendingReveal = nil
+            if let next, let file = state.pendingFile, file.path.hasPrefix(next.root.path + "/") { next.select(file) }
+            state.pendingFile = nil
+            state.workspace = next
             // The selector slides away while the new space zooms in behind it.
             withAnimation(WindowState.spacesAnimation) {
                 workspace = next

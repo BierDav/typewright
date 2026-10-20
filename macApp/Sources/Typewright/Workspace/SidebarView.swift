@@ -180,6 +180,9 @@ struct SidebarView: View {
                 })
             }
             items.append(.init("Rename File…", "pencil") { renaming = node.url })
+            items.append(.init("Open in New Window", "macwindow.badge.plus") {
+                Opener.shared.openInNewWindow(workspace.root, file: node.url)
+            })
         }
         items.append(.divider)
         items.append(.init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) })
@@ -201,6 +204,7 @@ struct SidebarView: View {
             .init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([workspace.root]) },
             .init("Copy Path", "doc.on.doc") { copyPath(workspace.root) },
             .divider,
+            .init("Open in New Window", "macwindow.badge.plus") { Opener.shared.openInNewWindow(workspace.root) },
             .init("Close Space", "xmark") { Opener.shared.closeSpace() },
         ]
     }

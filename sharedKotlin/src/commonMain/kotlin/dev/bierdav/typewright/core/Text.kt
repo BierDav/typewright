@@ -25,6 +25,17 @@ object TextEdits {
         }
         return result.toString()
     }
+
+    /** The one edit that turns `old` into `new`: everything between their common start and end, never splitting a surrogate pair. */
+    fun difference(old: String, new: String): TextEdit {
+        var start = 0
+        while (start < old.length && start < new.length && old[start] == new[start]) start++
+        if (start > 0 && old[start - 1].isHighSurrogate()) start--
+        var end = 0
+        while (end < old.length - start && end < new.length - start && old[old.length - 1 - end] == new[new.length - 1 - end]) end++
+        if (end > 0 && old[old.length - end].isLowSurrogate()) end--
+        return TextEdit(TextRange(start, old.length - end - start), new.substring(start, new.length - end))
+    }
 }
 
 object TextPositions {

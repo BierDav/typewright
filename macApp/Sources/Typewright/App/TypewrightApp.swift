@@ -71,6 +71,8 @@ struct AppCommands: Commands {
                 .keyboardShortcut("k")
             Button("Show Spaces") { Opener.shared.toggleSpaces() }
                 .keyboardShortcut("s", modifiers: [.command, .option])
+            Button("Toggle Sidebar") { Opener.shared.toggleSidebar() }
+                .keyboardShortcut("s")
         }
     }
 }

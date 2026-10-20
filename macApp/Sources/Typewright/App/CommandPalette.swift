@@ -397,6 +397,8 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "file.trash", title: "Move \(name) to Trash", icon: "trash", section: "File",
                                      keywords: ["delete", "remove"],
                                      action: .run { withAnimation(.smooth(duration: 0.2)) { ws.delete(file) } }))
+            items.append(PaletteItem(id: "file.window", title: "Open \(name) in New Window", icon: "macwindow.badge.plus",
+                                     section: "File", action: .run { Opener.shared.openInNewWindow(ws.root, file: file) }))
             items.append(PaletteItem(id: "file.finder", title: "Reveal \(name) in Finder", icon: "folder", section: "File",
                                      action: .run { NSWorkspace.shared.activateFileViewerSelecting([file]) }))
             items.append(PaletteItem(id: "file.abs", title: "Copy Absolute Path of \(name)", icon: "doc.on.doc", section: "File",
@@ -418,6 +420,9 @@ struct CommandPalette: View {
                                      keywords: ["share", "collaborate", "invite", "link"],
                                      action: .run { DispatchQueue.main.async { Invites.copyLink(for: ws.root) } }))
         }
+        items.append(PaletteItem(id: "space.sidebar", title: state.sidebarVisible ? "Hide Sidebar" : "Show Sidebar",
+                                 icon: "sidebar.left", shortcut: "⌘S", section: "Space",
+                                 action: .run { withAnimation(.smooth(duration: 0.3)) { state.sidebarVisible.toggle() } }))
         items.append(PaletteItem(id: "space.spaces", title: "Show Spaces", icon: "square.stack", shortcut: "⌥⌘S", section: "Space",
                                  action: .run { state.setSpacesOpen(true) }))
         items.append(PaletteItem(id: "space.close", title: "Close \(ws.name)", icon: "xmark", shortcut: "⌃⌘W", section: "Space",

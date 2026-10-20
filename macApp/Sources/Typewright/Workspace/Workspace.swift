@@ -138,6 +138,7 @@ final class Workspace: EditorLanguage {
             self.reloadEditorIfNeeded()
         }
         startLive()
+        Self.open.append(WeakWorkspace(self))
         fontObserver = NotificationCenter.default.addObserver(forName: FontLibrary.didChange, object: nil, queue: .main) {
             [weak self] _ in
             MainActor.assumeIsolated {
@@ -579,6 +580,7 @@ final class Workspace: EditorLanguage {
         guard let url = selectedFile else { return }
         text = newText
         buffers[url] = newText
+        siblings.forEach { $0.siblingDidEdit(url, text: newText) }
         self.live.textDidChange()
         if selectedKind == .typst { languageClient()?.change(url, text: newText) }
         // External compilers only see the disk, so every edit is saved right away.
@@ -626,6 +628,7 @@ final class Workspace: EditorLanguage {
     func updateBuffer(_ url: URL, text new: String, live: Bool = false) {
         guard isInSpace(url) else { return }
         buffers[url] = new
+        siblings.forEach { $0.siblingDidEdit(url, text: new) }
         if url == selectedFile {
             text = new
             editorNeedsReload = true
@@ -640,6 +643,38 @@ final class Workspace: EditorLanguage {
         dirty.insert(url)
         scheduleAutosave()
         scheduleCompile(delay: renderMode == .pdf && !previewIsMarkdown && !live ? 0.25 : 0)
+    }
+
+    // MARK: - Other windows
+
+    private final class WeakWorkspace {
+        weak var value: Workspace?
+        init(_ value: Workspace) { self.value = value }
+    }
+
+    /// Every open space; windows showing the same folder keep their unsaved edits in step.
+    private static var open: [WeakWorkspace] = []
+
+    private var siblings: [Workspace] {
+        Self.open.compactMap(\.value).filter { $0 !== self && !$0.isClosed && $0.root == root }
+    }
+
+    /// Another window on this space edited a file; that window saves it.
+    private func siblingDidEdit(_ url: URL, text new: String) {
+        guard buffers[url] ?? (url == selectedFile ? text : nil) != new else { return }
+        if url == selectedFile, selectedKind?.isEditable == true {
+            let old = text
+            let edit = TypewrightCore.TextEdits.shared.difference(old: old, new: new)
+            let change = LiveResult.Edit(location: Int(edit.range.location), length: Int(edit.range.length), text: edit.newText)
+            // Through the editor, so this window keeps its caret, scroll and undo.
+            if live.applyEdits?([change]) == true { return }
+            text = new
+            editorNeedsReload = true
+            reloadEditorIfNeeded()
+        }
+        buffers[url] = new
+        if FileKind(url: url) == .typst { languageClient()?.change(url, text: new) }
+        scheduleCompile(delay: 0.25)
     }
 
     /// Applies server edits (LSP JSON) to a file other than the shown one.
@@ -1079,6 +1114,7 @@ final class Workspace: EditorLanguage {
     func close() {
         guard !isClosed else { return }
         isClosed = true
+        Self.open.removeAll { $0.value == nil || $0.value === self }
         flushSaves()
         persistTask?.cancel()
         persist()

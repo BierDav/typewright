@@ -22,14 +22,16 @@ final class Opener {
         }
     }
 
-    /// Switches `state`'s window to `url`, unless another window already shows it.
+    /// Switches `state`'s window to `url`; other windows may show the same space.
     func open(_ url: URL, in state: WindowState) {
-        let url = url.standardizedFileURL
-        if controllers.contains(where: { $0.state !== state && $0.state.space.map(Workspace.root)?.path == Workspace.root(of: url).path }) {
-            focus(url)
-        } else {
-            state.space = url
-        }
+        state.space = url.standardizedFileURL
+    }
+
+    /// A new window on `space`, showing `file` when given.
+    func openInNewWindow(_ space: URL, file: URL? = nil) {
+        let controller = MainWindowController(space: space.standardizedFileURL)
+        controller.state.pendingFile = file?.standardizedFileURL
+        show(controller)
     }
 
     @discardableResult
@@ -59,7 +61,16 @@ final class Opener {
 
     func toggleSpaces() {
         guard let state = keyState, state.space != nil else { return }
+        // The selector lives in the sidebar.
+        if !state.spacesOpen { state.sidebarVisible = true }
         state.setSpacesOpen(!state.spacesOpen)
+    }
+
+    /// ⌘S also saves, for the habit.
+    func toggleSidebar() {
+        guard let state = keyState else { return }
+        state.workspace?.flushSaves()
+        withAnimation(.smooth(duration: 0.3)) { state.sidebarVisible.toggle() }
     }
 
     func showPalette(page: String? = nil) {
@@ -102,6 +113,12 @@ final class Opener {
     var isTerminating = false
 
     private func show(_ controller: MainWindowController) {
+        // Offset from the front window, so the new one doesn't hide exactly behind it.
+        if let front = controllers.first(where: { $0.window?.isKeyWindow == true })?.window ?? controllers.last?.window,
+           let window = controller.window {
+            window.setFrame(front.frame, display: false)
+            window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: front.frame.minX, y: front.frame.maxY)))
+        }
         controllers.append(controller)
         controller.showWindow(nil)
         saveSession()

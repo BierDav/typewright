@@ -36,4 +36,18 @@ class TextTest {
         val edits = listOf(TextEdit(TextRange(0, 4), "#set"), TextEdit(TextRange(9, 1), "2"), TextEdit(TextRange(90, 1), "!"))
         assertEquals("#set a = 2", TextEdits.apply(edits, "#let a = 1"))
     }
+
+    @Test
+    fun differenceIsOneMinimalEdit() {
+        assertEquals(TextEdit(TextRange(4, 0), "X"), TextEdits.difference("abcdef", "abcdXef"))
+        assertEquals(TextEdit(TextRange(1, 2), ""), TextEdits.difference("abca", "aa"))
+        assertEquals(TextEdit(TextRange(4, 0), ""), TextEdits.difference("same", "same"))
+        // Repeated letters: the edit lands after the common start.
+        assertEquals(TextEdit(TextRange(2, 0), "a"), TextEdits.difference("aa", "aaa"))
+        for ((old, new) in listOf("x\uD83D\uDE00y" to "x\uD83D\uDE01y", "ab" to "", "" to "ab")) {
+            assertEquals(new, TextEdits.apply(listOf(TextEdits.difference(old, new)), old))
+        }
+        // Emoji differing only in the low half are replaced whole.
+        assertEquals(TextEdit(TextRange(1, 2), "\uD83D\uDE01"), TextEdits.difference("x\uD83D\uDE00y", "x\uD83D\uDE01y"))
+    }
 }

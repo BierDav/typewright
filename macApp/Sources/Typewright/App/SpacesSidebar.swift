@@ -523,6 +523,7 @@ private struct SpaceRow: View {
         )
         .contextMenu {
             Button("Open", action: onOpen)
+            Button("Open in New Window") { Opener.shared.openInNewWindow(url) }
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             Button("Copy Path") { copyPath(url) }
             Divider()
