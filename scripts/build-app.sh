@@ -38,7 +38,12 @@ if [ -n "${TYPEWRIGHT_SIGN_IDENTITY:-}" ] && [ -n "${TYPEWRIGHT_PROVISIONING_PRO
       --team-id "$TYPEWRIGHT_NOTARY_TEAM" --wait >&2
     xcrun stapler staple "$app" >&2
     rm -f "$zip"
+    spctl --assess --type execute --verbose "$app" >&2
   fi
+  # Passkeys silently fail without the entitlement and its profile, so check both made it in.
+  codesign --verify --strict --verbose=2 "$app" >&2
+  codesign -d --entitlements - "$app" 2>/dev/null | grep -q "webcredentials:$domain" \
+    || { echo "error: associated-domains entitlement missing" >&2; exit 1; }
 else
   echo "warning: ad-hoc signing; passkeys and sync won't work in this build" >&2
   codesign --force --deep --sign - --options runtime "$app"

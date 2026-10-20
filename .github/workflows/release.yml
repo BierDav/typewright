@@ -46,9 +46,10 @@ jobs:
           PROFILE: ${{ secrets.PROVISIONING_PROFILE }}
           SIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_IDENTITY }}
         run: |
-          if [ -z "$CERTIFICATE" ] || [ -z "$PROFILE" ]; then
-            echo "::warning::No signing secrets; this release can't use passkeys or sync."
-            exit 0
+          # An ad-hoc build would reach Homebrew without passkeys or sync, so don't publish one.
+          if [ -z "$CERTIFICATE" ] || [ -z "$PROFILE" ] || [ -z "$SIGN_IDENTITY" ]; then
+            echo "::error::Missing DEVELOPER_ID_P12, PROVISIONING_PROFILE or DEVELOPER_ID_IDENTITY secrets."
+            exit 1
           fi
           keychain="$RUNNER_TEMP/signing.keychain-db"
           security create-keychain -p "" "$keychain"
@@ -68,7 +69,12 @@ jobs:
           TYPEWRIGHT_NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           TYPEWRIGHT_NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
           TYPEWRIGHT_NOTARY_TEAM: ${{ secrets.NOTARY_TEAM_ID }}
-        run: echo "sha=$(scripts/build-app.sh '${{ steps.version.outputs.version }}' '${{ github.run_number }}' | tail -1)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ -z "$TYPEWRIGHT_NOTARY_APPLE_ID" ] || [ -z "$TYPEWRIGHT_NOTARY_PASSWORD" ] || [ -z "$TYPEWRIGHT_NOTARY_TEAM" ]; then
+            echo "::error::Missing NOTARY_APPLE_ID, NOTARY_PASSWORD or NOTARY_TEAM_ID secrets; Gatekeeper blocks unnotarized casks."
+            exit 1
+          fi
+          echo "sha=$(scripts/build-app.sh '${{ steps.version.outputs.version }}' '${{ github.run_number }}' | tail -1)" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub release
         env:
