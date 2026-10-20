@@ -167,6 +167,7 @@ struct EditorSettings: View {
     @AppStorage("glidingCursor") private var glidingCursor = true
     @AppStorage("wrapGuide") private var wrapGuide = false
     @AppStorage("wrapColumn") private var wrapColumn = 80
+    @AppStorage("vimMode") private var vimMode = false
 
     var body: some View {
         Form {
@@ -178,6 +179,10 @@ struct EditorSettings: View {
             Section("Cursor") {
                 Toggle("Gliding cursor", isOn: $glidingCursor)
                 Text("The cursor slides to its new position instead of jumping.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Vim key bindings", isOn: $vimMode)
+                Text("Normal, insert and visual modes with Vim's motions and operators. ⌘ shortcuts keep working.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

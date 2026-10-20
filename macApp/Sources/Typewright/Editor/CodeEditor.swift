@@ -172,13 +172,19 @@ final class TypstTextView: NSTextView {
         didSet { if glidingCaret != oldValue { updateCaret(animated: false) } }
     }
     private let caretView = CaretView()
+    var vim: VimEngine? {
+        didSet { updateCaret(animated: false) }
+    }
+    /// Gliding and Vim's block caret are drawn by this view instead of AppKit.
+    private var ownsCaret: Bool { glidingCaret || vim?.blockCaret == true }
+    func refreshCaret() { updateCaret(animated: false) }
 
     private final class CaretView: NSView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 
     override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
-        if !glidingCaret { super.drawInsertionPoint(in: rect, color: color, turnedOn: flag) }
+        if !ownsCaret { super.drawInsertionPoint(in: rect, color: color, turnedOn: flag) }
     }
 
     override func updateInsertionPointStateAndRestartTimer(_ restartFlag: Bool) {
@@ -206,10 +212,10 @@ final class TypstTextView: NSTextView {
     private func updateCaret(animated: Bool) {
         // Newer AppKit draws the caret with an indicator subview rather than drawInsertionPoint.
         for case let indicator as NSTextInsertionIndicator in subviews {
-            indicator.displayMode = glidingCaret ? .hidden : .automatic
+            indicator.displayMode = ownsCaret ? .hidden : .automatic
         }
         let selection = selectedRange()
-        guard glidingCaret, selection.length == 0, window?.firstResponder === self, window?.isKeyWindow == true,
+        guard ownsCaret, selection.length == 0, window?.firstResponder === self, window?.isKeyWindow == true,
               let rect = caretRect(at: selection.location) else {
             caretView.isHidden = true
             return
@@ -220,15 +226,15 @@ final class TypstTextView: NSTextView {
             addSubview(caretView)
         }
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            caretView.layer?.backgroundColor = insertionPointColor.cgColor
+            caretView.layer?.backgroundColor = insertionPointColor.withAlphaComponent(vim?.blockCaret == true ? 0.4 : 1).cgColor
         }
         let wasHidden = caretView.isHidden
         caretView.isHidden = false
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = animated && !wasHidden ? 0.09 : 0
+            context.duration = animated && !wasHidden && glidingCaret ? 0.09 : 0
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             context.allowsImplicitAnimation = true
-            caretView.animator().frame = rect
+            caretView.animator().frame = vim?.blockCaret == true ? vimBlockRect(rect, at: selection.location) : rect
         }
         restartBlink()
     }
@@ -668,6 +674,7 @@ final class TypstTextView: NSTextView {
         if event.keyCode == 122, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty, let onShowDocs {
             return onShowDocs()
         }
+        if let vim, vim.handle(event) { return }
         // ⌥↩ shows the fixes for the problem at the caret.
         if event.keyCode == 36 || event.keyCode == 76,
            event.modifierFlags.intersection([.shift, .command, .option, .control]) == .option, let onQuickFix {
@@ -718,6 +725,7 @@ struct CodeEditor: NSViewRepresentable {
     var glidingCursor = false
     /// Lines wrap at this column, drawn as a guide; 0 wraps at the view's edge.
     var wrapColumn = 0
+    var vim = false
     var find: FindModel?
     let highlights: Bool
     /// Colours Markdown; `highlights` is for Typst.
@@ -734,6 +742,8 @@ struct CodeEditor: NSViewRepresentable {
     var language: (any EditorLanguage)?
     /// Edits and cursors of other devices with the same file open.
     var live: LiveEditing?
+    /// The Vim mode for the status bar, nil while Vim is off.
+    var onVimModeChange: ((String?) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -810,6 +820,7 @@ struct CodeEditor: NSViewRepresentable {
         tv.glidingCaret = glidingCursor
         tv.wrapColumn = wrapColumn
         tv.onWrapColumnChange = { UserDefaults.standard.set($0, forKey: "wrapColumn") }
+        tv.configureVim(vim, completion: c.completion, onModeChange: onVimModeChange)
         if let find {
             find.textView = tv
             find.applyEdits = { [weak c] edits, name in c?.apply(edits, actionName: name) }

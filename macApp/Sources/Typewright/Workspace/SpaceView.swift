@@ -10,6 +10,8 @@ struct SpaceView: View {
     @AppStorage("glidingCursor") private var glidingCursor = true
     @AppStorage("wrapGuide") private var wrapGuide = false
     @AppStorage("wrapColumn") private var wrapColumn = 80
+    @AppStorage("vimMode") private var vimBindings = false
+    @State private var vimMode: String?
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
     private var compilers: CompilerManager { .shared }
 
@@ -199,6 +201,7 @@ struct SpaceView: View {
                     fontSize: fontSize,
                     glidingCursor: glidingCursor,
                     wrapColumn: wrapGuide ? wrapColumn : 0,
+                    vim: vimBindings,
                     find: workspace.selectedKind?.isEditable == true ? workspace.find : nil,
                     highlights: workspace.selectedKind == .typst,
                     markdown: workspace.selectedFile.map(MarkdownRenderer.isMarkdown) ?? false,
@@ -209,7 +212,8 @@ struct SpaceView: View {
                     onChange: workspace.textDidChange,
                     onStateChange: workspace.editorStateDidChange,
                     language: workspace.selectedKind == .typst ? workspace : nil,
-                    live: workspace.live
+                    live: workspace.live,
+                    onVimModeChange: { vimMode = $0 }
                 )
                 .overlay(alignment: .bottomTrailing) {
                     if workspace.previewFile != nil { issuesButton }
@@ -228,6 +232,7 @@ struct SpaceView: View {
             }
             Divider()
             HStack(spacing: 12) {
+                if let vimMode { Text(vimMode).monospaced() }
                 caretStatus
                 if !workspace.live.participants.isEmpty {
                     Label(workspace.live.participants.joined(separator: ", "), systemImage: "person.2.fill")
