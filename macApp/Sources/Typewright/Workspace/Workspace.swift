@@ -210,6 +210,24 @@ final class Workspace: EditorLanguage {
         text.split { $0.isWhitespace || $0.isNewline }.count
     }
 
+    /// The editor's selection (UTF-16), for the status bar.
+    private(set) var selection = NSRange(location: 0, length: 0)
+
+    /// Line and column of the caret, both from 1, and what the selection spans.
+    var caret: (line: Int, column: Int, lines: Int, characters: Int, words: Int) {
+        let s = text as NSString
+        let start = min(selection.location, s.length), end = min(NSMaxRange(selection), s.length)
+        var line = 1, lineStart = 0
+        for i in 0..<start where s.character(at: i) == 10 {
+            line += 1
+            lineStart = i + 1
+        }
+        let column = s.substring(with: NSRange(location: lineStart, length: start - lineStart)).count + 1
+        let selected = s.substring(with: NSRange(location: start, length: end - start))
+        let lines = selected.isEmpty ? 0 : selected.split(omittingEmptySubsequences: false) { $0.isNewline }.count
+        return (line, column, lines, selected.count, selected.split { $0.isWhitespace || $0.isNewline }.count)
+    }
+
     // MARK: - Files
 
     func reloadTree() {
@@ -300,7 +318,9 @@ final class Workspace: EditorLanguage {
     }
 
     func editorStateDidChange(_ state: EditorState) {
-        live.selectionDidChange(NSRange(location: state.selection, length: state.length))
+        let range = NSRange(location: state.selection, length: state.length)
+        live.selectionDidChange(range)
+        if selection != range { selection = range }
         guard let url = selectedFile, editorStates[url] != state else { return }
         editorStates[url] = state
         schedulePersist()
@@ -656,6 +676,10 @@ final class Workspace: EditorLanguage {
         language?.stop()
         language = nil
         _ = languageClient()
+    }
+
+    func documentation(of item: CompletionItem) async -> String? {
+        await languageClient()?.documentation(of: item) ?? item.documentation
     }
 
     func completions(at offset: Int) async -> [CompletionItem] {

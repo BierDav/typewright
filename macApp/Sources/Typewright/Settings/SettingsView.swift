@@ -165,6 +165,8 @@ private struct CompilerRow: View {
 struct EditorSettings: View {
     @AppStorage("editorFontSize") private var fontSize = 14.0
     @AppStorage("glidingCursor") private var glidingCursor = true
+    @AppStorage("wrapGuide") private var wrapGuide = false
+    @AppStorage("wrapColumn") private var wrapColumn = 80
 
     var body: some View {
         Form {
@@ -176,6 +178,15 @@ struct EditorSettings: View {
             Section("Cursor") {
                 Toggle("Gliding cursor", isOn: $glidingCursor)
                 Text("The cursor slides to its new position instead of jumping.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Wrapping") {
+                Toggle("Wrap lines at a column", isOn: $wrapGuide)
+                if wrapGuide {
+                    Stepper("Column: \(wrapColumn)", value: $wrapColumn, in: TypstTextView.wrapColumns)
+                }
+                Text("Lines wrap at the guide, or at the window edge when it's narrower. Hold ⌘ and drag the guide to move it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

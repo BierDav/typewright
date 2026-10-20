@@ -8,6 +8,8 @@ final class LineNumberRuler: NSRulerView {
         super.init(scrollView: scrollView, orientation: .verticalRuler)
         clientView = textView
         ruleThickness = 44
+        // Views no longer clip by default; numbers past the bottom would draw over the status bar.
+        clipsToBounds = true
         NotificationCenter.default.addObserver(
             self, selector: #selector(refresh), name: NSText.didChangeNotification, object: textView)
         NotificationCenter.default.addObserver(

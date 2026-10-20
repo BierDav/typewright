@@ -1,10 +1,12 @@
 import AppKit
+import SwiftUI
 
 /// Language server completions in a menu-like panel under the caret, filtered as you type.
 @MainActor
 final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private weak var textView: NSTextView?
     var provider: ((Int) async -> [CompletionItem])?
+    var docsProvider: ((CompletionItem) async -> String?)?
 
     private var items: [CompletionItem] = []
     private var shown: [CompletionItem] = []
@@ -16,6 +18,10 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
     private(set) var isEditing = false
 
     private lazy var panel = makePanel()
+    /// F1 shows the selected item's docs beside the list until it closes.
+    private var showsDocs = false
+    private var docsPanel: NSPanel?
+    private var docsTask: Task<Void, Never>?
     private let table = NSTableView()
 
     private static let rowHeight: CGFloat = 22
@@ -77,6 +83,8 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
         generation += 1
         requestTask?.cancel()
         shown = []
+        showsDocs = false
+        hideDocs()
         if panel.isVisible {
             panel.parent?.removeChildWindow(panel)
             panel.orderOut(nil)
@@ -109,6 +117,62 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
         let row = min(max(table.selectedRow + delta, 0), shown.count - 1)
         table.selectRowIndexes([row], byExtendingSelection: false)
         table.scrollRowToVisible(row)
+    }
+
+    // MARK: - Docs
+
+    /// Toggles the selected item's docs; false when no list is open.
+    func toggleDocs() -> Bool {
+        guard isVisible else { return false }
+        showsDocs.toggle()
+        if showsDocs { updateDocs() } else { hideDocs() }
+        return true
+    }
+
+    private func updateDocs() {
+        guard showsDocs, isVisible, shown.indices.contains(table.selectedRow) else { return hideDocs() }
+        let item = shown[table.selectedRow]
+        docsTask?.cancel()
+        docsTask = Task { [weak self] in
+            let docs = await self?.docsProvider?(item)
+            guard let self, !Task.isCancelled, self.showsDocs, self.isVisible else { return }
+            let signature = item.detail.map { "```typc\n\($0)\n```\n\n" } ?? ""
+            self.showDocs(docs ?? signature + "No documentation")
+        }
+    }
+
+    private func showDocs(_ markdown: String) {
+        hideDocs()
+        guard let window = panel.parent else { return }
+        let width = HoverContent.isLarge(markdown) ? HoverContent.baseWidth : Self.width
+        let host = NSHostingView(rootView: HoverContent(errors: [], markdown: markdown, width: width, fixes: { _ in [] },
+                                                        onClose: {}, onSize: { _ in }))
+        host.frame.size = host.fittingSize
+        let docs = NSPanel(contentRect: NSRect(origin: .zero, size: host.frame.size),
+                           styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        docs.isOpaque = false
+        docs.backgroundColor = .clear
+        docs.hasShadow = true
+        docs.level = .popUpMenu
+        docs.contentView = host
+        // Beside the list, on whichever side the screen has room.
+        let list = panel.frame
+        let screen = window.screen?.visibleFrame ?? .infinite
+        var origin = NSPoint(x: list.maxX + 4, y: list.maxY - host.frame.height)
+        if origin.x + host.frame.width > screen.maxX { origin.x = list.minX - host.frame.width - 4 }
+        origin.y = max(origin.y, screen.minY)
+        docs.setFrameOrigin(origin)
+        window.addChildWindow(docs, ordered: .above)
+        docs.orderFront(nil)
+        docsPanel = docs
+    }
+
+    private func hideDocs() {
+        docsTask?.cancel()
+        guard let docsPanel else { return }
+        self.docsPanel = nil
+        docsPanel.parent?.removeChildWindow(docsPanel)
+        docsPanel.orderOut(nil)
     }
 
     // MARK: - Filtering
@@ -311,11 +375,16 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: height)), display: true)
         if panel.parent == nil { window.addChildWindow(panel, ordered: .above) }
         panel.orderFront(nil)
+        if showsDocs { updateDocs() }
     }
 
     // MARK: - Table
 
     func numberOfRows(in tableView: NSTableView) -> Int { shown.count }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if showsDocs { updateDocs() }
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: CompletionCell.identifier, owner: nil) as? CompletionCell ?? CompletionCell()

@@ -161,6 +161,10 @@ struct CompletionItem: Equatable {
     let isSnippet: Bool
     /// UTF-16 range the item replaces, relative to the document; nil means the word before the cursor.
     let range: NSRange?
+    /// Markdown docs, shown beside the list on F1.
+    var documentation: String? = nil
+    /// The server's item, sent back to resolve docs it left out.
+    var raw: Data? = nil
 }
 
 /// A stdio JSON-RPC client for one tinymist process serving one space.
@@ -176,6 +180,7 @@ final class LanguageClient {
     private var ready = false
     private var versions: [URL: Int] = [:]
     private(set) var isRunning = false
+    private var resolvesCompletions = false
 
     init?(binary: URL, root: URL, fontPaths: [String]) {
         process.executableURL = binary
@@ -210,14 +215,18 @@ final class LanguageClient {
             "capabilities": [
                 "general": ["positionEncodings": ["utf-16"]],
                 "textDocument": [
-                    "completion": ["completionItem": ["snippetSupport": true, "labelDetailsSupport": true]],
+                    "completion": ["completionItem": ["snippetSupport": true, "labelDetailsSupport": true,
+                                                       "documentationFormat": ["markdown", "plaintext"],
+                                                       "resolveSupport": ["properties": ["documentation", "detail"]]]],
                     "definition": ["linkSupport": true],
                     "hover": ["contentFormat": ["markdown", "plaintext"]],
                 ],
             ],
         ]
         Task {
-            _ = await request("initialize", params, force: true)
+            let result = await request("initialize", params, force: true) as? [String: Any]
+            let capabilities = result?["capabilities"] as? [String: Any]
+            resolvesCompletions = (capabilities?["completionProvider"] as? [String: Any])?["resolveProvider"] as? Bool ?? false
             ready = true
             write(["jsonrpc": "2.0", "method": "initialized", "params": [String: Any]()])
             outbox.forEach(send)
@@ -282,8 +291,24 @@ final class LanguageClient {
                 sortText: item["sortText"] as? String ?? label,
                 newText: newText,
                 isSnippet: item["insertTextFormat"] as? Int == 2,
-                range: range)
+                range: range,
+                documentation: Self.markdown(item["documentation"]),
+                raw: try? JSONSerialization.data(withJSONObject: item))
         }
+    }
+
+    /// Docs of a completion item, asking the server when the list came without them.
+    func documentation(of item: CompletionItem) async -> String? {
+        if let docs = item.documentation { return docs }
+        guard resolvesCompletions, let raw = item.raw, let object = try? JSONSerialization.jsonObject(with: raw) else { return nil }
+        let resolved = await request("completionItem/resolve", object) as? [String: Any]
+        return Self.markdown(resolved?["documentation"])
+    }
+
+    /// A string or MarkupContent; nil when empty.
+    private static func markdown(_ value: Any?) -> String? {
+        let text = value as? String ?? (value as? [String: Any])?["value"] as? String
+        return text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? text : nil
     }
 
     /// Where the symbol or path at `offset` is defined, as a file and a zero-based line and column.

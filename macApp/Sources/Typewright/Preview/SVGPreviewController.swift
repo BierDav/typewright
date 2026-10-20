@@ -79,9 +79,11 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
         }
         magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
             let handled = MainActor.assumeIsolated {
-                guard let self, event.window === self.view.window,
-                      self.view.bounds.contains(self.view.convert(event.locationInWindow, from: nil)) else { return false }
-                self.setScale(self.effectiveScale * (1 + event.magnification), animated: false)
+                guard let self, event.window === self.view.window else { return false }
+                let point = self.view.convert(event.locationInWindow, from: nil)
+                guard self.view.bounds.contains(point) else { return false }
+                // WKWebView is flipped, so this is already the page's client position.
+                self.setScale(self.effectiveScale * (1 + event.magnification), animated: false, around: point)
                 return true
             }
             return handled ? nil : event
@@ -115,16 +117,19 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
         applyZoom(animated: true)
     }
 
-    private func setScale(_ value: CGFloat, animated: Bool) {
+    /// `point` stays on the same spot of the document, like the pointer while pinching.
+    private func setScale(_ value: CGFloat, animated: Bool, around point: NSPoint? = nil) {
         scale = min(max(value, 0.1), 8)
         autoScales = false
-        applyZoom(animated: animated)
+        applyZoom(animated: animated, around: point)
     }
 
-    private func applyZoom(animated: Bool) {
+    private func applyZoom(animated: Bool, around point: NSPoint? = nil) {
         guard isReady else { return }
-        view.callAsyncJavaScript("tw.setZoom(auto, scale, animated)",
-                                 arguments: ["auto": autoScales, "scale": scale, "animated": animated], in: nil, in: .page)
+        let anchor: Any = point.map { [Double($0.x), Double($0.y)] } ?? NSNull()
+        view.callAsyncJavaScript("tw.setZoom(auto, scale, animated, anchor)",
+                                 arguments: ["auto": autoScales, "scale": scale, "animated": animated, "anchor": anchor],
+                                 in: nil, in: .page)
     }
 
     /// Sends only the pages that differ from what the page shows; the next update waits for this one.
@@ -183,9 +188,10 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
             this.layout();
           },
 
-          setZoom(auto, scale, animated) {
+          setZoom(auto, scale, animated, anchor) {
             this.auto = auto;
             this.scale = scale;
+            if (anchor) return this.zoomAround(anchor[0], anchor[1]);
             if (!animated) return this.layout();
             // Keep the middle of the view on the same spot of the document while the pages resize.
             const root = document.documentElement;
@@ -200,6 +206,21 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
               else root.classList.remove('tw-animating');
             };
             requestAnimationFrame(follow);
+          },
+
+          // Keeps the spot under the pointer in place: same fraction of the same page, before and after.
+          zoomAround(x, y) {
+            const pages = [...document.getElementById('pages').children];
+            const before = pages.map(p => p.getBoundingClientRect());
+            let i = before.findIndex(r => y >= r.top && y <= r.bottom);
+            if (i < 0) i = before.findIndex(r => y < r.top);
+            if (i < 0) i = before.length - 1;
+            if (i < 0) return this.layout();
+            const r = before[i];
+            const fx = r.width ? (x - r.left) / r.width : 0, fy = r.height ? (y - r.top) / r.height : 0;
+            this.layout();
+            const after = pages[i].getBoundingClientRect();
+            scrollBy(after.left + fx * after.width - x, after.top + fy * after.height - y);
           },
 
           layout() {

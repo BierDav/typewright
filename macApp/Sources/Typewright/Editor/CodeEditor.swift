@@ -12,6 +12,8 @@ struct SymbolUsage {
 /// Language server features the editor offers for the shown file; offsets are UTF-16.
 @MainActor protocol EditorLanguage: AnyObject {
     func completions(at offset: Int) async -> [CompletionItem]
+    /// Markdown docs of a completion item, for F1 in the list.
+    func documentation(of item: CompletionItem) async -> String?
     /// Navigates, or returns the usages to choose from when `offset` is on a definition.
     func goToDefinition(at offset: Int) async -> [SymbolUsage]
     /// Web pages for what's at `offset`, like a package's Universe page and repository; ⌘B offers them.
@@ -29,6 +31,7 @@ struct SymbolUsage {
 extension EditorLanguage {
     func quickFixes(for diagnostic: Diagnostic) -> [QuickFix] { [] }
     func links(at offset: Int) async -> [(title: String, url: URL)] { [] }
+    func documentation(of item: CompletionItem) async -> String? { item.documentation }
 }
 
 final class TypstTextView: NSTextView {
@@ -39,6 +42,8 @@ final class TypstTextView: NSTextView {
     var onSwatchClick: ((ColorLiteral) -> Void)?
     var onDefinition: ((Int) -> Void)?
     var onComplete: (() -> Void)?
+    /// F1: docs of the selected completion, or of the symbol at the caret.
+    var onShowDocs: (() -> Void)?
     var onFormat: (() -> Void)?
     /// Shows the fixes for the diagnostics at a character, e.g. on ⌥↩.
     var onQuickFix: ((Int) -> Void)?
@@ -86,6 +91,80 @@ final class TypstTextView: NSTextView {
         didSet { if remoteCursors != oldValue { needsDisplay = true } }
     }
 
+    // MARK: Wrap guide
+
+    static let wrapColumns = 20...400
+
+    var wrapColumn = 0 {
+        didSet { if wrapColumn != oldValue { updateWrapWidth() } }
+    }
+    /// Reports a column picked by ⌘-dragging the guide.
+    var onWrapColumnChange: ((Int) -> Void)?
+    private var isDraggingGuide = false
+
+    override var font: NSFont? {
+        didSet { updateWrapWidth() }
+    }
+
+    private var columnWidth: CGFloat {
+        let font = font ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        return ("M" as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    private var guideX: CGFloat? {
+        guard wrapColumn > 0, let container = textContainer else { return nil }
+        return textContainerOrigin.x + container.lineFragmentPadding + CGFloat(wrapColumn) * columnWidth
+    }
+
+    /// Wraps at the guide, or at the edge when the view is narrower.
+    private func updateWrapWidth() {
+        guard let container = textContainer else { return }
+        let available = max(bounds.width - textContainerInset.width * 2, 50)
+        if wrapColumn > 0 {
+            container.widthTracksTextView = false
+            let width = min(container.lineFragmentPadding * 2 + CGFloat(wrapColumn) * columnWidth, available)
+            if container.size.width != width { container.size = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude) }
+        } else if !container.widthTracksTextView {
+            container.widthTracksTextView = true
+            container.size = NSSize(width: available, height: CGFloat.greatestFiniteMagnitude)
+        }
+        needsDisplay = true
+    }
+
+    private func isOnGuide(_ point: NSPoint, flags: NSEvent.ModifierFlags) -> Bool {
+        guard flags.contains(.command), let x = guideX else { return false }
+        return abs(point.x - x) <= 5
+    }
+
+    /// ⌘-drag moves the guide a column at a time.
+    private func dragGuide(from event: NSEvent) {
+        guard let window, let container = textContainer else { return }
+        isDraggingGuide = true
+        defer {
+            isDraggingGuide = false
+            needsDisplay = true
+        }
+        NSCursor.resizeLeftRight.set()
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let x = convert(next.locationInWindow, from: nil).x - textContainerOrigin.x - container.lineFragmentPadding
+            let column = min(max(Int((x / columnWidth).rounded()), Self.wrapColumns.lowerBound), Self.wrapColumns.upperBound)
+            if column != wrapColumn {
+                wrapColumn = column
+                onWrapColumnChange?(column)
+            }
+            if next.type == .leftMouseUp { break }
+        }
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        guard let window, wrapColumn > 0 else { return }
+        // Holding ⌘ over the guide shows it can be dragged.
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        if isOnGuide(point, flags: event.modifierFlags) { NSCursor.resizeLeftRight.set() } else if visibleRect.contains(point) { NSCursor.iBeam.set() }
+        needsDisplay = true
+    }
+
     // MARK: Gliding caret
 
     /// Draws its own caret that slides to each new position instead of jumping.
@@ -115,6 +194,7 @@ final class TypstTextView: NSTextView {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
+        if wrapColumn > 0 { updateWrapWidth() }
         updateCaret(animated: false)
     }
 
@@ -216,6 +296,11 @@ final class TypstTextView: NSTextView {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
+        if let x = guideX, x < bounds.maxX {
+            let active = isDraggingGuide || NSEvent.modifierFlags.contains(.command)
+            (active ? NSColor.controlAccentColor.withAlphaComponent(0.7) : NSColor.separatorColor).setFill()
+            NSRect(x: x.rounded(), y: rect.minY, width: active ? 2 : 1, height: rect.height).fill()
+        }
         func boxes(_ ranges: [NSRange]) -> [NSRect] {
             guard let lm = layoutManager, let container = textContainer else { return [] }
             let length = (string as NSString).length
@@ -267,6 +352,7 @@ final class TypstTextView: NSTextView {
 
     private func cursor(for event: NSEvent) -> NSCursor? {
         if let cursor = CursorArea.cursor(for: event) { return cursor }
+        if isOnGuide(convert(event.locationInWindow, from: nil), flags: event.modifierFlags) { return .resizeLeftRight }
         return swatch(at: convert(event.locationInWindow, from: nil)) != nil ? .pointingHand : nil
     }
 
@@ -337,6 +423,7 @@ final class TypstTextView: NSTextView {
             onSwatchClick?(literal)
             return
         }
+        if isOnGuide(point, flags: event.modifierFlags) { return dragGuide(from: event) }
         if event.modifierFlags.contains(.command), event.clickCount == 1, let onDefinition {
             let index = characterIndexForInsertion(at: point)
             setSelectedRange(NSRange(location: index, length: 0))
@@ -578,6 +665,9 @@ final class TypstTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         onDismissHover?()
+        if event.keyCode == 122, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty, let onShowDocs {
+            return onShowDocs()
+        }
         // ⌥↩ shows the fixes for the problem at the caret.
         if event.keyCode == 36 || event.keyCode == 76,
            event.modifierFlags.intersection([.shift, .command, .option, .control]) == .option, let onQuickFix {
@@ -626,6 +716,8 @@ struct CodeEditor: NSViewRepresentable {
     let text: String
     let fontSize: CGFloat
     var glidingCursor = false
+    /// Lines wrap at this column, drawn as a guide; 0 wraps at the view's edge.
+    var wrapColumn = 0
     var find: FindModel?
     let highlights: Bool
     /// Colours Markdown; `highlights` is for Typst.
@@ -711,10 +803,13 @@ struct CodeEditor: NSViewRepresentable {
         c.onStateChange = onStateChange
         c.language = language
         c.completion?.provider = language.map { l in { await l.completions(at: $0) } }
+        c.completion?.docsProvider = language.map { l in { await l.documentation(of: $0) } }
         c.hover?.provider = language.map { l in { await l.hover(at: $0) } }
         c.occurrenceProvider = language.map { l in { await l.occurrences(at: $0) } }
         guard let tv = c.textView as? TypstTextView else { return }
         tv.glidingCaret = glidingCursor
+        tv.wrapColumn = wrapColumn
+        tv.onWrapColumnChange = { UserDefaults.standard.set($0, forKey: "wrapColumn") }
         if let find {
             find.textView = tv
             find.applyEdits = { [weak c] edits, name in c?.apply(edits, actionName: name) }
@@ -727,6 +822,9 @@ struct CodeEditor: NSViewRepresentable {
         c.find = find
         tv.onDefinition = language == nil ? nil : { [weak c] offset in c?.goToDefinition(at: offset) }
         tv.onComplete = language == nil ? nil : { [weak c] in c?.completion?.request(force: true) }
+        tv.onShowDocs = language == nil ? nil : { [weak c] in
+            if c?.completion?.toggleDocs() != true { c?.hover?.showAtCaret() }
+        }
         tv.onFormat = language == nil ? nil : { [weak c] in c?.format() }
         tv.onRename = language == nil ? nil : { [weak c] in c?.startRename() }
         tv.onExtractVariable = highlights ? { [weak c] in c?.extractVariable() } : nil
@@ -769,6 +867,7 @@ struct CodeEditor: NSViewRepresentable {
                 DispatchQueue.main.async {
                     Self.restore(state, in: tv)
                     c.isRestoring = false
+                    c.report()
                 }
             }
             if let storage = tv.textStorage { c.style(storage) }
@@ -913,7 +1012,7 @@ struct CodeEditor: NSViewRepresentable {
             report()
         }
 
-        private func report() {
+        func report() {
             guard !isRestoring, let tv = textView, let lm = tv.layoutManager, let container = tv.textContainer,
                   let scroll = tv.enclosingScrollView else { return }
             let selection = tv.selectedRange()

@@ -28,6 +28,7 @@ final class HoverController {
             return
         }
         if panel != nil {
+            if isPinned { return }
             if keepsOpen(point) {
                 hideTask?.cancel()
                 hideTask = nil
@@ -46,6 +47,7 @@ final class HoverController {
 
     /// The pointer left the text, possibly onto the panel, which is its own window.
     func pointerExited() {
+        if isPinned { return }
         if panel != nil { scheduleHide() } else { task?.cancel() }
     }
 
@@ -82,6 +84,7 @@ final class HoverController {
         hideTask?.cancel()
         hideTask = nil
         pointerInPanel = false
+        isPinned = false
         anchor = .null
         guard let panel else { return }
         self.panel = nil
@@ -97,20 +100,53 @@ final class HoverController {
         guard !Task.isCancelled, errors.count + (docs == nil ? 0 : 1) > 0, isTopmost(at: point) else { return }
 
         let range = docs?.range ?? errors.first?.range ?? NSRange(location: index, length: 1)
-        guard let lm = tv.layoutManager, let container = tv.textContainer else { return }
-        var rect = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil), in: container)
-        rect.origin.x += tv.textContainerOrigin.x
-        rect.origin.y += tv.textContainerOrigin.y
+        guard var rect = Self.rect(of: range, in: tv) else { return }
         // Long ranges wrap; only the hovered line matters for placement.
         if !rect.insetBy(dx: -3, dy: -3).contains(point) { rect = NSRect(x: point.x - 20, y: point.y - 9, width: 40, height: 18) }
+        present(errors: errors.map(\.diagnostic), markdown: docs?.markdown, below: rect)
+    }
+
+    /// Docs and problems of the symbol at the caret, e.g. on F1; they stay until typing, clicking or Esc.
+    func showAtCaret() {
+        guard let tv = textView else { return }
+        let index = tv.selectedRange().location
+        task?.cancel()
+        task = Task { [weak self] in
+            let errors = self?.diagnostics.filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index } ?? []
+            // The caret may sit just after the symbol.
+            var docs = await self?.provider?(index)
+            if docs == nil, index > 0 { docs = await self?.provider?(index - 1) }
+            guard let self, !Task.isCancelled, let tv = self.textView, tv.selectedRange().location == index else { return }
+            guard errors.count + (docs == nil ? 0 : 1) > 0 else { return NSSound.beep() }
+            let range = docs?.range ?? errors.first?.range ?? NSRange(location: index, length: 0)
+            let caret = (tv as? TypstTextView)?.caretAnchor() ?? .zero
+            var rect = Self.rect(of: range, in: tv) ?? caret
+            if !rect.insetBy(dx: -3, dy: -3).intersects(caret) { rect = caret }
+            self.present(errors: errors.map(\.diagnostic), markdown: docs?.markdown, below: rect)
+            self.isPinned = true
+        }
+    }
+
+    /// Shown from the keyboard, so pointer moves don't close it.
+    private var isPinned = false
+
+    private static func rect(of range: NSRange, in tv: NSTextView) -> NSRect? {
+        guard let lm = tv.layoutManager, let container = tv.textContainer, NSMaxRange(range) <= (tv.string as NSString).length
+        else { return nil }
+        let rect = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil), in: container)
+        return rect.offsetBy(dx: tv.textContainerOrigin.x, dy: tv.textContainerOrigin.y)
+    }
+
+    private func present(errors: [Diagnostic], markdown: String?, below rect: NSRect) {
+        guard let tv = textView else { return }
         anchor = rect
 
         // Long docs get three times the room, as far as the screen allows.
         let screenWidth = tv.window?.screen?.visibleFrame.width ?? 1600
-        let width = HoverContent.isLarge(docs?.markdown) ? min(HoverContent.baseWidth * 2.4, screenWidth - 40) : HoverContent.baseWidth
+        let width = HoverContent.isLarge(markdown) ? min(HoverContent.baseWidth * 2.4, screenWidth - 40) : HoverContent.baseWidth
         var placedAbove = false
         weak var placedPanel: NSPanel?
-        let content = HoverContent(errors: errors.map(\.diagnostic), markdown: docs?.markdown, width: width,
+        let content = HoverContent(errors: errors, markdown: markdown, width: width,
                                    fixes: fixesProvider ?? { _ in [] }, onClose: { [weak self] in self?.hide() },
                                    onSize: { size in
             // Fixes can arrive later, e.g. once Google Fonts' list loaded; the panel grows away from the text.
@@ -136,6 +172,7 @@ final class HoverController {
         }
         panel.onExit = { [weak self] in
             self?.pointerInPanel = false
+            if self?.isPinned == true { return }
             // Moves back over the text decide from there.
             self?.scheduleHide()
         }
@@ -190,7 +227,7 @@ private final class HoverPanel: NSPanel {
     override func mouseExited(with event: NSEvent) { onExit?() }
 }
 
-private struct HoverContent: View {
+struct HoverContent: View {
     let errors: [Diagnostic]
     let markdown: String?
     let width: CGFloat

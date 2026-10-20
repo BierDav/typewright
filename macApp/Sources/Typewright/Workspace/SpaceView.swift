@@ -8,6 +8,8 @@ struct SpaceView: View {
     @State private var dividerHovered = false
     @AppStorage("editorFontSize") private var fontSize = 14.0
     @AppStorage("glidingCursor") private var glidingCursor = true
+    @AppStorage("wrapGuide") private var wrapGuide = false
+    @AppStorage("wrapColumn") private var wrapColumn = 80
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
     private var compilers: CompilerManager { .shared }
 
@@ -196,6 +198,7 @@ struct SpaceView: View {
                     text: workspace.text,
                     fontSize: fontSize,
                     glidingCursor: glidingCursor,
+                    wrapColumn: wrapGuide ? wrapColumn : 0,
                     find: workspace.selectedKind?.isEditable == true ? workspace.find : nil,
                     highlights: workspace.selectedKind == .typst,
                     markdown: workspace.selectedFile.map(MarkdownRenderer.isMarkdown) ?? false,
@@ -225,7 +228,7 @@ struct SpaceView: View {
             }
             Divider()
             HStack(spacing: 12) {
-                Text("\(workspace.wordCount) words")
+                caretStatus
                 if !workspace.live.participants.isEmpty {
                     Label(workspace.live.participants.joined(separator: ", "), systemImage: "person.2.fill")
                         .help("Also editing this file")
@@ -243,6 +246,31 @@ struct SpaceView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
             .frame(height: 24)
+        }
+    }
+}
+
+extension SpaceView {
+    /// Words, caret position and selection size, like Xcode's and VS Code's status bars.
+    @ViewBuilder fileprivate var caretStatus: some View {
+        let caret = workspace.caret
+        if caret.characters > 0 {
+            Text("\(caret.words) of \(workspace.wordCount) words")
+        } else {
+            Text("\(workspace.wordCount) words")
+        }
+        if workspace.selectedKind?.isEditable == true {
+            Group {
+                if caret.characters == 0 {
+                    Text("Ln \(caret.line), Col \(caret.column)")
+                } else if caret.lines > 1 {
+                    Text("Ln \(caret.line), Col \(caret.column) (\(caret.lines) lines, \(caret.characters) selected)")
+                } else {
+                    Text("Ln \(caret.line), Col \(caret.column) (\(caret.characters) selected)")
+                }
+            }
+            .monospacedDigit()
+            .help("Caret position; offset \(workspace.selection.location)")
         }
     }
 }

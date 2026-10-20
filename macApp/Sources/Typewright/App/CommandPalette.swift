@@ -430,6 +430,11 @@ struct CommandPalette: View {
     /// Refactorings at the caret; they run in the editor once the palette is gone.
     private func refactorItems(_ tv: TypstTextView) -> [PaletteItem] {
         var items: [PaletteItem] = []
+        if let docs = tv.onShowDocs, let word = Self.identifier(in: tv.string, at: tv.selectedRange().location) {
+            items.append(PaletteItem(id: "code.docs", title: "Show Documentation for \(word)", icon: "book", shortcut: "F1",
+                                     section: "Code", keywords: ["quick documentation", "help", "hover", "docs"],
+                                     action: .run(docs)))
+        }
         let symbol = Refactor.symbol(in: tv.string, at: tv.selectedRange().location)
         if let symbol, let rename = tv.onRename {
             let what = symbol.kind == "function" ? "Function" : "Variable"
@@ -455,6 +460,20 @@ struct CommandPalette: View {
                                      shortcut: "⌥⌘N", section: "Refactor", keywords: ["refactor"], action: .run(inline)))
         }
         return items
+    }
+
+    /// The Typst name (with field access, like `calc.pow`) the caret touches.
+    static func identifier(in text: String, at offset: Int) -> String? {
+        let s = text as NSString
+        func part(_ c: unichar) -> Bool {
+            guard let scalar = UnicodeScalar(c) else { return false }
+            return CharacterSet.alphanumerics.contains(scalar) || c == 95 || c == 45 || c == 46
+        }
+        var start = min(offset, s.length), end = start
+        while start > 0, part(s.character(at: start - 1)) { start -= 1 }
+        while end < s.length, part(s.character(at: end)) { end += 1 }
+        let word = s.substring(with: NSRange(location: start, length: end - start)).trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        return word.first.map { $0.isLetter || $0 == "_" } == true ? word : nil
     }
 
     /// Places that import, include or load the file.
