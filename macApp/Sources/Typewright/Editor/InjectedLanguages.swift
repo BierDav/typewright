@@ -5,7 +5,7 @@ import TypewrightCore
 enum InjectedLanguages {
     /// Mirrors `CodeTokenKind` in the Kotlin core.
     enum Kind: Int32 {
-        case keyword, string, comment, number, function, type, variable, annotation, `operator`
+        case keyword, string, comment, number, function, type, variable, annotation, `operator`, unit
     }
 
     /// Bounds Markdown in Typst in Markdown …, since each level highlights its body again.
@@ -24,6 +24,7 @@ enum InjectedLanguages {
         case .type: Highlighter.typeColor
         case .variable: Highlighter.paramColor
         case .annotation: Highlighter.labelColor
+        case .unit: Highlighter.unitColor
         }
     }
 

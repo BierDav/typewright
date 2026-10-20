@@ -15,6 +15,7 @@ object CodeTokenKind {
     const val VARIABLE = 6
     const val ANNOTATION = 7
     const val OPERATOR = 8
+    const val UNIT = 9
 }
 
 /** Highlighting for code embedded in Typst raw blocks and Markdown fences. */
@@ -32,6 +33,7 @@ object CodeHighlight {
         "markdown" to "markdown", "md" to "markdown",
         "typst" to "typst", "typ" to "typst", "typc" to "typc",
         "mermaid" to "mermaid", "mmd" to "mermaid",
+        Solveng.TAG to Solveng.TAG,
     )
 
     /** The canonical language for a fence tag (`py` → `python`), or null for unsupported ones. */
@@ -62,6 +64,7 @@ object CodeHighlight {
      * kinds from [CodeTokenKind]. Empty for languages without a tokenizer (Markdown, Typst, unknown).
      */
     fun tokens(language: String, code: String): IntArray {
+        if (language == Solveng.TAG) return Solveng.tokens(code)
         val lang = languages[language] ?: return IntArray(0)
         return Scanner(lang, code).run { scan(0, code.length, 0); result() }
     }

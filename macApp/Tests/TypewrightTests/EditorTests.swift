@@ -225,4 +225,23 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(color(markdown, "1\n"), Highlighter.numberColor)
         XCTAssertEqual(color(markdown, "let"), Highlighter.keywordColor)
     }
+
+    func testHighlightsSolvengCode() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        func color(_ storage: NSTextStorage, _ needle: String) -> NSColor? {
+            storage.attribute(.foregroundColor, at: (storage.string as NSString).range(of: needle).location, effectiveRange: nil) as? NSColor
+        }
+        let tagged = NSTextStorage(string: "```solveng\nI = 30 mA // load\n```\nPlain `U = 5 V`\n")
+        Highlighter.apply(to: tagged, font: font)
+        XCTAssertEqual(color(tagged, "30"), Highlighter.numberColor)
+        XCTAssertEqual(color(tagged, "mA"), Highlighter.unitColor)
+        XCTAssertEqual(color(tagged, "// load"), Highlighter.commentColor)
+        XCTAssertEqual(color(tagged, "5 V"), Highlighter.stringColor)
+
+        // With plain-code: true, code without a language is solveng too.
+        let plain = NSTextStorage(string: "#show: solve-block.with(plain-code: true)\nPlain `U = 5 V`\n")
+        Highlighter.apply(to: plain, font: font)
+        XCTAssertEqual(color(plain, "5 V"), Highlighter.numberColor)
+        XCTAssertEqual(color(plain, "V`"), Highlighter.unitColor)
+    }
 }
