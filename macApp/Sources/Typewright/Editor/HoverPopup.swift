@@ -208,10 +208,14 @@ final class HoverController {
 }
 
 /// Reports when the pointer leaves the panel.
-private final class HoverPanel: NSPanel {
+final class HoverPanel: NSPanel {
     var onEnter: (() -> Void)?
     var onExit: (() -> Void)?
+    /// Borderless panels can't take key by default, which selecting and copying text needs.
+    var becomesKey = false
     private var tracking: NSTrackingArea?
+
+    override var canBecomeKey: Bool { becomesKey }
 
     override var contentView: NSView? {
         didSet {

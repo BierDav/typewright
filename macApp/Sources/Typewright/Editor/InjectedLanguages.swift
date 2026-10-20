@@ -36,18 +36,38 @@ enum InjectedLanguages {
             Highlighter.apply(to: storage, range: range, font: font, code: language == "typc", depth: depth)
         case "markdown":
             MarkdownHighlighter.apply(to: storage, range: range, font: font, depth: depth)
+        case SolvengSupport.tag:
+            storage.addAttributes([.font: font, .foregroundColor: NSColor.textColor], range: range)
+            let code = (storage.string as NSString).substring(with: range)
+            color(SolvengSupport.tokens(code), in: storage, at: range.location, length: range.length, font: font)
         default:
             storage.addAttributes([.font: font, .foregroundColor: NSColor.textColor], range: range)
             let code = (storage.string as NSString).substring(with: range)
-            let tokens = CodeHighlight.shared.tokens(language: language, code: code)
-            let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
-            for i in stride(from: 0, to: Int(tokens.size) - 2, by: 3) {
-                let start = Int(tokens.get(index: Int32(i))), length = Int(tokens.get(index: Int32(i + 1)))
-                guard let kind = Kind(rawValue: tokens.get(index: Int32(i + 2))), start + length <= range.length else { continue }
-                let r = NSRange(location: range.location + start, length: length)
-                storage.addAttribute(.foregroundColor, value: color(kind), range: r)
-                if kind == .comment { storage.addAttribute(.font, value: italic, range: r) }
-            }
+            color(CodeHighlight.shared.tokens(language: language, code: code), in: storage, at: range.location, length: range.length, font: font)
+        }
+    }
+
+    /// Colours flat `(start, length, kind)` tokens relative to `location`, within `length`.
+    static func color(_ tokens: [Int32], in storage: NSTextStorage, at location: Int, length: Int, font: NSFont) {
+        let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        for i in stride(from: 0, to: tokens.count - 2, by: 3) {
+            let start = Int(tokens[i]), count = Int(tokens[i + 1])
+            guard let kind = Kind(rawValue: tokens[i + 2]), start + count <= length else { continue }
+            let r = NSRange(location: location + start, length: count)
+            storage.addAttribute(.foregroundColor, value: color(kind), range: r)
+            if kind == .comment { storage.addAttribute(.font, value: italic, range: r) }
+        }
+    }
+
+    /// Colours `(start, length, kind)` tokens relative to `location`, within `length`.
+    static func color(_ tokens: KotlinIntArray, in storage: NSTextStorage, at location: Int, length: Int, font: NSFont) {
+        let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        for i in stride(from: 0, to: Int(tokens.size) - 2, by: 3) {
+            let start = Int(tokens.get(index: Int32(i))), count = Int(tokens.get(index: Int32(i + 1)))
+            guard let kind = Kind(rawValue: tokens.get(index: Int32(i + 2))), start + count <= length else { continue }
+            let r = NSRange(location: location + start, length: count)
+            storage.addAttribute(.foregroundColor, value: color(kind), range: r)
+            if kind == .comment { storage.addAttribute(.font, value: italic, range: r) }
         }
     }
 }

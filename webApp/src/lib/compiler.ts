@@ -9,6 +9,8 @@ export type CompileOutput = {
   diagnostics: DiagnosticJSON[];
   packageErrors: string[];
   duration: number;
+  /** solveng's report from the last compile that produced a document, see the typst bridge's `solveng_report`. */
+  solveng: string;
 };
 
 export type Completion = { kind: string; label: string; apply?: string | null; detail?: string | null };
@@ -132,6 +134,11 @@ class CompilerClient {
 
   jumpFromCursor(path: string, cursor: number): Promise<{ page: number; x: number; y: number }[]> {
     return this.post({ op: "jumpFromCursor", path, cursor });
+  }
+
+  /** solveng's editor support (`solveng-ide` through the typst bridge), see `typstBridge/src/solveng.rs`. */
+  solveng<T>(action: string, document: string, context = "", offset = 0): Promise<T> {
+    return this.post({ op: "solveng", action, document, context, offset });
   }
 
   highlight(text: string, code = false): Promise<Uint32Array> {

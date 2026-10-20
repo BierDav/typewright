@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TypewrightCore
 
 /// A use of a symbol, listed when ⌘B is pressed on its definition.
 struct SymbolUsage {
@@ -26,10 +27,13 @@ struct SymbolUsage {
     /// Edits for the shown file; other files are updated by the language itself.
     func rename(at offset: Int, to name: String) async -> [TextEdit]
     func quickFixes(for diagnostic: Diagnostic) -> [QuickFix]
+    /// Text of the files around the shown one that solveng settings and definitions come from.
+    func solvengContext() -> String
 }
 
 extension EditorLanguage {
     func quickFixes(for diagnostic: Diagnostic) -> [QuickFix] { [] }
+    func solvengContext() -> String { "" }
     func links(at offset: Int) async -> [(title: String, url: URL)] { [] }
     func documentation(of item: CompletionItem) async -> String? { item.documentation }
 }
@@ -71,6 +75,15 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         let next = NSMaxRange(selection) < s.length ? Character(UnicodeScalar(s.character(at: NSMaxRange(selection))) ?? " ") : nil
         let previous = selection.location > 0 ? Character(UnicodeScalar(s.character(at: selection.location - 1)) ?? " ") : nil
         let closers = Set(autoPairs.values)
+        // The third backtick of a fence closes it with a fence of its own and offers the language tags.
+        if c == "`", autoPairs[c] != nil, selection.length == 0, selection.location >= 2, next != "`",
+           s.substring(with: NSRange(location: selection.location - 2, length: 2)) == "``",
+           selection.location == 2 || s.character(at: selection.location - 3) != 96 {
+            super.insertText("````", replacementRange: selection)
+            setSelectedRange(NSRange(location: selection.location + 1, length: 0))
+            onComplete?()
+            return
+        }
         // Typing the closer that's already there steps over it.
         if selection.length == 0, closers.contains(c), next == c, previous != "\\" {
             return setSelectedRange(NSRange(location: selection.location + 1, length: 0))
@@ -112,16 +125,24 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     // MARK: Hidden syntax
 
+    /// The files around the shown one, for solveng code in them.
+    var solvengContext: (() -> String)?
+
     /// Math shows as it renders, like `$12"k"Omega$` as `$12kΩ$`, except the piece the caret touches.
     var concealsMath = false {
         didSet {
             guard concealsMath != oldValue else { return }
             layoutManager?.delegate = self
             observeStorage()
-            conceals = concealsMath ? Highlighter.conceals(in: string) : []
-            invalidateGlyphs(in: NSRange(location: 0, length: (string as NSString).length))
-            updateRevealedEquation()
+            refreshConceals()
         }
+    }
+
+    /// Recomputes what's concealed, e.g. once a compile tells whether solveng reads math.
+    func refreshConceals() {
+        conceals = concealsMath ? Highlighter.conceals(in: string, context: solvengContext?() ?? "") : []
+        invalidateGlyphs(in: NSRange(location: 0, length: (string as NSString).length))
+        updateRevealedEquation()
     }
 
     /// Sorted by location; found again while each edit is processed, before anything is laid out with stale positions.
@@ -174,7 +195,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         guard concealsMath, let storage = textStorage, storage.editedMask.contains(.editedCharacters) else { return }
         let first = pendingConceals == nil
         pendingConceals = (pendingConceals?.old ?? conceals, (pendingConceals?.delta ?? 0) + storage.changeInLength)
-        conceals = Highlighter.conceals(in: storage.string)
+        conceals = Highlighter.conceals(in: storage.string, context: solvengContext?() ?? "")
         // Other changed equations, like everything after a new `$`, once the layout manager caught up with the edit.
         guard first else { return }
         DispatchQueue.main.async { [weak self] in
@@ -742,7 +763,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         }
         entries.append(.separator())
         if hasQuickFixes?(index) == true {
-            let fix = NSMenuItem(title: "Show Fixes…", action: #selector(showFixes(_:)), keyEquivalent: "\r")
+            let fix = NSMenuItem(title: "Show Context Actions…", action: #selector(showFixes(_:)), keyEquivalent: "\r")
             fix.keyEquivalentModifierMask = .option
             fix.target = self
             fix.representedObject = index
@@ -1017,6 +1038,8 @@ struct CodeEditor: NSViewRepresentable {
     var language: (any EditorLanguage)?
     /// Edits and cursors of other devices with the same file open.
     var live: LiveEditing?
+    /// Changes with each new solveng report from the compiler, which restyles the text.
+    var solvengRevision = 0
     /// The Vim mode for the status bar, nil while Vim is off.
     var onVimModeChange: ((String?) -> Void)?
 
@@ -1116,6 +1139,7 @@ struct CodeEditor: NSViewRepresentable {
         c.find = find
         tv.onDefinition = language == nil ? nil : { [weak c] offset in c?.goToDefinition(at: offset) }
         tv.onComplete = language == nil ? nil : { [weak c] in c?.completion?.request(force: true) }
+        tv.solvengContext = language.map { l in { l.solvengContext() } }
         tv.onShowDocs = language == nil ? nil : { [weak c] in
             if c?.completion?.toggleDocs() != true { c?.hover?.showAtCaret() }
         }
@@ -1168,6 +1192,12 @@ struct CodeEditor: NSViewRepresentable {
                 }
             }
             if let storage = tv.textStorage { c.style(storage) }
+            c.solvengRevision = solvengRevision
+        }
+        if c.solvengRevision != solvengRevision {
+            c.solvengRevision = solvengRevision
+            if let storage = tv.textStorage { c.style(storage) }
+            if tv.concealsMath { tv.refreshConceals() }
         }
 
         if c.diagnostics != diagnostics {
@@ -1177,10 +1207,7 @@ struct CodeEditor: NSViewRepresentable {
             c.markers?.diagnostics = marked
             c.markers?.isHidden = marked.isEmpty
         }
-        if let markers = c.markers {
-            markers.language = highlights ? "typ" : markdown ? "md" : "text"
-            markers.topInset = topInset
-        }
+        c.markers?.topInset = topInset
 
         if let reveal, c.reveal != reveal {
             c.reveal = reveal
@@ -1209,7 +1236,7 @@ struct CodeEditor: NSViewRepresentable {
                 lm.addTemporaryAttributes([.backgroundColor: tint.withAlphaComponent(0.12)], forCharacterRange: range)
             }
             let start = min(range.location + max(d.column - 1, 0), NSMaxRange(range))
-            let underline = NSRange(location: start, length: NSMaxRange(range) - start)
+            let underline = NSRange(location: start, length: min(d.length ?? .max, NSMaxRange(range) - start))
             lm.addTemporaryAttributes([.underlineStyle: NSUnderlineStyle.patternDot.rawValue | NSUnderlineStyle.single.rawValue,
                                        .underlineColor: tint], forCharacterRange: underline)
             marked.append((range, d))
@@ -1254,7 +1281,8 @@ struct CodeEditor: NSViewRepresentable {
         if reveal.focus { tv.window?.makeFirstResponder(tv) }
         tv.setSelectedRange(selection)
         tv.scrollRangeToVisible(r)
-        tv.showFindIndicator(for: selection.length > 0 ? selection : r)
+        let marked = NSRange(location: loc, length: min(reveal.marked, NSMaxRange(r) - loc))
+        tv.showFindIndicator(for: selection.length > 0 ? selection : marked.length > 0 ? marked : r)
     }
 
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate, NSPopoverDelegate {
@@ -1277,6 +1305,7 @@ struct CodeEditor: NSViewRepresentable {
         private var colorPopover: NSPopover?
         var documentID = -1
         var font: NSFont?
+        var solvengRevision = 0
         var highlights = true
         var markdown = false
         var diagnostics: [Diagnostic] = []
@@ -1402,7 +1431,7 @@ struct CodeEditor: NSViewRepresentable {
             guard let font else { return }
             var swatches: [ColorLiteral] = []
             if highlights {
-                Highlighter.apply(to: storage, font: font)
+                Highlighter.apply(to: storage, font: font, solvengContext: language?.solvengContext() ?? "")
                 let s = storage.string as NSString
                 // Literals at a line start have no character to kern, so they go without a swatch.
                 swatches = ColorLiteral.find(in: storage.string).filter {
@@ -1504,12 +1533,28 @@ struct CodeEditor: NSViewRepresentable {
 
         // MARK: - Quick fixes
 
-        /// Fixes for every diagnostic on the character's line.
+        /// Fixes for every diagnostic on the character's line, then rewrites of the solveng calculation there.
         func quickFixes(at index: Int) -> [QuickFix] {
             guard let language, let hover else { return [] }
-            return hover.diagnostics
+            let fixes = hover.diagnostics
                 .filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index }
                 .flatMap { language.quickFixes(for: $0.diagnostic) }
+            return fixes + solvengConversions(at: index)
+        }
+
+        /// `#def` ⇄ math and `#solve` ⇄ solveng code.
+        private func solvengConversions(at index: Int) -> [QuickFix] {
+            guard let tv = textView else { return [] }
+            let text = tv.string
+            let found = SolvengSupport.conversions(text, context: language?.solvengContext() ?? "", offset: index)
+            return found.map { conversion in
+                let edit = TextEdit(range: NSRange(location: conversion.start, length: conversion.end - conversion.start),
+                                    newText: conversion.text)
+                return QuickFix(id: "solveng.\(conversion.title)", title: conversion.title, icon: "arrow.left.arrow.right") { [weak self] in
+                    guard let self, self.textView?.string == text else { return }
+                    self.apply([edit], actionName: conversion.title)
+                }
+            }
         }
 
         func showQuickFixes(at index: Int) {

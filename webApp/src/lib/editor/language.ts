@@ -2,10 +2,11 @@
 // browser's stand-in for the tinymist language server the Mac app runs.
 import { autocompletion, type Completion, type CompletionContext, type CompletionResult, snippet } from "@codemirror/autocomplete";
 import { StateEffect, StateField } from "@codemirror/state";
-import { EditorView, hoverTooltip, keymap, showTooltip, type Tooltip } from "@codemirror/view";
+import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, showTooltip, type Tooltip, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { compiler, type Completion as TypstCompletion } from "../compiler";
-import { Solveng, SolvengItemKind } from "../core";
+import { Solveng } from "./solveng";
 import { settings } from "../settings";
+import { fenceClosing } from "./solveng";
 
 export type LanguageContext = {
   /** The file being edited, relative to the space. */
@@ -14,6 +15,10 @@ export type LanguageContext = {
   open: (path: string, from: number, to: number) => void;
   /** Shows a short message, e.g. that a definition is in the standard library. */
   notify: (message: string) => void;
+  /** The text of the files around this one that solveng settings and definitions come from. */
+  solvengContext: () => Promise<string>;
+  /** Lists the uses of the solveng name at `offset` to pick from. */
+  showSolvengUsages: (offset: number) => void;
 };
 
 const KIND: Record<string, Completion["type"]> = {
@@ -43,39 +48,48 @@ function toCompletion(item: TypstCompletion): Completion {
   };
 }
 
-/** Inside solveng code the names and units of the calculation, from the document; null elsewhere. */
-function solvengCompletions(ctx: CompletionContext): CompletionResult | null {
-  const result = Solveng.complete(ctx.state.doc.toString(), ctx.pos);
-  if (!result) return null;
+/** Inside solveng code, math and its calls the names, units and option values of the calculation; null elsewhere. */
+async function solvengCompletions(ctx: CompletionContext, around: string): Promise<(CompletionResult & { exclusive: boolean }) | null> {
+  const result = await Solveng.complete(ctx.state.doc.toString(), around, ctx.pos).catch(() => null);
+  if (!result || result.from > ctx.pos) return null;
   const type = (kind: number) =>
-    kind === SolvengItemKind.FUNCTION ? "function" : kind === SolvengItemKind.UNIT ? "property" : kind === SolvengItemKind.CONSTANT ? "constant" : "variable";
+    kind === Solveng.FUNCTION ? "function" : kind === Solveng.UNIT || kind === Solveng.PARAMETER ? "property" : kind === Solveng.CONSTANT || kind === Solveng.VALUE ? "constant" : "variable";
   const options = result.items.map((item, i): Completion => ({
     label: item.label,
     displayLabel: item.label,
     type: type(item.kind),
     detail: item.detail,
+    info: item.documentation,
     boost: -i / result.items.length,
     // Units like Ω are typed as Ohm.
     apply: item.insert.includes("$0") ? snippet(item.insert.replace("$0", "${}")) : item.insert,
   }));
-  return { from: result.from, options, validFor: /^[\p{L}\p{N}_°%‰µΩ]*$/u };
+  return { from: result.from, options, validFor: /^[\p{L}\p{N}_°%‰µΩ]*$/u, exclusive: result.exclusive };
 }
 
 function completionSource(context: LanguageContext) {
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
     if (!settings.language) return null;
-    const solveng = solvengCompletions(ctx);
-    if (solveng) return solveng.options.length || ctx.explicit ? solveng : null;
+    const solveng = await solvengCompletions(ctx, await context.solvengContext());
+    if (ctx.aborted) return null;
+    if (solveng?.exclusive) return solveng.options.length || ctx.explicit ? solveng : null;
     const before = ctx.state.sliceDoc(Math.max(0, ctx.pos - 64), ctx.pos);
     // Package names complete from Typst Universe's index, fetched once on first use.
     if (/"@[\w/:.-]*$/.test(before) && !indexRequested) {
       indexRequested = true;
       await compiler.packageIndex().catch(() => (indexRequested = false));
     }
-    if (!ctx.explicit && !/[\w#.@"<(:/]$/.test(before)) return null;
+    if (!ctx.explicit && !/[\w#.@"<(:/]$/.test(before)) return solveng;
     const result = await compiler.complete(context.path(), ctx.pos, ctx.explicit).catch(() => null);
-    if (!result || ctx.aborted) return null;
-    return { from: result.from, options: result.items.map(toCompletion), validFor: /^[\p{L}\p{N}_-]*$/u };
+    if (ctx.aborted) return null;
+    if (!result) return solveng;
+    const options = result.items.map(toCompletion);
+    // In math the calculation's names come before Typst's symbols.
+    if (solveng && solveng.from === result.from) {
+      const named = new Set(solveng.options.map((o) => o.label));
+      return { from: result.from, options: [...solveng.options.map((o) => ({ ...o, boost: 50 + (o.boost ?? 0) })), ...options.filter((o) => !named.has(o.label))], validFor: /^[\p{L}\p{N}_-]*$/u };
+    }
+    return { from: result.from, options, validFor: /^[\p{L}\p{N}_-]*$/u };
   };
 }
 
@@ -94,11 +108,19 @@ async function docsElement(value: { kind: "text" | "code"; value: string }): Pro
   return dom;
 }
 
+/** solveng's docs for a name or unit of a calculation, else typst's. */
+async function docsAt(view: EditorView, context: LanguageContext, pos: number): Promise<{ kind: "text" | "code"; value: string } | null> {
+  const around = await context.solvengContext().catch(() => "");
+  const solveng = await Solveng.hover(view.state.doc.toString(), around, pos).catch(() => null);
+  if (solveng) return { kind: "text", value: solveng.markdown };
+  return compiler.tooltip(context.path(), pos).catch(() => null);
+}
+
 function hover(context: LanguageContext) {
   return hoverTooltip(
-    async (_view, pos): Promise<Tooltip | null> => {
+    async (view, pos): Promise<Tooltip | null> => {
       if (!settings.language) return null;
-      const value = await compiler.tooltip(context.path(), pos).catch(() => null);
+      const value = await docsAt(view, context, pos);
       if (!value) return null;
       const dom = await docsElement(value);
       return { pos, above: true, create: () => ({ dom }) };
@@ -121,7 +143,7 @@ const docsField = StateField.define<Tooltip | null>({
 
 export async function showDocs(view: EditorView, context: LanguageContext): Promise<boolean> {
   const pos = view.state.selection.main.head;
-  const value = await compiler.tooltip(context.path(), pos).catch(() => null);
+  const value = await docsAt(view, context, pos);
   if (!value) {
     context.notify("No documentation here.");
     return false;
@@ -132,6 +154,15 @@ export async function showDocs(view: EditorView, context: LanguageContext): Prom
 }
 
 export async function goToDefinition(view: EditorView, context: LanguageContext, pos = view.state.selection.main.head) {
+  // solveng's names; on the definition itself its usages.
+  const around = await context.solvengContext().catch(() => "");
+  const solveng = await Solveng.definition(view.state.doc.toString(), around, pos).catch(() => null);
+  if (solveng) {
+    if (!solveng.path && solveng.start <= pos && pos <= solveng.end) return context.showSolvengUsages(pos);
+    if (solveng.path && solveng.path !== context.path()) return context.open(solveng.path, solveng.start, solveng.end);
+    view.dispatch({ selection: { anchor: solveng.start, head: solveng.end }, scrollIntoView: true });
+    return view.focus();
+  }
   const location = await compiler.definition(context.path(), pos).catch(() => null);
   if (!location) return context.notify("No definition found.");
   if ("std" in location) return context.notify(`${location.std ?? "This"} is part of Typst's standard library.`);
@@ -144,9 +175,55 @@ export async function goToDefinition(view: EditorView, context: LanguageContext,
   }
 }
 
+const setOccurrences = StateEffect.define<DecorationSet>();
+
+/** The uses of the solveng name at the caret that belong to the same definition, marked like IntelliJ does. */
+const occurrenceField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, tr) {
+    value = value.map(tr.changes);
+    for (const effect of tr.effects) if (effect.is(setOccurrences)) value = effect.value;
+    return tr.docChanged ? Decoration.none : value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+const occurrenceMark = Decoration.mark({ class: "tw-occurrence" });
+
+function occurrences(context: LanguageContext) {
+  return ViewPlugin.fromClass(
+    class {
+      timer: ReturnType<typeof setTimeout> | undefined;
+      update(update: ViewUpdate) {
+        if (!update.selectionSet && !update.docChanged) return;
+        clearTimeout(this.timer);
+        const view = update.view;
+        const { head, empty } = view.state.selection.main;
+        if (!empty) return;
+        this.timer = setTimeout(async () => {
+          const text = view.state.doc.toString();
+          const around = await context.solvengContext().catch(() => "");
+          const found = await Solveng.usages(text, around, head).catch(() => []);
+          if (view.state.doc.toString() !== text || view.state.selection.main.head !== head) return;
+          const here = found.filter((u) => !u.path && u.end <= text.length).sort((a, b) => a.start - b.start);
+          // A lone use is just the word under the caret.
+          const marks = here.length > 1 ? Decoration.set(here.map((u) => occurrenceMark.range(u.start, u.end))) : Decoration.none;
+          view.dispatch({ effects: setOccurrences.of(marks) });
+        }, 200);
+      }
+      destroy() {
+        clearTimeout(this.timer);
+      }
+    },
+  );
+}
+
 export function typstLanguage(context: LanguageContext) {
   return [
+    occurrenceField,
+    occurrences(context),
     autocompletion({ override: [completionSource(context)], activateOnTypingDelay: 60, icons: true }),
+    fenceClosing,
     hover(context),
     docsField,
     keymap.of([

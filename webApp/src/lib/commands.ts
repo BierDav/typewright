@@ -1,10 +1,11 @@
 // Editor commands shared by key bindings and the command palette.
 import { openSearchPanel } from "@codemirror/search";
 import type { EditorView } from "@codemirror/view";
-import { alert, choose, copyText, editorView, prompt, toast, workspace } from "./app";
+import { alert, choose, copyText, editorView, prompt, setOverlay, toast, workspace } from "./app";
 import { identity } from "./identity";
 import { goToDefinition, showDocs, type LanguageContext } from "./editor/language";
 import * as refactor from "./editor/refactor";
+import * as solveng from "./editor/solveng";
 import { download } from "./spaces";
 import * as fs from "./storage";
 import * as syncService from "./sync";
@@ -14,6 +15,8 @@ export function languageContext(): LanguageContext {
     path: () => workspace()?.state.selected ?? "",
     open: (path, from, to) => void workspace()?.open(path, from, to),
     notify: toast,
+    solvengContext: () => workspace()?.solvengContext() ?? Promise.resolve(""),
+    showSolvengUsages: (offset) => setOverlay({ type: "palette", page: `solveng-usages:${offset}` }),
   };
 }
 
@@ -80,6 +83,20 @@ export async function extractFunction(chooseScope = false) {
   ]);
   if (chosen === null || chosen === "cancel") return;
   await report(refactor.extractFunction(v, scopes[Number(chosen)].start));
+}
+
+/** ⌥↩: rewrites of the solveng calculation at the caret. */
+export async function contextActions() {
+  const v = view();
+  if (!v) return;
+  const found = await solveng.conversions(v, (await workspace()?.solvengContext()) ?? "");
+  if (!found.length) return toast("Nothing to convert here.");
+  if (found.length === 1) return found[0].run();
+  const chosen = await choose("Context Actions", "What should happen here?", [
+    ...found.map((c, i) => ({ label: c.title, value: String(i) })),
+    { label: "Cancel", value: "cancel", role: "cancel" as const },
+  ]);
+  if (chosen !== null && chosen !== "cancel") found[Number(chosen)].run();
 }
 
 export function inlineVariable() {

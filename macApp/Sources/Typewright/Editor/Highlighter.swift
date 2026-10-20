@@ -77,16 +77,25 @@ enum Highlighter {
         let equation: NSRange
     }
 
-    static func conceals(in text: String) -> [Conceal] {
-        var text = text
+    /// Math from typst's parser, solveng code from solveng's editor support.
+    static func conceals(in text: String, context: String = "") -> [Conceal] {
+        var copy = text
         var count = 0
-        let values = text.withUTF8 { tw_conceal($0.baseAddress, $0.count, &count) }
+        let values = copy.withUTF8 { tw_conceal($0.baseAddress, $0.count, &count) }
         defer { tw_highlight_free(values, count) }
-        return stride(from: 0, to: count - 4, by: 5).map { i in
+        let math = stride(from: 0, to: count - 4, by: 5).map { i in
             Conceal(range: NSRange(location: Int(values[i]), length: Int(values[i + 1])),
                     replacement: unichar(clamping: values[i + 2]),
                     equation: NSRange(location: Int(values[i + 3]), length: Int(values[i + 4] - values[i + 3])))
         }
+        guard text.contains(SolvengSupport.tag) || !context.isEmpty || text.contains("solve-block") else { return math }
+        let code = SolvengSupport.conceals(text, context: context)
+        let solveng = stride(from: 0, to: code.count - 4, by: 5).map { i in
+            let v = { code[i + $0] }
+            return Conceal(range: NSRange(location: v(0), length: v(1)), replacement: unichar(clamping: v(2)),
+                           equation: NSRange(location: v(3), length: v(4) - v(3)))
+        }
+        return solveng.isEmpty ? math : (math + solveng).sorted { $0.range.location < $1.range.location }
     }
 
     /// Highlighted text for SwiftUI, e.g. code samples in the docs popup.
@@ -108,14 +117,16 @@ enum Highlighter {
         return result
     }
 
-    static func apply(to storage: NSTextStorage, font: NSFont, code: Bool = false) {
+    /// `solvengContext` is the text of the files around, see `EditorLanguage.solvengContext`.
+    static func apply(to storage: NSTextStorage, font: NSFont, code: Bool = false, solvengContext: String = "") {
         storage.beginEditing()
-        apply(to: storage, range: NSRange(location: 0, length: storage.length), font: font, code: code, depth: 0)
+        apply(to: storage, range: NSRange(location: 0, length: storage.length), font: font, code: code, depth: 0,
+              solvengContext: solvengContext)
         storage.endEditing()
     }
 
     /// Highlights `range` as Typst; raw blocks with a known language tag get that language's colouring.
-    static func apply(to storage: NSTextStorage, range: NSRange, font: NSFont, code: Bool, depth: Int) {
+    static func apply(to storage: NSTextStorage, range: NSRange, font: NSFont, code: Bool, depth: Int, solvengContext: String = "") {
         let fonts = NSFontManager.shared
         let bold = fonts.convert(font, toHaveTrait: .boldFontMask)
         let italic = fonts.convert(font, toHaveTrait: .italicFontMask)
@@ -124,8 +135,6 @@ enum Highlighter {
         let text = range.location == 0 && range.length == ns.length ? storage.string : ns.substring(with: range)
 
         storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor], range: range)
-        // solveng's `plain-code: true` makes code without a language a calculation.
-        let plain = !code && Solveng.shared.plainCode(document: text)
         for run in runs(in: text, code: code) where NSMaxRange(run.range) <= range.length {
             let r = NSRange(location: range.location + run.range.location, length: run.range.length)
             var attrs: [NSAttributedString.Key: Any] = [:]
@@ -138,24 +147,27 @@ enum Highlighter {
             }
             if run.tag == .link { attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue }
             if !attrs.isEmpty { storage.addAttributes(attrs, range: r) }
-            if run.tag == .raw, depth < InjectedLanguages.maxDepth { injectRaw(in: storage, run: r, font: font, depth: depth, plain: plain) }
+            if run.tag == .raw, depth < InjectedLanguages.maxDepth { injectRaw(in: storage, run: r, font: font, depth: depth) }
         }
+        // solveng colours what it calculates: its code, math and untagged code as `integration` says, and its calls' strings.
+        guard !code, text.contains(SolvengSupport.tag) || !solvengContext.isEmpty || text.contains("solve-block")
+                || text.contains("#def") || text.contains("#solve") || text.contains("#graph") || text.contains("#lambdify") else { return }
+        guard let solveng = SolvengSupport.highlight(text, context: solvengContext) else { return }
+        for i in stride(from: 0, to: solveng.plain.count - 1, by: 2) where solveng.plain[i + 1] <= range.length {
+            storage.addAttributes([.font: font, .foregroundColor: NSColor.textColor],
+                                  range: NSRange(location: range.location + solveng.plain[i], length: solveng.plain[i + 1] - solveng.plain[i]))
+        }
+        InjectedLanguages.color(solveng.tokens, in: storage, at: range.location, length: range.length, font: font)
     }
 
-    /// Colours the body of a ```` ```lang ```` raw block in its language; with `plain`, untagged raw is solveng.
-    private static func injectRaw(in storage: NSTextStorage, run: NSRange, font: NSFont, depth: Int, plain: Bool) {
+    /// Colours the body of a ```` ```lang ```` raw block in its language; solveng code is coloured with the document.
+    private static func injectRaw(in storage: NSTextStorage, run: NSRange, font: NSFont, depth: Int) {
         let raw = (storage.string as NSString).substring(with: run)
         let parts = raw.hasPrefix("```") ? CodeHighlight.shared.rawBlock(raw: raw) : KotlinIntArray(size: 0)
-        guard parts.size == 4 else {
-            let body = plain ? Solveng.shared.body(raw: raw, plain: true) : KotlinIntArray(size: 0)
-            guard body.size == 2 else { return }
-            let range = NSRange(location: run.location + Int(body.get(index: 0)), length: Int(body.get(index: 1) - body.get(index: 0)))
-            InjectedLanguages.apply(Solveng.shared.TAG, to: storage, range: range, font: font, depth: depth + 1)
-            return
-        }
+        guard parts.size == 4 else { return }
         let tag = (raw as NSString).substring(with: NSRange(location: Int(parts.get(index: 0)),
                                                             length: Int(parts.get(index: 1) - parts.get(index: 0))))
-        guard let language = InjectedLanguages.language(tag) else { return }
+        guard let language = InjectedLanguages.language(tag), language != SolvengSupport.tag else { return }
         let body = NSRange(location: run.location + Int(parts.get(index: 2)), length: Int(parts.get(index: 3) - parts.get(index: 2)))
         InjectedLanguages.apply(language, to: storage, range: body, font: font, depth: depth + 1)
     }

@@ -28,8 +28,6 @@ export const FuzzyMatch = Core.FuzzyMatch.getInstance();
 export const SpaceOrder = Core.SpaceOrder.getInstance();
 export const CodeHighlight = Core.CodeHighlight.getInstance();
 export const PackageSpecs = Core.PackageSpecs.getInstance();
-export const Solveng = Core.Solveng.getInstance();
-export const SolvengItemKind = Core.SolvengItemKind.getInstance();
 
 export function ktList<T>(items: readonly T[]): Core.KtList<T> {
   return KtList.fromJsArray(items);

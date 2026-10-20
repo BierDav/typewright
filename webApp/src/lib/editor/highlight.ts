@@ -3,7 +3,8 @@
 import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { compiler } from "../compiler";
-import { CodeHighlight, Solveng } from "../core";
+import { CodeHighlight } from "../core";
+import { Solveng } from "./solveng";
 
 /** Typst's highlighting tags as the bridge numbers them (`HlTag`). */
 const TAG_CLASS: Record<number, string> = {
@@ -51,26 +52,39 @@ function classes(tag: number, flags: number): string {
   return parts.join(" ");
 }
 
-/** The language and body range of a raw element; `plain` makes untagged raw solveng (its `plain-code: true`). */
-function injection(raw: string, plain: boolean): { language: string; from: number; to: number } | null {
-  if (raw.startsWith("```")) {
-    const parts = CodeHighlight.rawBlock(raw);
-    const language = parts.length ? CodeHighlight.language(raw.slice(parts[0], parts[1])) : null;
-    if (language) return { language, from: parts[2], to: parts[3] };
-    if (parts.length) return null;
-  }
-  const body = plain ? Solveng.body(raw, true) : new Int32Array();
-  return body.length ? { language: Solveng.TAG, from: body[0], to: body[1] } : null;
+/** The language and body range of a raw block; solveng code is coloured with the whole document. */
+function injection(raw: string): { language: string; from: number; to: number } | null {
+  if (!raw.startsWith("```")) return null;
+  const parts = CodeHighlight.rawBlock(raw);
+  const language = parts.length ? CodeHighlight.language(raw.slice(parts[0], parts[1])) : null;
+  return language && language !== Solveng.TAG ? { language, from: parts[2], to: parts[3] } : null;
 }
 
-function build(text: string, runs: Uint32Array, plain: boolean): DecorationSet {
-  const ranges: { from: number; to: number; cls: string }[] = [];
+/** `ranges` without the parts `cuts` (sorted, not overlapping) cover. */
+function without(ranges: { from: number; to: number; cls: string }[], cuts: { from: number; to: number }[]) {
+  const out: typeof ranges = [];
+  for (const r of ranges) {
+    let from = r.from;
+    for (const c of cuts) {
+      if (c.to <= from || c.from >= r.to) continue;
+      if (c.from > from) out.push({ ...r, from, to: c.from });
+      from = Math.max(from, c.to);
+    }
+    if (from < r.to) out.push({ ...r, from });
+  }
+  return out;
+}
+
+type SolvengHighlight = { tokens: number[]; plain: number[] } | null;
+
+function build(text: string, runs: Uint32Array, solveng: SolvengHighlight): DecorationSet {
+  let ranges: { from: number; to: number; cls: string }[] = [];
   for (let i = 0; i + 2 < runs.length; i += 3) {
     const from = runs[i];
     const to = from + runs[i + 1];
     const tag = runs[i + 2] & 0xff;
     const cls = classes(tag, runs[i + 2] >> 8);
-    const inject = tag === RAW ? injection(text.slice(from, to), plain) : null;
+    const inject = tag === RAW ? injection(text.slice(from, to)) : null;
     if (inject) {
       const tokens = CodeHighlight.tokens(inject.language, text.slice(from + inject.from, from + inject.to));
       if (tokens.length) {
@@ -86,6 +100,19 @@ function build(text: string, runs: Uint32Array, plain: boolean): DecorationSet {
     }
     if (cls) ranges.push({ from, to, cls });
   }
+  // What solveng calculates is coloured like its code: its code and call strings plain under the tokens, math
+  // over typst's math colours.
+  if (solveng) {
+    const plain: { from: number; to: number }[] = [];
+    for (let p = 0; p + 1 < solveng.plain.length; p += 2) plain.push({ from: solveng.plain[p], to: solveng.plain[p + 1] });
+    const tokens: typeof ranges = [];
+    for (let t = 0; t + 2 < solveng.tokens.length; t += 3) {
+      const from = solveng.tokens[t];
+      tokens.push({ from, to: from + solveng.tokens[t + 1], cls: CODE_CLASS[solveng.tokens[t + 2]] ?? "" });
+    }
+    const cuts = [...plain, ...tokens].sort((a, b) => a.from - b.from);
+    ranges = [...without(ranges, cuts), ...tokens];
+  }
   ranges.sort((a, b) => a.from - b.from || a.to - b.to);
   const builder = new RangeSetBuilder<Decoration>();
   for (const r of ranges) if (r.to > r.from && r.to <= text.length && r.cls) builder.add(r.from, r.to, mark(r.cls));
@@ -93,6 +120,8 @@ function build(text: string, runs: Uint32Array, plain: boolean): DecorationSet {
 }
 
 const setHighlights = StateEffect.define<DecorationSet>();
+/** Highlights again, e.g. once a compile tells whether solveng reads math. */
+export const refreshHighlights = StateEffect.define<null>();
 
 const highlights = StateField.define<DecorationSet>({
   create: () => Decoration.none,
@@ -104,8 +133,11 @@ const highlights = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field),
 });
 
-/** Typst highlighting; `code` treats the whole file as code, as for `.typc`. */
-export function typstHighlighting(code = false) {
+/**
+ * Typst highlighting; `code` treats the whole file as code, as for `.typc`. `solvengContext` gives the text of the
+ * files around, where solveng's settings may be.
+ */
+export function typstHighlighting(code = false, solvengContext: () => Promise<string> = async () => "") {
   const plugin = ViewPlugin.fromClass(
     class {
       version = 0;
@@ -113,17 +145,17 @@ export function typstHighlighting(code = false) {
         this.request(view);
       }
       update(update: ViewUpdate) {
-        if (update.docChanged) this.request(update.view);
+        if (update.docChanged || update.transactions.some((t) => t.effects.some((e) => e.is(refreshHighlights)))) this.request(update.view);
       }
       request(view: EditorView) {
         const version = ++this.version;
         const text = view.state.doc.toString();
-        compiler
-          .highlight(text, code)
-          .then((runs) => {
+        const solveng = code ? Promise.resolve(null) : solvengContext().then((around) => Solveng.highlight(text, around)).catch(() => null);
+        Promise.all([compiler.highlight(text, code), solveng])
+          .then(([runs, calculated]) => {
             // Results for older text would land in the wrong places.
             if (version !== this.version || view.state.doc.length !== text.length) return;
-            view.dispatch({ effects: setHighlights.of(build(text, runs, !code && Solveng.plainCode(text))) });
+            view.dispatch({ effects: setHighlights.of(build(text, runs, calculated)) });
           })
           .catch(() => {});
       }

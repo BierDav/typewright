@@ -551,6 +551,12 @@ struct CommandPalette: View {
                                      shortcut: "⌥⇧⌘M", section: "Refactor", keywords: ["extract method", "refactor"],
                                      action: .run { function(true) }))
         }
+        let caret = tv.selectedRange().location
+        if tv.hasQuickFixes?(caret) == true, let fixes = tv.onQuickFix {
+            items.append(PaletteItem(id: "code.actions", title: "Show Context Actions…", icon: "lightbulb", shortcut: "⌥↩",
+                                     section: "Code", keywords: ["quick fix", "convert", "solveng", "def", "solve", "math"],
+                                     action: .run { fixes(caret) }))
+        }
         if symbol?.kind == "variable", let symbol, let inline = tv.onInlineVariable {
             items.append(PaletteItem(id: "refactor.inline", title: "Inline Variable \(symbol.name)", icon: "arrow.down.left.square",
                                      shortcut: "⌥⌘N", section: "Refactor", keywords: ["refactor"], action: .run(inline)))

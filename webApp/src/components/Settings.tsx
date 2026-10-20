@@ -189,15 +189,20 @@ function Editor() {
       </Section>
       <Section
         title="Language Features"
-        footer="Completions pop up while typing, or with Ctrl-Space. ⌘-click (Ctrl-click) a name, import or path to open its definition; F1 shows its documentation. They come from typst itself, running in this page."
+        footer="Completions pop up while typing, or with Ctrl-Space. ⌘-click (Ctrl-click) a name, import or path to open its definition; F1 shows its documentation. They come from typst itself, running in this page, and from solveng's language support for its calculations."
       >
         <Row label="Completions and Go to Definition">
           <Toggle checked={settings.language} onChange={(v) => setSettings("language", v)} />
+        </Row>
+        <Row label={`solveng${solvengVersion() ? ` ${solvengVersion()}` : ""}`}>
+          <span class="secondary">Built in</span>
         </Row>
       </Section>
     </>
   );
 }
+
+const [solvengVersion] = createResource(() => compiler.solveng<string>("version", "").catch(() => ""));
 
 function Fonts() {
   const [query, setQuery] = createSignal("");
@@ -326,17 +331,6 @@ function Packages() {
 
   return (
     <>
-      <Section title="Typst Universe" footer={`Downloaded automatically when a document imports "@preview/…", and kept in this browser. Download one ahead of time, e.g. to work offline. Typst ${compiler.version || "built in"}.`}>
-        <div class="form-row">
-          <input class="text-field" value={spec()} placeholder="@preview/cetz:0.3.1" onInput={(e) => setSpec(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && void download()} />
-          <button class="button small" disabled={!spec().trim()} onClick={() => void download()}>
-            Download
-          </button>
-        </div>
-        <Show when={message()}>
-          <div class="form-row secondary">{message()}</div>
-        </Show>
-      </Section>
       <Section title="Installed" footer="Other namespaces, like @local, come from folders you add here; each holds name/version folders.">
         <For each={installed()} fallback={<div class="form-row secondary">No packages yet.</div>}>
           {(item) => (
@@ -368,6 +362,17 @@ function Packages() {
             Add Local Packages…
           </button>
         </div>
+      </Section>
+      <Section title="Typst Universe" footer={`Downloaded automatically when a document imports "@preview/…", and kept in this browser. Download one ahead of time, e.g. to work offline. Typst ${compiler.version || "built in"}.`}>
+        <div class="form-row">
+          <input class="text-field" value={spec()} placeholder="@preview/cetz:0.3.1" onInput={(e) => setSpec(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && void download()} />
+          <button class="button small" disabled={!spec().trim()} onClick={() => void download()}>
+            Download
+          </button>
+        </div>
+        <Show when={message()}>
+          <div class="form-row secondary">{message()}</div>
+        </Show>
       </Section>
     </>
   );

@@ -26,7 +26,10 @@ struct SpaceView: View {
 
     private var fileDiagnostics: [Diagnostic] {
         guard let file = workspace.selectedFile else { return [] }
-        return diagnostics.filter { !$0.isFromPackage && workspace.root.appendingPathComponent($0.path).standardizedFileURL == file }
+        let compiled = diagnostics.filter { !$0.isFromPackage && workspace.root.appendingPathComponent($0.path).standardizedFileURL == file }
+        // The compile reports solveng's problems too once it's caught up; the same message on a line counts once.
+        let seen = Set(compiled.map { "\($0.line):\($0.message)" })
+        return compiled + workspace.solvengDiagnostics.filter { !seen.contains("\($0.line):\($0.message)") }
     }
 
     /// The detail column of a space window; the file tree lives in `SpacesSidebar`.
@@ -217,6 +220,7 @@ struct SpaceView: View {
                     onStateChange: workspace.editorStateDidChange,
                     language: workspace.selectedKind == .typst ? workspace : nil,
                     live: workspace.live,
+                    solvengRevision: workspace.solvengRevision,
                     onVimModeChange: { vimMode = $0 }
                 )
                 .overlay(alignment: .bottomTrailing) {

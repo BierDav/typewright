@@ -15,8 +15,19 @@ final class PreviewTextSize {
             let clamped = min(max(size, Self.range.lowerBound), Self.range.upperBound)
             if clamped != size { size = clamped; return }
             UserDefaults.standard.set(size, forKey: "previewTextSize")
-            NotificationCenter.default.post(name: Self.didChange, object: nil)
+            NotificationCenter.default.post(name: Self.didChange, object: nil, userInfo: [Self.animatedKey: animatesChange])
         }
+    }
+
+    /// In `didChange`'s user info: whether the previews ease to the new size.
+    static let animatedKey = "animated"
+    @ObservationIgnored private var animatesChange = true
+
+    /// Pinching and scrolling already move smoothly; easing them on top lags behind.
+    func set(_ value: Double, animated: Bool) {
+        animatesChange = animated
+        size = value
+        animatesChange = true
     }
 
     private init() {

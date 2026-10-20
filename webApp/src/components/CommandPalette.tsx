@@ -3,6 +3,7 @@ import { confirm, editorView, openSpace, setOverlay, shortcut, workspace } from 
 import * as commands from "~/lib/commands";
 import { FuzzyMatch } from "~/lib/core";
 import { symbolAt } from "~/lib/editor/refactor";
+import { conversions, Solveng } from "~/lib/editor/solveng";
 import * as fonts from "~/lib/fonts";
 import { isEditable, isMarkdown, isPreviewable } from "~/lib/kinds";
 import { type RenderMode, setSettings, settings } from "~/lib/settings";
@@ -86,6 +87,40 @@ function usagesPage(ws: Workspace, path: string): Page {
   };
 }
 
+/** The uses of the solveng name at `offset` in the shown file, across the files around it. */
+function solvengUsagesPage(ws: Workspace, offset: number): Page {
+  const file = ws.state.selected ?? "";
+  const text = ws.state.text;
+  const name = /[\p{L}\p{N}_]*$/u.exec(text.slice(0, offset))![0] + /^[\p{L}\p{N}_]*/u.exec(text.slice(offset))![0];
+  return {
+    title: `Usages of ${name}`,
+    placeholder: "Filter usages…",
+    kind: "list",
+    items: async () => {
+      const found = await Solveng.usages(text, await ws.solvengContext(), offset).catch(() => []);
+      const items = [];
+      for (const u of found) {
+        const path = u.path ?? file;
+        const source = path === file ? text : ((await ws.bufferText(path)) ?? "");
+        const before = source.slice(0, u.start);
+        const line = before.split("\n").length;
+        const lineStart = before.lastIndexOf("\n") + 1;
+        const lineEnd = source.indexOf("\n", u.start);
+        items.push({
+          id: `usage:${path}:${u.start}`,
+          title: `${path}:${line}`,
+          subtitle: source.slice(lineStart, lineEnd < 0 ? undefined : lineEnd).trim(),
+          section: "Usages",
+          icon: "file" as const,
+          action: { run: () => void ws.open(path, u.start, u.end) },
+        });
+      }
+      if (!items.length) return [{ id: "none", title: `No usages of ${name}`, section: "Usages", action: { stay: () => {} } }];
+      return items;
+    },
+  };
+}
+
 function movePage(ws: Workspace, path: string): Page {
   return {
     title: `Move ${fs.basename(path)}`,
@@ -159,6 +194,9 @@ async function refactorItems(ws: Workspace): Promise<Item[]> {
     { id: "refactor.function", title: "Extract Function…", section: "Refactor", shortcut: shortcut("⌥⌘M"), keywords: ["extract method"], action: { run: () => void commands.extractFunction() } },
     { id: "refactor.function.scope", title: "Extract Function to Scope…", section: "Refactor", shortcut: shortcut("⌥⇧⌘M"), keywords: ["extract method"], action: { run: () => void commands.extractFunction(true) } },
   );
+  for (const [i, c] of (await conversions(view, await ws.solvengContext())).entries()) {
+    items.push({ id: `solveng.${i}`, title: c.title, section: "Refactor", shortcut: "⌥↩", keywords: ["solveng", "convert", "def", "solve", "math"], action: { run: c.run } });
+  }
   if (symbol?.kind === "variable") {
     items.push({ id: "refactor.inline", title: `Inline Variable ${symbol.name}`, section: "Refactor", shortcut: shortcut("⌥⌘N"), action: { run: commands.inlineVariable } });
   }
@@ -290,6 +328,7 @@ function startPage(name: string | undefined): Page | null {
   if (!name || !ws) return null;
   if (name.startsWith("move:")) return movePage(ws, name.slice(5));
   if (name.startsWith("usages:")) return usagesPage(ws, name.slice(7));
+  if (name.startsWith("solveng-usages:")) return solvengUsagesPage(ws, Number(name.slice(15)));
   if (name === "fonts.install") return googleFontsPage;
   return null;
 }

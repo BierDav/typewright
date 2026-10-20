@@ -19,6 +19,8 @@ struct RevealRequest: Equatable {
     let column: Int
     /// Characters selected from the column on, e.g. a search match.
     var length = 0
+    /// Characters flashed from the column on without selecting them, e.g. a symbol jumped to.
+    var marked = 0
     /// Previews reveal without taking the keyboard from the search field.
     var focus = true
 }
@@ -278,6 +280,7 @@ final class Workspace: EditorLanguage {
         guard kind.isOpenable else { return }
         captureFileState()
         flushSaves()
+        solvengContextCache = nil
         selectedFile = url
         selectedKind = kind
         if kind.isEditable {
@@ -296,6 +299,7 @@ final class Workspace: EditorLanguage {
         revision += 1
         schedulePersist()
         startLive()
+        updateSolvengDiagnostics()
     }
 
     /// Live editing covers the shown text file of a synced space; it's (re)started on selection and sync changes.
@@ -452,6 +456,7 @@ final class Workspace: EditorLanguage {
     /// Picks up edits made by other apps for files without pending changes.
     func refreshFromDisk() {
         reloadTree()
+        solvengContextCache = nil
         for url in buffers.keys where !dirty.contains(url) {
             buffers[url] = nil
         }
@@ -828,30 +833,132 @@ final class Workspace: EditorLanguage {
 
     func completions(at offset: Int) async -> [CompletionItem] {
         guard let file = selectedFile, selectedKind == .typst else { return [] }
-        if let solveng = Self.solvengCompletions(in: text, at: offset) { return solveng }
+        let solveng = Self.solvengCompletions(in: text, context: solvengContext(), at: offset)
+        if let solveng, solveng.exclusive { return solveng.items }
         let packages = packageCompletions(at: offset)
-        guard let client = languageClient() else { return packages }
+        guard let client = languageClient() else { return (solveng?.items ?? []) + packages }
         let items = await client.completions(in: file, text: text as NSString, at: offset)
         let labels = Set(items.map(\.label))
-        return items + packages.filter { !labels.contains($0.label) }
+        // In math the calculation's names come before Typst's symbols.
+        let names = solveng?.items ?? []
+        let named = Set(names.map(\.label))
+        return names + items.filter { !named.contains($0.label) } + packages.filter { !labels.contains($0.label) }
     }
 
-    /// Inside solveng code tinymist has nothing to offer; the calculation's names and units come from the document.
-    private static func solvengCompletions(in text: String, at offset: Int) -> [CompletionItem]? {
-        guard let result = Solveng.shared.complete(document: text, offset: Int32(offset)) else { return nil }
-        let range = NSRange(location: Int(result.from), length: offset - Int(result.from))
-        let items = (0..<result.items.size).compactMap { result.items.get(index: $0) }
-        return items.enumerated().map { index, item in
+    /// Inside solveng code and its calls' strings tinymist has nothing to offer; names, units and option values come
+    /// from solveng. In math and argument lists they join tinymist's.
+    private static func solvengCompletions(in text: String, context: String, at offset: Int) -> (items: [CompletionItem], exclusive: Bool)? {
+        guard let result = SolvengSupport.complete(text, context: context, offset: offset), result.from <= offset else { return nil }
+        let range = NSRange(location: result.from, length: offset - result.from)
+        return (result.items.enumerated().map { index, item in
             let kind: CompletionItem.Kind = switch item.kind {
-            case SolvengItemKind.shared.FUNCTION: .function
-            case SolvengItemKind.shared.UNIT: .field
-            case SolvengItemKind.shared.CONSTANT: .constant
+            case 1: .function
+            case 2, 4: .field
+            case 3, 5: .constant
             default: .variable
             }
+            let snippet = item.insert.contains("$0")
             return CompletionItem(label: item.label, detail: item.detail, kind: kind, filterText: item.insert.replacingOccurrences(of: "$0", with: ""),
-                                  sortText: String(format: "%05d", index), newText: item.insert, isSnippet: item.insert.contains("$0"),
-                                  range: range, documentation: "`\(item.label)` \(item.detail)")
+                                  sortText: String(format: "%05d", index), newText: item.insert, isSnippet: snippet,
+                                  range: range, documentation: item.documentation ?? "`\(item.label)` \(item.detail)")
+        }, result.exclusive)
+    }
+
+    @ObservationIgnored private var solvengContextCache: (key: [String], text: String)?
+    /// solveng's report from the last built-in compile, see `tw_world_solveng`.
+    @ObservationIgnored private var solvengReport = ""
+    /// Counts new reports, so the editor restyles with what the compiler saw.
+    private(set) var solvengRevision = 0
+
+    /// The files around the shown one, for solveng: the previewed main file and what it and the shown file import
+    /// or include, so a `solve-block`, `integration`, units and definitions set up elsewhere count here too.
+    func solvengContext() -> String {
+        guard selectedKind == .typst, let file = selectedFile else { return "" }
+        func references(_ text: String) -> [String] {
+            SolvengSupport.references(text)
         }
+        let key = [file.path, previewFile?.path ?? "", String(solvengRevision)] + references(text)
+        if let cache = solvengContextCache, cache.key == key { return cache.text }
+        func resolve(_ path: String, from: URL) -> URL {
+            path.hasPrefix("/") ? root.appendingPathComponent(String(path.dropFirst())).standardizedFileURL
+                : from.deletingLastPathComponent().appendingPathComponent(path).standardizedFileURL
+        }
+        var queue = key.dropFirst(3).map { resolve($0, from: file) }
+        if let main = previewFile, main != file, main.pathExtension == "typ" { queue.insert(main, at: 0) }
+        var seen: Set<URL> = [file.standardizedFileURL]
+        var parts: [(path: String, text: String)] = []
+        var size = 0
+        // Bounded, since a space can be large and imports can loop.
+        while !queue.isEmpty, parts.count < 24, size < 1_000_000 {
+            let next = queue.removeFirst()
+            guard next.pathExtension == "typ", seen.insert(next).inserted, let text = buffers[next] ?? Self.read(next) else { continue }
+            parts.append((relative(next) ?? next.path, text))
+            size += text.utf16.count
+            queue += references(text).map { resolve($0, from: next) }
+        }
+        // The compiler's report says for sure what solveng calculates here; reading the settings is the fallback.
+        let text = SolvengSupport.context(files: parts, report: solvengReport, path: relative(file) ?? "", main: file == previewFile,
+                                          mainPath: previewFile.flatMap(relative) ?? "")
+        solvengContextCache = (key, text)
+        return text
+    }
+
+    /// Problems solveng finds in the shown file while typing, like unknown units; the compile may report them later.
+    private(set) var solvengDiagnostics: [Diagnostic] = []
+
+    private func updateSolvengDiagnostics() {
+        guard selectedKind == .typst, let file = selectedFile, let path = relative(file) else {
+            if !solvengDiagnostics.isEmpty { solvengDiagnostics = [] }
+            return
+        }
+        let source = text as NSString
+        let found = SolvengSupport.diagnostics(text, context: solvengContext()).compactMap { p -> Diagnostic? in
+            guard p.start <= p.end, p.end <= source.length else { return nil }
+            let (line, column) = Self.lineAndColumn(of: p.start, in: source)
+            return Diagnostic(path: path, line: line + 1, column: column + 1,
+                              severity: p.severity == "error" ? .error : .warning, message: p.message, length: p.end - p.start)
+        }
+        let same = found.count == solvengDiagnostics.count && zip(found, solvengDiagnostics).allSatisfy {
+            $0.line == $1.line && $0.column == $1.column && $0.message == $1.message && $0.length == $1.length
+        }
+        if !same { solvengDiagnostics = found }
+    }
+
+    /// Zero-based line and UTF-16 column of `offset`.
+    private static func lineAndColumn(of offset: Int, in text: NSString) -> (line: Int, column: Int) {
+        var line = 0
+        var index = 0
+        while index < offset {
+            let r = text.lineRange(for: NSRange(location: index, length: 0))
+            if NSMaxRange(r) > offset { break }
+            line += 1
+            index = NSMaxRange(r)
+        }
+        return (line, offset - index)
+    }
+
+    private func sourceLocation(_ location: SolvengSupport.Location, from file: URL) -> SourceLocation? {
+        let url = location.path.map { root.appendingPathComponent($0).standardizedFileURL } ?? file
+        guard let text = (url == file ? self.text : buffers[url] ?? Self.read(url)) as NSString?, location.end <= text.length else { return nil }
+        let (line, column) = Self.lineAndColumn(of: location.start, in: text)
+        return SourceLocation(url: url, line: line, character: column, length: location.end - location.start)
+    }
+
+    /// ⌘B on a solveng name: jumps to its definition, or on the definition lists its usages; nil off solveng names.
+    private func solvengDefinition(at offset: Int, in file: URL) -> [SymbolUsage]? {
+        let context = solvengContext()
+        guard let definition = SolvengSupport.definition(text, context: context, offset: offset),
+              let target = sourceLocation(definition, from: file) else { return nil }
+        if definition.path == nil, definition.start <= offset, offset <= definition.end {
+            let usages = SolvengSupport.usages(text, context: context, offset: offset)
+                .filter { !($0.path == nil && $0.start == definition.start) }
+                .compactMap { sourceLocation($0, from: file) }
+                .compactMap(usage)
+            if usages.isEmpty { NSSound.beep() }
+            return usages
+        }
+        open(target)
+        return []
     }
 
     /// tinymist only knows `@preview`; local namespaces and downloaded packages come from the package folders.
@@ -870,6 +977,9 @@ final class Workspace: EditorLanguage {
 
     func hover(at offset: Int) async -> (markdown: String, range: NSRange?)? {
         guard let file = selectedFile, selectedKind == .typst else { return nil }
+        if let solveng = SolvengSupport.hover(text, context: solvengContext(), offset: offset) {
+            return (solveng.markdown, NSRange(location: solveng.start, length: solveng.end - solveng.start))
+        }
         var docs = await languageClient()?.hover(in: file, text: text as NSString, at: offset)
         if docs == nil { docs = await languageClient()?.parameterDocs(in: file, text: text as NSString, at: offset) }
         // A path to an image shows the image above the docs.
@@ -940,7 +1050,11 @@ final class Workspace: EditorLanguage {
     }
 
     func occurrences(at offset: Int) async -> [NSRange] {
-        guard let file = selectedFile, selectedKind == .typst, let client = languageClient() else { return [] }
+        guard let file = selectedFile, selectedKind == .typst else { return [] }
+        // A solveng name: what belongs to the same definition, in this file.
+        let solveng = SolvengSupport.usages(text, context: solvengContext(), offset: offset).filter { $0.path == nil }
+        if !solveng.isEmpty { return solveng.map { NSRange(location: $0.start, length: $0.end - $0.start) } }
+        guard let client = languageClient() else { return [] }
         return await client.occurrences(in: file, text: text as NSString, at: offset)
     }
 
@@ -983,6 +1097,7 @@ final class Workspace: EditorLanguage {
     /// Jumps to the definition at `offset`; on the definition itself it returns the usages to pick from instead.
     func goToDefinition(at offset: Int) async -> [SymbolUsage] {
         guard let file = selectedFile, selectedKind == .typst else { return [] }
+        if let solveng = solvengDefinition(at: offset, in: file) { return solveng }
         let source = text as NSString
         // An import item's definition is in the package; its uses here are what's worth seeing.
         if Refactor.symbol(in: text, at: offset)?.kind == "import" {
@@ -1030,7 +1145,9 @@ final class Workspace: EditorLanguage {
 
     func open(_ location: SourceLocation) {
         select(location.url)
-        reveal = RevealRequest(line: location.line + 1, column: location.character + 1)
+        // The caret goes to the symbol, which flashes, rather than its whole line.
+        let marked = location.endLine == location.line ? max(location.endCharacter - location.character, 0) : 0
+        reveal = RevealRequest(line: location.line + 1, column: location.character + 1, marked: marked)
     }
 
     private static let pathLiteral = try! NSRegularExpression(pattern: #""((?:\\.|[^"\\\n])+)""#)
@@ -1198,6 +1315,13 @@ final class Workspace: EditorLanguage {
 
     private func apply(_ result: CompileResult, mode: RenderMode) {
         diagnostics = result.diagnostics
+        defer { updateSolvengDiagnostics() }
+        // A failed compile keeps the last report; external compilers have none.
+        let report = result.solveng ?? (result.output != nil ? "" : solvengReport)
+        if report != solvengReport {
+            solvengReport = report
+            solvengRevision += 1
+        }
         // Missing fonts are looked up on Google Fonts; fetch the list before anyone hovers them.
         if diagnostics.contains(where: { QuickFixes.missingFont(in: $0.message) != nil }) {
             Task { await FontLibrary.shared.loadCatalog() }

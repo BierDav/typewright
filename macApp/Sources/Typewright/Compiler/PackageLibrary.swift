@@ -18,8 +18,11 @@ final class PackageLibrary {
         let url: URL
         var id: String { spec }
         var spec: String { "@\(namespace)/\(name):\(version)" }
-        /// Cloned with git, so it can be updated from its remote.
-        var isCloned: Bool { FileManager.default.fileExists(atPath: url.appending(path: ".git").path) }
+        /// Cloned with git, so it can be updated from its remote; linked repositories are the user's to pull.
+        var isCloned: Bool {
+            (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) == nil
+                && FileManager.default.fileExists(atPath: url.appending(path: ".git").path)
+        }
     }
 
     /// A local namespace; linked ones point at a folder elsewhere.
@@ -56,8 +59,17 @@ final class PackageLibrary {
         let names = (try? fm.contentsOfDirectory(atPath: dataDirectory.path)) ?? []
         namespaces = names.filter { !$0.hasPrefix(".") }.sorted().compactMap { name in
             let url = dataDirectory.appending(path: name, directoryHint: .isDirectory)
-            let target = (try? fm.destinationOfSymbolicLink(atPath: url.path)).map {
+            var target = (try? fm.destinationOfSymbolicLink(atPath: url.path)).map {
                 URL(fileURLWithPath: $0, relativeTo: dataDirectory).standardizedFileURL
+            }
+            // A link to a folder of package repositories finds nothing as `<name>/<version>`; it becomes kept links.
+            if let folder = target, Self.manifested(Self.packages(in: url, namespace: name)).isEmpty, !Self.repositories(in: folder).isEmpty {
+                try? fm.removeItem(at: url)
+                Self.keepLinks(at: url, to: folder)
+            }
+            if let folder = Self.linkedFolder(of: url) {
+                Self.keepLinks(at: url, to: folder)
+                target = folder
             }
             var isDir: ObjCBool = false
             guard target != nil || fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue else { return nil }
@@ -120,6 +132,61 @@ final class PackageLibrary {
         changed()
     }
 
+    /// Marks a namespace folder whose `<name>/<version>` links Typewright keeps, holding the linked folder's path.
+    private static let linkMarker = ".typewright-link"
+
+    /// The folder a kept namespace links, from its marker.
+    private static func linkedFolder(of namespace: URL) -> URL? {
+        guard (try? FileManager.default.destinationOfSymbolicLink(atPath: namespace.path)) == nil,
+              let path = try? String(contentsOf: namespace.appending(path: linkMarker), encoding: .utf8) else { return nil }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : URL(fileURLWithPath: trimmed, isDirectory: true)
+    }
+
+    /// Packages that are ones, with a `typst.toml`, rather than any folder two levels down.
+    private static func manifested(_ packages: [Package]) -> [Package] {
+        packages.filter { FileManager.default.fileExists(atPath: $0.url.appending(path: "typst.toml").path) }
+    }
+
+    /// Package repositories with a `typst.toml` at their root: `folder` itself and its subfolders, by name and version.
+    private static func repositories(in folder: URL) -> [(name: String, version: String, url: URL)] {
+        let fm = FileManager.default
+        let candidates = [folder] + ((try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [])
+            .filter { !$0.lastPathComponent.hasPrefix(".") }
+        return candidates.compactMap { url in
+            guard let toml = try? String(contentsOf: url.appending(path: "typst.toml"), encoding: .utf8),
+                  let manifest = PackageRepos.shared.manifest(toml: toml) else { return nil }
+            return (manifest.name, manifest.version, url)
+        }
+    }
+
+    /// Makes `namespace` a folder of `<name>/<version>` links into `folder`: its package repositories by their
+    /// `typst.toml`, and the versions of its `<name>/<version>/` folders; redone on refresh, so version bumps show up.
+    private static func keepLinks(at namespace: URL, to folder: URL) {
+        let fm = FileManager.default
+        var wanted: [String: URL] = [:]
+        for package in manifested(packages(in: folder, namespace: "")) { wanted["\(package.name)/\(package.version)"] = package.url }
+        for repo in repositories(in: folder) { wanted["\(repo.name)/\(repo.version)"] = repo.url }
+        try? fm.createDirectory(at: namespace, withIntermediateDirectories: true)
+        try? (folder.path + "\n").write(to: namespace.appending(path: linkMarker), atomically: true, encoding: .utf8)
+        // Only links are removed, never what they point at.
+        for name in (try? fm.contentsOfDirectory(atPath: namespace.path)) ?? [] where !name.hasPrefix(".") {
+            let dir = namespace.appending(path: name)
+            for version in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] {
+                let link = dir.appending(path: version)
+                guard let destination = try? fm.destinationOfSymbolicLink(atPath: link.path) else { continue }
+                if wanted["\(name)/\(version)"]?.path != destination { try? fm.removeItem(at: link) }
+            }
+            if (try? fm.contentsOfDirectory(atPath: dir.path))?.isEmpty == true { try? fm.removeItem(at: dir) }
+        }
+        for (path, target) in wanted {
+            let link = namespace.appending(path: path)
+            guard (try? fm.attributesOfItem(atPath: link.path)) == nil else { continue }
+            try? fm.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.createSymbolicLink(at: link, withDestinationURL: target)
+        }
+    }
+
     /// Registers `folder` as `@namespace/…` by linking it into typst's local package folder.
     func link(_ folder: URL, as namespace: String) {
         let name = namespace.trimmingCharacters(in: .whitespaces)
@@ -133,7 +200,12 @@ final class PackageLibrary {
         }
         do {
             try fm.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
-            try fm.createSymbolicLink(at: link, withDestinationURL: folder)
+            // typst only reads `<name>/<version>/`; package repositories (a `typst.toml` at their root) get links in that shape.
+            if Self.repositories(in: folder).isEmpty {
+                try fm.createSymbolicLink(at: link, withDestinationURL: folder)
+            } else {
+                Self.keepLinks(at: link, to: folder)
+            }
         } catch {
             linkError = error.localizedDescription
         }

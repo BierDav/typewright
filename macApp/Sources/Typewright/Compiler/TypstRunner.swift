@@ -10,6 +10,8 @@ struct CompileResult {
     /// Raw stderr, for failures typst doesn't report as diagnostics.
     let log: String
     let duration: TimeInterval
+    /// solveng's report from the built-in compiler (see `tw_world_solveng`); external compilers have none.
+    var solveng: String? = nil
 }
 
 /// Runs one `typst compile` invocation and can cancel it.

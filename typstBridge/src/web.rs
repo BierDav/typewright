@@ -26,7 +26,7 @@ use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 use wasm_bindgen::prelude::*;
 
-use crate::{LIBRARY, Slot, decode, diagnostic, display_path, highlight_runs, markdown, refactor_json, svg_pages};
+use crate::{LIBRARY, Slot, decode, diagnostic, display_path, highlight_runs, markdown, refactor_json, solveng_report, svg_pages};
 
 static EMBEDDED: LazyLock<Vec<(Font, typst::text::FontInfo)>> = LazyLock::new(|| typst_kit::fonts::embedded().collect());
 
@@ -52,6 +52,8 @@ struct WebWorld {
     svg_pages: Mutex<HashMap<u128, Arc<str>>>,
     /// The last successful paged compile, for label completions and jumps.
     document: Option<PagedDocument>,
+    /// solveng's report from the last compile that produced a document.
+    solveng: String,
 }
 
 fn project_id(path: &str) -> Option<FileId> {
@@ -149,12 +151,13 @@ impl IdeWorld for WebWorld {
     }
 }
 
-/// What a compile produced: the document (if any), diagnostics as JSON and the packages it lacked.
+/// What a compile produced: the document (if any), diagnostics as JSON, the packages it lacked and solveng's report.
 #[wasm_bindgen(getter_with_clone)]
 pub struct CompileResult {
     pub data: Option<Vec<u8>>,
     pub diagnostics: String,
     pub missing: Vec<String>,
+    pub solveng: String,
 }
 
 #[wasm_bindgen]
@@ -198,6 +201,7 @@ impl Compiler {
                 fonts: font_store(&[]),
                 svg_pages: Mutex::new(HashMap::new()),
                 document: None,
+                solveng: "{}".into(),
             },
         }
     }
@@ -310,7 +314,8 @@ impl Compiler {
         typst::comemo::evict(10);
         let json: Vec<_> = diags.iter().map(|d| diagnostic(&self.world, d)).collect();
         let missing = self.world.missing.get_mut().iter().map(|spec| spec.to_string()).collect();
-        CompileResult { data, diagnostics: serde_json::to_string(&json).unwrap_or_else(|_| "[]".into()), missing }
+        let solveng = self.world.solveng.clone();
+        CompileResult { data, diagnostics: serde_json::to_string(&json).unwrap_or_else(|_| "[]".into()), missing, solveng }
     }
 
     fn export(&mut self, format: u8) -> (Option<Vec<u8>>, Vec<SourceDiagnostic>) {
@@ -338,22 +343,27 @@ impl Compiler {
             0 => {
                 let (data, diags, doc) =
                     finish(typst::compile::<PagedDocument>(world), |doc| typst_pdf::pdf(doc, &PdfOptions::default()));
-                if doc.is_some() {
-                    self.world.document = doc;
+                if let Some(doc) = doc {
+                    self.world.solveng = solveng_report(&self.world, &**doc.introspector());
+                    self.world.document = Some(doc);
                 }
                 (data, diags)
             }
             1 => {
-                let (data, diags, _) = finish(typst::compile::<HtmlDocument>(world), |doc| {
+                let (data, diags, doc) = finish(typst::compile::<HtmlDocument>(world), |doc| {
                     typst_html::html(doc, &HtmlOptions::default()).map(String::into_bytes)
                 });
+                if let Some(doc) = doc {
+                    self.world.solveng = solveng_report(&self.world, &**doc.introspector());
+                }
                 (data, diags)
             }
             _ => {
                 let (data, diags, doc) =
                     finish(typst::compile::<PagedDocument>(world), |doc| Ok(svg_pages(&world.svg_pages, doc)));
-                if doc.is_some() {
-                    self.world.document = doc;
+                if let Some(doc) = doc {
+                    self.world.solveng = solveng_report(&self.world, &**doc.introspector());
+                    self.world.document = Some(doc);
                 }
                 (data, diags)
             }
@@ -481,4 +491,10 @@ pub fn markdown_html(text: &str) -> String {
 #[wasm_bindgen(js_name = markdownCodeCss)]
 pub fn markdown_code_css() -> String {
     markdown::code_css()
+}
+
+/// solveng's editor support for the page: `op` on `document` with its `context`, answering JSON; see `solveng::call`.
+#[wasm_bindgen]
+pub fn solveng(op: &str, document: &str, context: &str, offset: u32) -> String {
+    crate::solveng::call(op, document, context, offset)
 }

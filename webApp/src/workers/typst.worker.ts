@@ -121,7 +121,7 @@ async function compile(main: string, format: number) {
     const missing = result.missing.filter((spec) => !failed.has(spec));
     if (missing.length === 0 || round >= 8) {
       const errors = result.missing.flatMap((spec) => (failed.has(spec) ? [failed.get(spec)!] : []));
-      return { data: result.data ?? null, diagnostics: result.diagnostics, packageErrors: errors, duration: performance.now() - started };
+      return { data: result.data ?? null, diagnostics: result.diagnostics, packageErrors: errors, duration: performance.now() - started, solveng: result.solveng };
     }
     await Promise.all(
       missing.map((spec) =>
@@ -195,6 +195,8 @@ async function handle(request: Request): Promise<unknown> {
       return JSON.parse(c.jumpFromCursor(r.path, r.cursor));
     case "highlight":
       return typst.highlight(r.text, r.code);
+    case "solveng":
+      return JSON.parse(typst.solveng(r.action, r.document, r.context, r.offset));
     case "refactor":
       return JSON.parse(typst.refactor(JSON.stringify(r.request)));
     case "markdown":

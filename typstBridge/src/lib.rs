@@ -6,6 +6,7 @@ use std::sync::{Arc, LazyLock};
 
 mod markdown;
 mod refactor;
+mod solveng;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod ffi;
@@ -74,7 +75,7 @@ pub(crate) fn svg_pages(cache: &Mutex<HashMap<u128, Arc<str>>>, doc: &PagedDocum
         let svg = cache
             .remove(&hash)
             .or_else(|| next.get(&hash).cloned())
-            .unwrap_or_else(|| Arc::from(typst_svg::svg(page, &SvgOptions::default())));
+            .unwrap_or_else(|| Arc::from(selectable_svg(page)));
         if i > 0 {
             out.push(0);
         }
@@ -83,6 +84,142 @@ pub(crate) fn svg_pages(cache: &Mutex<HashMap<u128, Arc<str>>>, doc: &PagedDocum
     }
     *cache = next;
     out
+}
+
+// MARK: - solveng
+
+#[derive(Serialize, Default)]
+struct SolvengReport {
+    /// How many `solve-block`s (and resets in them) reported; none means solveng didn't run or predates reports.
+    blocks: usize,
+    /// Equations and raw elements a `solve-block` saw, by their source.
+    elements: Vec<SolvengElement>,
+    /// Everything the blocks defined, the later definition of a name winning.
+    defined: Vec<SolvengValue>,
+    units: Vec<SolvengValue>,
+}
+
+#[derive(Serialize)]
+struct SolvengElement {
+    path: String,
+    /// UTF-16 range in the file, and the source there when compiled, to find it again after edits.
+    start: usize,
+    end: usize,
+    text: String,
+    kind: String,
+    active: bool,
+    integration: String,
+}
+
+#[derive(Serialize)]
+struct SolvengValue {
+    name: String,
+    kind: String,
+    value: String,
+}
+
+/// What solveng's `solve-block`s report as `<solveng>` metadata, as JSON. Each element names the equation or raw
+/// element by its location; its span leads back to the source, as clicking in the preview does.
+pub(crate) fn solveng_report(world: &dyn World, introspector: &dyn typst::introspection::Introspector) -> String {
+    use typst::foundations::{Dict, Label, Selector};
+    use typst::introspection::{Location, MetadataElem};
+    let mut report = SolvengReport::default();
+    let Some(label) = Label::new(typst::utils::PicoStr::intern("solveng")) else { return "{}".into() };
+    let text = |d: &Dict, key: &str| match d.get(key) {
+        Ok(Value::Str(s)) => s.to_string(),
+        _ => String::new(),
+    };
+    let values = |d: &Dict, key: &str| -> Vec<SolvengValue> {
+        let Ok(Value::Array(items)) = d.get(key) else { return Vec::new() };
+        items
+            .iter()
+            .filter_map(|v| match v {
+                Value::Dict(e) => Some(SolvengValue { name: text(e, "name"), kind: text(e, "kind"), value: text(e, "value") }),
+                _ => None,
+            })
+            .collect()
+    };
+    for content in introspector.query(&Selector::Label(label)) {
+        let Some(meta) = content.to_packed::<MetadataElem>() else { continue };
+        let Value::Dict(d) = &meta.value else { continue };
+        let kind = text(d, "kind");
+        if kind == "block" {
+            report.blocks += 1;
+            for v in values(d, "defined") {
+                report.defined.retain(|e| e.name != v.name);
+                report.defined.push(v);
+            }
+            for v in values(d, "units") {
+                report.units.retain(|e| e.name != v.name);
+                report.units.push(v);
+            }
+            continue;
+        }
+        let Ok(location) = d.get("element").cloned().and_then(|v| v.cast::<Location>().map_err(|e| e.message().clone()))
+        else {
+            continue;
+        };
+        let Some(element) = introspector.query_first(&Selector::Location(location)) else { continue };
+        let span = element.span();
+        let (Some(id), Some(range)) = (span.id(), world.range(span)) else { continue };
+        let Ok(source) = world.source(id) else { continue };
+        let Some(code) = source.text().get(range.clone()) else { continue };
+        let start = source.text()[..range.start].encode_utf16().count();
+        report.elements.push(SolvengElement {
+            path: display_path(id),
+            start,
+            end: start + code.encode_utf16().count(),
+            text: code.to_string(),
+            kind,
+            active: matches!(d.get("active"), Ok(Value::Bool(true))),
+            integration: text(d, "integration"),
+        });
+    }
+    serde_json::to_string(&report).unwrap_or_else(|_| "{}".into())
+}
+
+/// typst draws glyphs as paths; invisible text over each run lets the preview select and copy it.
+fn selectable_svg(page: &typst_layout::Page) -> String {
+    let svg = typst_svg::svg(page, &SvgOptions::default());
+    let mut layer = String::from(r#"<g class="tw-text">"#);
+    text_layer(&page.frame, typst::layout::Transform::identity(), &mut layer);
+    layer.push_str("</g>");
+    match svg.rfind("</svg>") {
+        Some(end) => format!("{}{layer}{}", &svg[..end], &svg[end..]),
+        None => svg,
+    }
+}
+
+fn text_layer(frame: &typst::layout::Frame, ts: typst::layout::Transform, out: &mut String) {
+    use std::fmt::Write;
+    use typst::layout::{FrameItem, Transform};
+    for (pos, item) in frame.items() {
+        let ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
+        match item {
+            FrameItem::Group(group) => text_layer(&group.frame, ts.pre_concat(group.transform), out),
+            FrameItem::Text(text) => {
+                let width = text.width().to_pt();
+                if text.text.trim().is_empty() || width <= 0.0 {
+                    continue;
+                }
+                let escaped = text.text.as_str().replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+                let _ = write!(
+                    out,
+                    r#"<text transform="matrix({} {} {} {} {} {})" font-size="{}" textLength="{}" lengthAdjust="spacingAndGlyphs">{}</text>"#,
+                    ts.sx.get(),
+                    ts.ky.get(),
+                    ts.kx.get(),
+                    ts.sy.get(),
+                    ts.tx.to_pt(),
+                    ts.ty.to_pt(),
+                    text.size.to_pt(),
+                    width,
+                    escaped,
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Path as typst's CLI prints it: relative to the root, or prefixed with the package spec.

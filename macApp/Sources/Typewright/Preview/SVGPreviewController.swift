@@ -185,6 +185,10 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
         .page { background: white; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); line-height: 0; width: 100%;
           margin: 0 auto; flex-shrink: 0; }
         .page svg { display: block; width: 100%; height: auto; }
+        /* The bridge's invisible text over the glyphs, for selecting and copying. */
+        .page .tw-text text { fill: transparent; white-space: pre; font-family: -apple-system, sans-serif;
+          -webkit-user-select: text; user-select: text; cursor: text; }
+        .page .tw-text text::selection { fill: transparent; background: rgba(0, 122, 255, 0.3); }
         .tw-animating .page { transition: width 0.22s cubic-bezier(0.33, 1, 0.68, 1); }
         /* Only the drawing is inverted, so the page shadow stays dark; images are turned back. */
         @media (prefers-color-scheme: dark) {

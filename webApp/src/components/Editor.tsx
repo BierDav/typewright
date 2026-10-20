@@ -23,7 +23,7 @@ import { createEffect, on, onCleanup, onMount } from "solid-js";
 import { setEditorView } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { colorSwatches } from "~/lib/editor/colors";
-import { typstHighlighting } from "~/lib/editor/highlight";
+import { refreshHighlights, typstHighlighting } from "~/lib/editor/highlight";
 import { typstLanguage } from "~/lib/editor/language";
 import { liveEditing } from "~/lib/editor/live";
 import { download as downloadFont, googleFont, loadCatalog } from "~/lib/fonts";
@@ -58,7 +58,7 @@ const markdownStyle = HighlightStyle.define([
 function languageFor(path: string): Extension {
   const ext = extension(path);
   if (ext === "typ" || ext === "typc") {
-    return [typstSyntax, typstHighlighting(ext === "typc"), typstLanguage(commands.languageContext()), colorSwatches];
+    return [typstSyntax, typstHighlighting(ext === "typc", commands.languageContext().solvengContext), typstLanguage(commands.languageContext()), colorSwatches];
   }
   if (isMarkdown(path)) return [markdown(), syntaxHighlighting(markdownStyle)];
   return [];
@@ -125,6 +125,7 @@ export default function Editor(props: { workspace: Workspace }) {
         { key: "Mod-Alt-m", run: () => (void commands.extractFunction(), true) },
         { key: "Mod-Alt-Shift-m", run: () => (void commands.extractFunction(true), true) },
         { key: "Mod-Alt-n", run: () => (commands.inlineVariable(), true) },
+        { key: "Alt-Enter", run: () => (void commands.contextActions(), true) },
         { key: "Mod-Alt-f", run: () => (commands.find(true), true) },
         ...closeBracketsKeymap,
         ...defaultKeymap,
@@ -206,6 +207,7 @@ export default function Editor(props: { workspace: Workspace }) {
   });
 
   createEffect(on(() => ws.state.selected, (path) => show(path, ws.state.text), { defer: true }));
+  createEffect(on(() => ws.state.solvengReport, () => view?.dispatch({ effects: refreshHighlights.of(null) }), { defer: true }));
 
   // The file changed outside the editor: sync, another tab or a refactoring elsewhere.
   createEffect(
@@ -247,6 +249,12 @@ export default function Editor(props: { workspace: Workspace }) {
       }
       return { from, to, severity: d.severity, message: d.message, actions };
     });
+    // The compile reports solveng's problems too once it's caught up; the same message on a line counts once.
+    const seen = new Set(items.map((d) => `${state.doc.lineAt(d.from).number}:${d.message}`));
+    for (const d of ws.state.solvengDiagnostics) {
+      if (d.to > state.doc.length || seen.has(`${state.doc.lineAt(d.from).number}:${d.message}`)) continue;
+      items.push({ from: d.from, to: d.to, severity: d.severity, message: d.message });
+    }
     view.dispatch(setDiagnostics(state, items));
   });
 

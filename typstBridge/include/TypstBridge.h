@@ -47,6 +47,16 @@ void tw_world_reset(TWWorld *_Nonnull world);
 TWResult tw_world_compile(TWWorld *_Nonnull world, TWFormat format);
 void tw_result_free(TWResult result);
 
+/// solveng's `<solveng>` metadata from the last compile that produced a document, as JSON
+/// `{blocks, elements: [{path, start, end, text, kind, active, integration}], defined, units}`; free with `tw_string_free`.
+char *_Nonnull tw_world_solveng(TWWorld *_Nonnull world);
+
+/// solveng's editor support: `op` (`tokens`, `documentTokens`, `conceals`, `complete`, `hover`, `conversions`,
+/// `diagnostics`, `definition`, `usages`, `references`, `version`) on `document` with its context JSON `{files: [{path, text}], report, path, main}`, at a UTF-16
+/// `offset`; answers JSON. Free with `tw_string_free`.
+char *_Nonnull tw_solveng(const char *_Nonnull op, const uint8_t *_Nullable document, size_t document_len,
+                          const uint8_t *_Nullable context, size_t context_len, uint32_t offset);
+
 /// Syntax highlighting runs for `text` (markup, or code if `code`): `count` values, three per run of
 /// UTF-16 start, UTF-16 length and tag (low byte) with style flags (bold 1, italic 2, math 4) from bit 8.
 uint32_t *_Nonnull tw_highlight(const uint8_t *_Nullable text, size_t len, bool code, size_t *_Nonnull count);

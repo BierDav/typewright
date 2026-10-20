@@ -238,10 +238,54 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(color(tagged, "// load"), Highlighter.commentColor)
         XCTAssertEqual(color(tagged, "5 V"), Highlighter.stringColor)
 
-        // With plain-code: true, code without a language is solveng too.
-        let plain = NSTextStorage(string: "#show: solve-block.with(plain-code: true)\nPlain `U = 5 V`\n")
+        // With integration "code", code without a language is solveng too.
+        let plain = NSTextStorage(string: "#show: solve-config.with(integration: \"code\")\n#show: solve-block\nPlain `U = 5 V`\n")
         Highlighter.apply(to: plain, font: font)
         XCTAssertEqual(color(plain, "5 V"), Highlighter.numberColor)
         XCTAssertEqual(color(plain, "V`"), Highlighter.unitColor)
+
+        // By default math in a solve-block is coloured like solveng code.
+        let math = NSTextStorage(string: "#show: solve-block\n$I = 30 \"mA\"$\n")
+        Highlighter.apply(to: math, font: font)
+        XCTAssertEqual(color(math, "30"), Highlighter.numberColor)
+        XCTAssertEqual(color(math, "\"mA\""), Highlighter.unitColor)
+        XCTAssertEqual(color(math, "I ="), Highlighter.paramColor)
+
+        // The strings of solveng's calls are calculations too, and their unit options units.
+        let call = NSTextStorage(string: "#solve(\"t = Q0 / I\", unit: \"h\")\n")
+        Highlighter.apply(to: call, font: font)
+        XCTAssertEqual(color(call, "Q0"), Highlighter.paramColor)
+        XCTAssertEqual(color(call, "h\""), Highlighter.unitColor)
+    }
+
+    func testSolvengCompilerReportWins() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        // The text says math is calculated, the compiler saw only code integration in this file.
+        let report = #"{"blocks":1,"elements":[{"path":"main.typ","start":0,"end":3,"text":"`x`","kind":"code","active":true,"integration":"code"}],"defined":[],"units":[]}"#
+        let storage = NSTextStorage(string: "#show: solve-block\n$I = 30 \"mA\"$\n")
+        Highlighter.apply(to: storage, font: font,
+                          solvengContext: SolvengSupport.context(files: [], report: report, path: "main.typ", main: true))
+        let s = storage.string as NSString
+        XCTAssertNotEqual(storage.attribute(.foregroundColor, at: s.range(of: "\"mA\"").location, effectiveRange: nil) as? NSColor,
+                          Highlighter.unitColor)
+    }
+
+    func testSolvengSettingsFromTheFilesAround() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        // A chapter of a main file that turns on code integration.
+        let chapter = NSTextStorage(string: "Plain `U = 5 V`\n")
+        Highlighter.apply(to: chapter, font: font,
+                          solvengContext: "#show: solve-config.with(integration: \"code\")\n#show: solve-block\n#include \"chapter.typ\"")
+        let s = chapter.string as NSString
+        XCTAssertEqual(chapter.attribute(.foregroundColor, at: s.range(of: "5").location, effectiveRange: nil) as? NSColor,
+                       Highlighter.numberColor)
+    }
+
+    func testConcealsSolvengCode() {
+        let text = "```solveng\nDeltaT = 2 kOhm -> mA\n```\n$Omega$"
+        let shown = Highlighter.conceals(in: text)
+        let s = text as NSString
+        XCTAssertEqual(shown.map { s.substring(with: $0.range) }, ["Delta", "Ohm", "->", "Omega"])
+        XCTAssertEqual(shown.map { Character(UnicodeScalar($0.replacement)!) }, ["Δ", "Ω", "→", "Ω"])
     }
 }

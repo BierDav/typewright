@@ -122,15 +122,16 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
                 if self.paged {
                     self.setScale(self.effectiveScale * factor, animated: false)
                 } else {
-                    PreviewTextSize.shared.size *= factor
+                    PreviewTextSize.shared.set(PreviewTextSize.shared.size * factor, animated: false)
                 }
                 return true
             }
             return handled ? nil : event
         }
         textSizeObserver = NotificationCenter.default.addObserver(forName: PreviewTextSize.didChange, object: nil,
-                                                                  queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applyTextSize() }
+                                                                  queue: .main) { [weak self] note in
+            let animated = note.userInfo?[PreviewTextSize.animatedKey] as? Bool ?? true
+            MainActor.assumeIsolated { self?.applyTextSize(animated: animated) }
         }
     }
 
@@ -215,9 +216,9 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
         view.pageZoom = pageZoom
     }
 
-    private func applyTextSize() {
+    private func applyTextSize(animated: Bool = true) {
         guard isReady else { return }
-        view.callAsyncJavaScript("tw.setTextSize(px)", arguments: ["px": textSize], in: nil, in: .page)
+        view.callAsyncJavaScript("tw.setTextSize(px, animated)", arguments: ["px": textSize, "animated": animated], in: nil, in: .page)
     }
 
     /// Forcing light appearance makes `prefers-color-scheme` light inside the page.
@@ -294,7 +295,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
           nodes: [], sources: [], head: [], headSource: null, pages: false, markdown: false, wrap: null, mermaid: null,
 
           // Eases the reflowing text to its new size, keeping the same spot of the document in view.
-          setTextSize(px) {
+          setTextSize(px, animated) {
             const root = document.documentElement;
             const start = parseFloat(root.style.getPropertyValue('--tw-text')) || px;
             const max = () => Math.max(root.scrollHeight - innerHeight, 0);
@@ -302,13 +303,14 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             const began = performance.now();
             cancelAnimationFrame(this.textFrame);
             const step = now => {
-              const t = Math.min((now - began) / 200, 1);
+              const t = animated ? Math.min((now - began) / 200, 1) : 1;
               root.style.setProperty('--tw-text', (start + (px - start) * (1 - Math.pow(1 - t, 3))) + 'px');
               scrollTo(0, fraction * max());
               if (t < 1) this.textFrame = requestAnimationFrame(step);
               else if (window.twReport) twReport();
             };
-            this.textFrame = requestAnimationFrame(step);
+            // Pinches and scrolls already come in small steps, so they apply right away.
+            if (animated) this.textFrame = requestAnimationFrame(step); else step(began);
           },
 
           setFonts(css) {

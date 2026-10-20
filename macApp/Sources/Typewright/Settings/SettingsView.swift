@@ -238,13 +238,14 @@ private struct LanguageServerSection: View {
                 }
                 .disabled(!server.isEnabled)
             }
+            LabeledContent("solveng \(SolvengSupport.version)", value: "Built in")
         } header: {
-            Text("Language Server")
+            Text("Language Servers")
         } footer: {
             if let error = server.lastError {
                 Text(error).foregroundStyle(.red)
             } else {
-                Text("Completions pop up while typing, or with ⌥⎋ or ⌃Space. ⌘-click an import, symbol, path or font name to open it. Uses tinymist from github.com/Myriad-Dreamin/tinymist.")
+                Text("Completions pop up while typing, or with ⌥⎋ or ⌃Space. ⌘-click an import, symbol, path or font name to open it. Uses tinymist from github.com/Myriad-Dreamin/tinymist, and solveng's language support (github.com/BierDav/solveng) for its calculations.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -371,39 +372,6 @@ struct PackageSettings: View {
     var body: some View {
         Form {
             Section {
-                HStack {
-                    TextField("Package", text: $spec, prompt: Text("@preview/cetz:0.3.1"))
-                        .labelsHidden()
-                        .onSubmit(download)
-                    if packages.downloading.isEmpty {
-                        Button { download() } label: { Label("Download", systemImage: "arrow.down.circle") }
-                            .disabled(spec.trimmingCharacters(in: .whitespaces).isEmpty)
-                    } else {
-                        ProgressView().controlSize(.small)
-                    }
-                }
-                ForEach(packages.downloaded) { package in
-                    HStack {
-                        Image(systemName: "shippingbox.fill").foregroundStyle(.tint)
-                        Text(package.name)
-                        Text(package.version).foregroundStyle(.secondary)
-                        Spacer()
-                        revealButton(package.url)
-                        removeButton { packages.remove(package) }
-                    }
-                }
-            } header: {
-                Text("Typst Universe")
-            } footer: {
-                if let error = packages.downloadError {
-                    Text(error).foregroundStyle(.red)
-                } else {
-                    Text("Downloaded automatically when a document imports \"@preview/…\". Download one ahead of time, e.g. to work offline. Shared with the typst CLI.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section {
                 ForEach(packages.namespaces) { ns in
                     HStack {
                         Image(systemName: ns.target == nil ? "folder.fill" : "link").foregroundStyle(.secondary)
@@ -451,7 +419,40 @@ struct PackageSettings: View {
                 if let error = packages.linkError {
                     Text(error).foregroundStyle(.red)
                 } else {
-                    Text("A linked folder becomes a namespace: with my-libs/1.0.0/ inside, linked as “personal”, documents import \"@personal/my-libs:1.0.0\". Unlinking keeps your files. A cloned package repository goes into the namespace above, or “local”, as <name>/<version>/ from its typst.toml.")
+                    Text("A linked folder becomes a namespace: with my-libs/1.0.0/ inside, or a package repository my-libs/ whose typst.toml says version 1.0.0, linked as “personal”, documents import \"@personal/my-libs:1.0.0\". Unlinking keeps your files. A cloned package repository goes into the namespace above, or “local”, as <name>/<version>/ from its typst.toml.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                HStack {
+                    TextField("Package", text: $spec, prompt: Text("@preview/cetz:0.3.1"))
+                        .labelsHidden()
+                        .onSubmit(download)
+                    if packages.downloading.isEmpty {
+                        Button { download() } label: { Label("Download", systemImage: "arrow.down.circle") }
+                            .disabled(spec.trimmingCharacters(in: .whitespaces).isEmpty)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                ForEach(packages.downloaded) { package in
+                    HStack {
+                        Image(systemName: "shippingbox.fill").foregroundStyle(.tint)
+                        Text(package.name)
+                        Text(package.version).foregroundStyle(.secondary)
+                        Spacer()
+                        revealButton(package.url)
+                        removeButton { packages.remove(package) }
+                    }
+                }
+            } header: {
+                Text("Typst Universe")
+            } footer: {
+                if let error = packages.downloadError {
+                    Text(error).foregroundStyle(.red)
+                } else {
+                    Text("Downloaded automatically when a document imports \"@preview/…\". Download one ahead of time, e.g. to work offline. Shared with the typst CLI.")
                         .foregroundStyle(.secondary)
                 }
             }

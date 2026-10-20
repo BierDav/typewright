@@ -3,6 +3,7 @@ import { batch, createRoot, createSignal, type Accessor } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { compiler, Format, type CompileOutput, type DiagnosticJSON } from "./compiler";
 import { Paths } from "./core";
+import { Solveng } from "./editor/solveng";
 import { sharedFontFiles } from "./fonts";
 import { isFont, isMarkdown, isPreviewable, kindOf, kindWithContents, type Kind } from "./kinds";
 import { settings } from "./settings";
@@ -71,6 +72,10 @@ export class Workspace {
       html: null as string | null,
       markdownHtml: null as string | null,
       diagnostics: [] as Diagnostic[],
+      /** Problems solveng finds in the shown file while typing, like unknown units. */
+      solvengDiagnostics: [] as { from: number; to: number; message: string; severity: "error" | "warning" }[],
+      /** solveng's report from the last compile, which says what it calculates where. */
+      solvengReport: "",
       packageErrors: [] as string[],
       failure: null as string | null,
       compiling: false,
@@ -206,7 +211,7 @@ export class Workspace {
       this.buffers.set(path, text);
     }
     batch(() => {
-      this.setState({ selected: path, selectedKind: kind, text });
+      this.setState({ selected: path, selectedKind: kind, text, solvengDiagnostics: [] });
       // Opening a file inside collapsed folders shows it in the sidebar.
       const parents = ancestors(path);
       if (parents.some((p) => !this.state.expanded.includes(p))) {
@@ -391,6 +396,66 @@ export class Workspace {
     this.scheduleCompile(30);
   }
 
+  private solvengCache: { key: string; text: string } | null = null;
+  /** Counts new solveng reports, for the cache key. */
+  private solvengRevision = 0;
+
+  /**
+   * The files around the shown one, for solveng: the previewed main file and what it and the shown file import or
+   * include, so a `solve-block`, `integration`, units and definitions set up elsewhere count here too.
+   */
+  async solvengContext(): Promise<string> {
+    const file = this.state.selected;
+    if (!file || this.state.selectedKind !== "typst") return "";
+    const references = (text: string) => Solveng.references(text).catch(() => [] as string[]);
+    const own = await references(this.state.text);
+    const report = this.state.solvengReport;
+    const key = JSON.stringify([file, this.state.preview, this.solvengRevision, own]);
+    if (this.solvengCache?.key === key) return this.solvengCache.text;
+    const resolve = (path: string, from: string) => {
+      const parts: string[] = [];
+      for (const p of fs.split(path.startsWith("/") ? path : fs.join(fs.dirname(from), path))) {
+        if (p === "..") parts.pop();
+        else parts.push(p);
+      }
+      return parts.join("/");
+    };
+    const queue = own.map((p) => resolve(p, file));
+    const main = this.state.preview;
+    if (main && main !== file && main.endsWith(".typ")) queue.unshift(main);
+    const seen = new Set([file]);
+    const parts: { path: string; text: string }[] = [];
+    let size = 0;
+    // Bounded, since a space can be large and imports can loop.
+    while (queue.length && parts.length < 24 && size < 1_000_000) {
+      const next = queue.shift()!;
+      if (!next.endsWith(".typ") || seen.has(next)) continue;
+      seen.add(next);
+      const text = await this.bufferText(next);
+      if (text === null) continue;
+      parts.push({ path: next, text });
+      size += text.length;
+      queue.push(...(await references(text)).map((p) => resolve(p, next)));
+    }
+    // The compiler's report says for sure what solveng calculates here; reading the settings is the fallback.
+    const text = Solveng.context(parts, report, file, file === this.state.preview, this.state.preview ?? "");
+    this.solvengCache = { key, text };
+    return text;
+  }
+
+  /** Finds solveng's problems in the shown file, like unknown units. */
+  async updateSolvengDiagnostics() {
+    const file = this.state.selected;
+    const text = this.state.text;
+    const found =
+      file && this.state.selectedKind === "typst" ? await Solveng.diagnostics(text, await this.solvengContext()).catch(() => []) : [];
+    if (file !== this.state.selected || text !== this.state.text) return;
+    this.setState(
+      "solvengDiagnostics",
+      found.map((p) => ({ from: p.start, to: p.end, message: p.message, severity: p.severity === "error" ? "error" : "warning" })),
+    );
+  }
+
   /** A file's text including unsaved edits. */
   async bufferText(path: string): Promise<string | null> {
     return this.buffers.get(path) ?? fs.readText(fs.join(this.root, path));
@@ -435,6 +500,7 @@ export class Workspace {
     const own = paths.filter((p) => this.selfWrites.delete(p));
     const changed = paths.filter((p) => !own.includes(p));
     if (changed.length === 0) return;
+    this.solvengCache = null;
     const structural = changed.some((p) => !this.exists(p) || p === "");
     if (structural) await this.reloadTree();
     // A space joined from elsewhere opens empty; its main file shows once it arrives.
@@ -520,6 +586,11 @@ export class Workspace {
         duration: result.duration,
         failure: !result.data && diagnostics.length === 0 ? (result.packageErrors[0] ?? "Compilation failed.") : null,
       });
+      if (result.solveng !== this.state.solvengReport) {
+        this.solvengRevision++;
+        this.setState("solvengReport", result.solveng);
+      }
+      void this.updateSolvengDiagnostics();
       if (!result.data) return;
       if (mode === "pdf") this.setState("pdf", result.data);
       else if (mode === "html") this.setState("html", new TextDecoder().decode(result.data));

@@ -111,9 +111,16 @@ final class BuiltinCompiler: @unchecked Sendable {
                            severity: Diagnostic.Severity(rawValue: $0.severity) ?? .error, message: $0.message)
             },
             log: log,
-            duration: Date().timeIntervalSince(start)
+            duration: Date().timeIntervalSince(start),
+            solveng: Self.solvengReport(world)
         )
         return (compiled, output, wrapperFailed)
+    }
+
+    private static func solvengReport(_ world: OpaquePointer) -> String {
+        let report = tw_world_solveng(world)
+        defer { tw_string_free(report) }
+        return String(cString: report)
     }
 
     private struct Entry: Decodable {

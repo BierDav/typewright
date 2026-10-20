@@ -23,7 +23,7 @@ use typst_kit::packages::SystemPackages;
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 
-use crate::{LIBRARY, Slot, decode, diagnostic, highlight_runs, markdown, refactor_json, svg_pages, typst_version};
+use crate::{LIBRARY, Slot, decode, diagnostic, highlight_runs, markdown, refactor_json, solveng_report, svg_pages, typst_version};
 
 /// Typst's deep recursion overflows the small stacks of GCD threads.
 const STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -71,6 +71,8 @@ pub struct TWWorld {
     extra_fonts: Vec<(PathBuf, u32)>,
     /// SVGs of the last compile's pages by layout hash, so unchanged pages aren't rendered again.
     svg_pages: Mutex<HashMap<u128, Arc<str>>>,
+    /// solveng's report from the last compile that produced a document, see `solveng_report`.
+    solveng: Mutex<String>,
 }
 
 impl TWWorld {
@@ -135,12 +137,17 @@ impl TWWorld {
         }
         match format {
             TWFormat::Pdf => finish(typst::compile::<PagedDocument>(self), |doc| {
+                *self.solveng.lock() = solveng_report(self, &**doc.introspector());
                 typst_pdf::pdf(doc, &PdfOptions::default())
             }),
             TWFormat::Html => finish(typst::compile::<HtmlDocument>(self), |doc| {
+                *self.solveng.lock() = solveng_report(self, &**doc.introspector());
                 typst_html::html(doc, &HtmlOptions::default()).map(String::into_bytes)
             }),
-            TWFormat::Svg => finish(typst::compile::<PagedDocument>(self), |doc| Ok(self.svg(doc))),
+            TWFormat::Svg => finish(typst::compile::<PagedDocument>(self), |doc| {
+                *self.solveng.lock() = solveng_report(self, &**doc.introspector());
+                Ok(self.svg(doc))
+            }),
         }
     }
 
@@ -240,6 +247,7 @@ pub unsafe extern "C" fn tw_world_new(root: *const c_char) -> *mut TWWorld {
         fonts: DEFAULT_FONTS.clone(),
         extra_fonts: Vec::new(),
         svg_pages: Mutex::new(HashMap::new()),
+        solveng: Mutex::new("{}".into()),
     }))
 }
 
@@ -344,6 +352,40 @@ pub unsafe extern "C" fn tw_world_compile(world: *mut TWWorld, format: TWFormat)
         }
         None => TWResult { data: std::ptr::null_mut(), len: 0, diagnostics },
     }
+}
+
+/// What solveng reported in the last compile that produced a document, as JSON. Free with `tw_string_free`.
+///
+/// # Safety
+/// `world` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_world_solveng(world: *mut TWWorld) -> *mut c_char {
+    let world = unsafe { &*world };
+    CString::new(world.solveng.lock().clone()).unwrap_or_default().into_raw()
+}
+
+fn bytes<'a>(ptr: *const u8, len: usize) -> std::borrow::Cow<'a, str> {
+    if ptr.is_null() || len == 0 {
+        return "".into();
+    }
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) })
+}
+
+/// solveng's editor support, see `solveng::call`. Free with `tw_string_free`.
+///
+/// # Safety
+/// `op` must be a valid C string, `document` and `context` point to their lengths in bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_solveng(
+    op: *const c_char,
+    document: *const u8,
+    document_len: usize,
+    context: *const u8,
+    context_len: usize,
+    offset: u32,
+) -> *mut c_char {
+    let result = crate::solveng::call(unsafe { str(op) }, &bytes(document, document_len), &bytes(context, context_len), offset);
+    CString::new(result).unwrap_or_default().into_raw()
 }
 
 /// # Safety
@@ -457,4 +499,44 @@ pub unsafe extern "C" fn tw_markdown_html(text: *const u8, len: usize) -> *mut c
 #[unsafe(no_mangle)]
 pub extern "C" fn tw_markdown_code_css() -> *mut c_char {
     CString::new(markdown::code_css()).unwrap_or_default().into_raw()
+}
+
+#[cfg(test)]
+mod solveng_tests {
+    use super::*;
+
+    unsafe fn compile_report(main: &str) -> serde_json::Value {
+        let dir = std::env::temp_dir().join(format!("tw-solveng-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = CString::new(dir.to_str().unwrap()).unwrap();
+        let path = CString::new("main.typ").unwrap();
+        unsafe {
+            let world = tw_world_new(root.as_ptr());
+            tw_world_set_main(world, path.as_ptr());
+            tw_world_set_overlay(world, path.as_ptr(), main.as_ptr(), main.len());
+            tw_result_free(tw_world_compile(world, TWFormat::Pdf));
+            let report = tw_world_solveng(world);
+            let json = serde_json::from_str(CStr::from_ptr(report).to_str().unwrap()).unwrap();
+            tw_string_free(report);
+            tw_world_free(world);
+            json
+        }
+    }
+
+    #[test]
+    fn reports_solveng_metadata() {
+        // What solveng's solve-block leaves for each element and block.
+        let main = r#"#show math.equation: it => it + context [#metadata((kind: "math", element: it.location(), active: true, integration: "full")) <solveng>]
+#metadata((kind: "block", defined: ((name: "a", kind: "value", value: "1"),), units: ())) <solveng>
+Text $a = 1$ more."#;
+        let report = unsafe { compile_report(main) };
+        let element = &report["elements"][0];
+        assert_eq!(element["path"], "main.typ");
+        assert_eq!(element["text"], "$a = 1$");
+        assert_eq!(element["integration"], "full");
+        assert_eq!(element["active"], true);
+        assert_eq!(element["start"], main.encode_utf16().count() - "$a = 1$ more.".encode_utf16().count());
+        assert_eq!(report["defined"][0]["name"], "a");
+        assert_eq!(report["blocks"], 1);
+    }
 }

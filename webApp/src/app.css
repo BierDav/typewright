@@ -871,6 +871,12 @@ button.issue:hover:not(:disabled) {
   background: color-mix(in srgb, var(--orange) 22%, transparent) !important;
 }
 
+/* Uses of the solveng name at the caret. */
+.tw-occurrence {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-radius: 2px;
+}
+
 .cm-searchMatch {
   background: color-mix(in srgb, #ffd60a 45%, transparent) !important;
   outline: none !important;
@@ -1166,6 +1172,19 @@ button.issue:hover:not(:disabled) {
   display: block;
   width: 100%;
   height: auto;
+}
+
+/* The bridge's invisible text over the glyphs, for selecting and copying. */
+.svg-page .tw-text text {
+  fill: transparent;
+  white-space: pre;
+  font-family: sans-serif;
+  user-select: text;
+}
+
+.svg-page .tw-text text::selection {
+  fill: transparent;
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .jump-marker {
