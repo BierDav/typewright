@@ -1,6 +1,6 @@
 import Foundation
 
-enum RenderMode: String, CaseIterable {
+enum RenderMode: String, CaseIterable, Codable {
     case pdf, html, svg
 }
 

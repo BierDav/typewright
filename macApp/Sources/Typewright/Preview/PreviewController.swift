@@ -38,6 +38,8 @@ final class PreviewController {
     @ObservationIgnored var pendingRestore: PreviewState?
     /// Like `pendingRestore`, as a position shared with the other previews.
     @ObservationIgnored var pendingPosition: DocumentPosition?
+    /// Horizontal scroll fraction to restore along with the pending state.
+    @ObservationIgnored private var pendingPan: Double?
     @ObservationIgnored private var zoomTimer: Timer?
 
     init() {
@@ -81,13 +83,16 @@ final class PreviewController {
         if pendingRestore == nil, let position = pendingPosition {
             pendingPosition = nil
             pendingRestore = Self.state(for: position, in: document)
+            pendingPan = position.pan
         }
         if let state = pendingRestore {
             pendingRestore = nil
+            let pan = pendingPan
+            pendingPan = nil
             view.document = document
             insetForToolbar()
             // Wait for the first layout so fit-to-width and the destination use the real size.
-            DispatchQueue.main.async { self.restore(state) }
+            DispatchQueue.main.async { self.restore(state, pan: pan) }
             sync()
             return
         }
@@ -107,6 +112,13 @@ final class PreviewController {
             newScroll.contentView.scroll(to: origin)
             newScroll.reflectScrolledClipView(newScroll.contentView)
         }
+        sync()
+    }
+
+    /// Empties the view when another file is previewed, so the old document never stands in for the new one.
+    func clear() {
+        guard view.document != nil else { return }
+        view.document = nil
         sync()
     }
 
@@ -131,8 +143,13 @@ final class PreviewController {
         guard let doc = view.document, let dest = view.currentDestination, let page = dest.page else { return nil }
         let bounds = page.bounds(for: view.displayBox)
         let fraction = bounds.height > 0 ? min(max((bounds.maxY - dest.point.y) / bounds.height, 0), 1) : 0
+        var pan = 0.0
+        if let clip = view.documentView?.enclosingScrollView?.contentView, let width = view.documentView?.frame.width,
+           width > clip.bounds.width {
+            pan = min(max((clip.bounds.minX - clip.documentRect.minX) / (width - clip.bounds.width), 0), 1)
+        }
         return DocumentPosition(page: Double(doc.index(for: page)) + fraction,
-                                zoom: view.autoScales ? nil : Double(view.scaleFactor))
+                                zoom: view.autoScales ? nil : Double(view.scaleFactor), pan: pan)
     }
 
     private static func state(for position: DocumentPosition, in doc: PDFDocument) -> PreviewState {
@@ -142,12 +159,19 @@ final class PreviewController {
         return PreviewState(scale: position.zoom, page: index, x: bounds.minX, y: bounds.maxY - fraction * bounds.height)
     }
 
-    private func restore(_ state: PreviewState) {
+    private func restore(_ state: PreviewState, pan: Double? = nil) {
         guard let doc = view.document, doc.pageCount > 0 else { return }
         if let scale = state.scale { view.scaleFactor = scale } else { view.autoScales = true }
         view.layoutDocumentView()
         guard let page = doc.page(at: min(state.page, doc.pageCount - 1)) else { return }
         view.go(to: PDFDestination(page: page, at: NSPoint(x: state.x, y: state.y)))
+        if let pan, let scroll = view.documentView?.enclosingScrollView, let width = view.documentView?.frame.width {
+            let clip = scroll.contentView
+            var origin = clip.bounds.origin
+            origin.x = clip.documentRect.minX + pan * max(width - clip.bounds.width, 0)
+            clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
+            scroll.reflectScrolledClipView(clip)
+        }
         sync()
     }
 

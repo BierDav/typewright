@@ -248,10 +248,18 @@ private struct FloatingSidebar: View {
                     Opener.shared.rename(space: workspace.root, to: name)
                 }
                 .frame(width: state.panelFrame.width)
-                .background(SidebarMaterial())
-                .clipShape(Self.shape)
-                .overlay(Self.shape.stroke(Color.primary.opacity(0.12)))
-                .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
+                // The card reaches up behind the traffic lights; the file tree stays below them.
+                .background {
+                    SidebarMaterial()
+                        .clipShape(Self.shape)
+                        .overlay(Self.shape.stroke(Color.primary.opacity(0.12)))
+                        .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
+                        // The editor underneath would set its I-beam on every move.
+                        .background(CursorArea())
+                        .onHover { inside in inside ? show() : scheduleHide() }
+                        .padding(.top, 8)
+                        .ignoresSafeArea(edges: .top)
+                }
                 .padding([.leading, .bottom], 8)
                 .onHover { inside in inside ? show() : scheduleHide() }
                 .transition(.move(edge: .leading).combined(with: .opacity))
@@ -290,7 +298,7 @@ private struct NoSpaceView: View {
                 .opacity(0.55)
             Text("No Space Open")
                 .font(.title3.weight(.semibold))
-            Text("Select a space in the sidebar, or open a folder to use as a new one.")
+            Text("Select a space in the sidebar, or link a folder as a new one.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 280)

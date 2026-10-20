@@ -278,7 +278,7 @@ struct FontSettings: View {
             } header: {
                 Text("Space Fonts")
             } footer: {
-                Text("Folders inside each space, relative to its root. Their fonts are only used by that space.")
+                Text("Looked up in the previewed file’s folder and every folder above it, so a document finds its fonts even outside a space and in Quick Look.")
                     .foregroundStyle(.secondary)
             }
 
@@ -366,6 +366,7 @@ struct PackageSettings: View {
     @Bindable private var packages = PackageLibrary.shared
     @State private var spec = ""
     @State private var namespace = ""
+    @State private var repository = ""
 
     var body: some View {
         Form {
@@ -416,6 +417,13 @@ struct PackageSettings: View {
                                 .truncationMode(.tail)
                         }
                         Spacer()
+                        if ns.canUpdate {
+                            Button { Task { await packages.update(ns) } } label: { Image(systemName: "arrow.clockwise") }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                                .disabled(!packages.cloning.isEmpty)
+                                .help("Update from GitHub")
+                        }
                         revealButton(ns.target ?? ns.url)
                         if ns.target != nil { removeButton { packages.unlink(ns) } }
                     }
@@ -426,13 +434,24 @@ struct PackageSettings: View {
                         .labelsHidden()
                     Button("Link Folder…", action: linkFolder)
                 }
+                HStack {
+                    TextField("GitHub Repository", text: $repository, prompt: Text("owner/repo or a GitHub link"))
+                        .labelsHidden()
+                        .onSubmit(clone)
+                    if packages.cloning.isEmpty {
+                        Button("Clone", action: clone)
+                            .disabled(repository.trimmingCharacters(in: .whitespaces).isEmpty)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                }
             } header: {
                 Text("Local Packages")
             } footer: {
                 if let error = packages.linkError {
                     Text(error).foregroundStyle(.red)
                 } else {
-                    Text("A linked folder becomes a namespace: with my-libs/1.0.0/ inside, linked as “personal”, documents import \"@personal/my-libs:1.0.0\". Unlinking keeps your files.")
+                    Text("A linked folder becomes a namespace: with my-libs/1.0.0/ inside, linked as “personal”, documents import \"@personal/my-libs:1.0.0\". Unlinking keeps your files. A cloned package repository goes into the namespace above, or “local”, as <name>/<version>/ from its typst.toml.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -444,6 +463,16 @@ struct PackageSettings: View {
     private func download() {
         let spec = spec
         Task { if await packages.download(spec) { self.spec = "" } }
+    }
+
+    private func clone() {
+        let input = repository
+        let name = namespace.trimmingCharacters(in: .whitespaces)
+        Task {
+            guard await packages.clone(input, into: name.isEmpty ? "local" : name) else { return }
+            repository = ""
+            namespace = ""
+        }
     }
 
     private func linkFolder() {

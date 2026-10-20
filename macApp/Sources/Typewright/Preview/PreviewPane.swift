@@ -79,7 +79,7 @@ struct PreviewPane: View {
                 if workspace.isCompiling || (workspace.diagnostics.isEmpty && workspace.failureLog == nil) {
                     ProgressView().controlSize(.small)
                 } else {
-                    placeholder("Compilation failed", workspace.failureLog ?? "Fix the errors to see a preview.")
+                    placeholder("Compilation failed", workspace.failureLog ?? firstError ?? "Fix the errors to see a preview.")
                 }
             }
         }
@@ -100,6 +100,11 @@ struct PreviewPane: View {
             svgPreview.show(workspace.svgPages)
             markdownPreview.show(workspace.markdownHTML, baseURL: baseURL)
         }
+    }
+
+    private var firstError: String? {
+        guard let d = workspace.diagnostics.first(where: { $0.severity == .error }) else { return nil }
+        return "\(d.path):\(d.line): \(d.message)"
     }
 
     private var baseURL: URL {

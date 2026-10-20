@@ -39,11 +39,16 @@ final class Workspace: EditorLanguage {
     var expanded: Set<URL> = [] { didSet { schedulePersist() } }
     var reveal: RevealRequest?
 
+    /// Each file keeps its own format; files never previewed before use the last one picked.
     var renderMode: RenderMode {
         didSet {
+            // Switching files brings their format along; `setPreview` does the rest.
+            guard !isFollowingFile else { return }
             UserDefaults.standard.set(renderMode.rawValue, forKey: "renderMode")
             // The new format opens where the old one was.
             capturePreviewState(mode: oldValue)
+            if let previewFile { positions[previewFile, default: DocumentPosition()].mode = renderMode }
+            schedulePersist()
             // Output from the last time a format was shown is stale; it would flash an older document.
             html = nil
             svgPages = nil
@@ -95,6 +100,7 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored private var previewStates: [URL: PreviewState] = [:]
     /// Where each previewed file was left, shared by its formats.
     @ObservationIgnored private var positions: [URL: DocumentPosition] = [:]
+    @ObservationIgnored private var isFollowingFile = false
     @ObservationIgnored private var persistTask: Task<Void, Never>?
     @ObservationIgnored private var isClosed = false
     /// Font folders passed to every compiler, see `FontLibrary`.
@@ -135,6 +141,8 @@ final class Workspace: EditorLanguage {
         } else {
             previewFile = resolve(state.preview)
         }
+        followPreviewMode()
+        if fontFolders != fontDirs { updateFonts() }
         restorePreviews(for: previewFile)
         live.currentText = { [weak self] in self?.text ?? "" }
         live.replaceText = { [weak self] new in
@@ -244,8 +252,14 @@ final class Workspace: EditorLanguage {
         updateFonts()
     }
 
+    /// Font folders are looked up from the previewed file's folder up, so a chapter's own fonts count too.
+    private var fontFolders: [URL] {
+        let folder = previewFile.map { $0.deletingLastPathComponent() }.flatMap { isInSpace($0) ? $0 : nil } ?? root
+        return FontLibrary.shared.directories(for: folder)
+    }
+
     private func updateFonts() {
-        fontDirs = FontLibrary.shared.directories(for: root)
+        fontDirs = fontFolders
         htmlPreview.setFontDirectories(fontDirs)
         builtin.setFontPaths(fontDirs) { [weak self] in self?.scheduleCompile(delay: 0) }
         if let watcher, watcher.fontPaths != fontDirs { restartWatcher() }
@@ -304,10 +318,13 @@ final class Workspace: EditorLanguage {
         guard url != previewFile else { return }
         capturePreviewState()
         previewFile = url
+        followPreviewMode()
+        if fontFolders != fontDirs { updateFonts() }
         document = nil
         html = nil
         svgPages = nil
         markdownHTML = nil
+        preview.clear()
         htmlPreview.clear()
         svgPreview.clear()
         markdownPreview.clear()
@@ -367,22 +384,35 @@ final class Workspace: EditorLanguage {
                   let shown = preview.position() else { return }
             position.page = shown.page
             position.zoom = shown.zoom
+            position.pan = shown.pan
         case .svg:
             guard svgPages != nil, svgPreview.pendingRestore == nil else { return }
             let shown = svgPreview.position()
             position.page = shown.page
             position.zoom = shown.zoom
+            position.pan = shown.pan
         case .html:
             guard html != nil, htmlPreview.pendingRestore == nil else { return }
             let shown = htmlPreview.position()
             if htmlPreview.paged {
                 position.page = shown.page
                 position.zoom = shown.zoom
+                position.pan = shown.pan
             } else {
                 position.flow = shown.flow
             }
         }
         positions[main] = position
+    }
+
+    /// Takes on the format the previewed file was last shown in.
+    private func followPreviewMode() {
+        guard let file = previewFile, !previewIsMarkdown else { return }
+        let mode = positions[file]?.mode ?? UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf
+        guard mode != renderMode else { return }
+        isFollowingFile = true
+        renderMode = mode
+        isFollowingFile = false
     }
 
     /// Every preview jumps to where `url` was left once its output arrives; new files start at the top.

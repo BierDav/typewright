@@ -6,7 +6,18 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		7A51C0DE000000000000000A /* TypewrightQuickLook.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 7A51C0DE0000000000000003 /* TypewrightQuickLook.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
+		7A51C0DE000000000000000C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E315D26DD501BA71C30DA72D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7A51C0DE0000000000000006;
+			remoteInfo = TypewrightQuickLook;
+		};
 		34158A06F3A33E7FFB7E739D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = E315D26DD501BA71C30DA72D /* Project object */;
@@ -16,13 +27,40 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		7A51C0DE000000000000000B /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				7A51C0DE000000000000000A /* TypewrightQuickLook.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		7A51C0DE0000000000000004 /* QuickLook-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "QuickLook-Info.plist"; sourceTree = "<group>"; };
+		7A51C0DE0000000000000005 /* QuickLook.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = QuickLook.entitlements; sourceTree = "<group>"; };
+		7A51C0DE0000000000000003 /* TypewrightQuickLook.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TypewrightQuickLook.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		227707B478D27BE501FF477E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		BECB78EE3C5259D2EF854DDC /* Typewright.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Typewright.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BF897B668001A6D923A0B4BE /* TypewrightTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TypewrightTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		7A51C0DE0000000000000001 /* QuickLook */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = QuickLook;
+			sourceTree = "<group>";
+		};
+		7A51C0DE0000000000000002 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
 		4E27D7FE34B5A77EE1B190B4 /* TypewrightTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = TypewrightTests;
@@ -39,6 +77,7 @@
 		0168157733EF99DACFB9EAC0 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				7A51C0DE0000000000000002 /* Shared */,
 				89F3637696C6984CDA902007 /* Typewright */,
 			);
 			path = Sources;
@@ -57,6 +96,7 @@
 			children = (
 				BECB78EE3C5259D2EF854DDC /* Typewright.app */,
 				BF897B668001A6D923A0B4BE /* TypewrightTests.xctest */,
+				7A51C0DE0000000000000003 /* TypewrightQuickLook.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -66,6 +106,7 @@
 			children = (
 				FAEF62B5EF0552CF8797FB6C /* Resources */,
 				0168157733EF99DACFB9EAC0 /* Sources */,
+				7A51C0DE0000000000000001 /* QuickLook */,
 				190484FE509A4B284436C18C /* Tests */,
 				21E8D16412FD906288B2A647 /* Products */,
 			);
@@ -75,6 +116,8 @@
 			isa = PBXGroup;
 			children = (
 				227707B478D27BE501FF477E /* Info.plist */,
+				7A51C0DE0000000000000004 /* QuickLook-Info.plist */,
+				7A51C0DE0000000000000005 /* QuickLook.entitlements */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -82,6 +125,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		7A51C0DE0000000000000006 /* TypewrightQuickLook */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7A51C0DE000000000000000E /* Build configuration list for PBXNativeTarget "TypewrightQuickLook" */;
+			buildPhases = (
+				7A51C0DE0000000000000007 /* Build Typst Bridge */,
+				7A51C0DE0000000000000008 /* Sources */,
+				7A51C0DE0000000000000009 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				7A51C0DE0000000000000001 /* QuickLook */,
+				7A51C0DE0000000000000002 /* Shared */,
+			);
+			name = TypewrightQuickLook;
+			packageProductDependencies = (
+			);
+			productName = TypewrightQuickLook;
+			productReference = 7A51C0DE0000000000000003 /* TypewrightQuickLook.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		942473ABF20DD7CEAD205C09 /* TypewrightTests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 15FD7A88AD9D8657FE058571 /* Build configuration list for PBXNativeTarget "TypewrightTests" */;
@@ -108,16 +174,19 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 2574141B8C47CA52C04203C5 /* Build configuration list for PBXNativeTarget "Typewright" */;
 			buildPhases = (
-				7B3C1E2A9F4D5A6B8C0D1E2F /* Build Rust Bridges */,
+				7B3C1E2A9F4D5A6B8C0D1E2F /* Build Iroh Bridge */,
 				5C2D8E1F4A7B9C0D1E2F3A4B /* Build Kotlin Core */,
 				6627C163E29BE60581C113D2 /* Sources */,
 				EEFFD40D6BA5C30BFBBE3F78 /* Resources */,
+				7A51C0DE000000000000000B /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				7A51C0DE000000000000000D /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
+				7A51C0DE0000000000000002 /* Shared */,
 				89F3637696C6984CDA902007 /* Typewright */,
 			);
 			name = Typewright;
@@ -139,6 +208,9 @@
 					CA228CAE68E3593BE200ABC5 = {
 						ProvisioningStyle = Manual;
 					};
+					7A51C0DE0000000000000006 = {
+						ProvisioningStyle = Manual;
+					};
 				};
 			};
 			buildConfigurationList = 9A9E949BEE7543470C127659 /* Build configuration list for PBXProject "Typewright" */;
@@ -157,11 +229,19 @@
 			targets = (
 				CA228CAE68E3593BE200ABC5 /* Typewright */,
 				942473ABF20DD7CEAD205C09 /* TypewrightTests */,
+				7A51C0DE0000000000000006 /* TypewrightQuickLook */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		7A51C0DE0000000000000009 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BAF321F6239287A46F290C22 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -179,6 +259,22 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		7A51C0DE0000000000000007 /* Build Typst Bridge */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Build Typst Bridge";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/libtypst_bridge.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/../scripts/build-rust-bridge.sh\" typstBridge typst_bridge\n";
+		};
 		5C2D8E1F4A7B9C0D1E2F3A4B /* Build Kotlin Core */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -195,7 +291,7 @@
 			shellPath = /bin/sh;
 			shellScript = "\"$SRCROOT/../scripts/build-core.sh\"\n";
 		};
-		7B3C1E2A9F4D5A6B8C0D1E2F /* Build Rust Bridges */ = {
+		7B3C1E2A9F4D5A6B8C0D1E2F /* Build Iroh Bridge */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -203,18 +299,24 @@
 			);
 			inputPaths = (
 			);
-			name = "Build Rust Bridges";
+			name = "Build Iroh Bridge";
 			outputPaths = (
-				"$(BUILT_PRODUCTS_DIR)/libtypst_bridge.a",
 				"$(BUILT_PRODUCTS_DIR)/libiroh_bridge.a",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"$SRCROOT/../scripts/build-rust-bridge.sh\" typstBridge typst_bridge\n\"$SRCROOT/../scripts/build-rust-bridge.sh\" irohBridge iroh_bridge\n";
+			shellScript = "# The typst bridge is built by the Quick Look extension, which builds first.\n\"$SRCROOT/../scripts/build-rust-bridge.sh\" irohBridge iroh_bridge\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		7A51C0DE0000000000000008 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3771755932E6E5D1ACCC2F0A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -232,6 +334,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		7A51C0DE000000000000000D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7A51C0DE0000000000000006 /* TypewrightQuickLook */;
+			targetProxy = 7A51C0DE000000000000000C /* PBXContainerItemProxy */;
+		};
 		474C7B5554EDC6D94FD2908F /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = CA228CAE68E3593BE200ABC5 /* Typewright */;
@@ -240,6 +347,56 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		7A51C0DE000000000000000F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Resources/QuickLook.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = G5K3D2J5Y9;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				INFOPLIST_FILE = "Resources/QuickLook-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
+				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.Typewright.QuickLook;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include";
+			};
+			name = Debug;
+		};
+		7A51C0DE0000000000000010 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Resources/QuickLook.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = G5K3D2J5Y9;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				INFOPLIST_FILE = "Resources/QuickLook-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
+				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.Typewright.QuickLook;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include";
+			};
+			name = Release;
+		};
 		44B1A4DD2BFB0D8341A8C589 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -456,6 +613,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		7A51C0DE000000000000000E /* Build configuration list for PBXNativeTarget "TypewrightQuickLook" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7A51C0DE000000000000000F /* Debug */,
+				7A51C0DE0000000000000010 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		15FD7A88AD9D8657FE058571 /* Build configuration list for PBXNativeTarget "TypewrightTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

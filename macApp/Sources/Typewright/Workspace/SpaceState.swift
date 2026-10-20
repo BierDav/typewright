@@ -23,6 +23,28 @@ struct DocumentPosition: Codable, Equatable {
     var zoom: Double?
     /// Scroll (0 = top, 1 = bottom) of reflowing HTML and Markdown, which have no pages.
     var flow = 0.0
+    /// Horizontal scroll (0 = left edge, 1 = right edge) of pages zoomed wider than the view.
+    var pan = 0.0
+    /// The format the file was last previewed in; nil uses the default.
+    var mode: RenderMode?
+
+    init(page: Double = 0, zoom: Double? = nil, flow: Double = 0, pan: Double = 0, mode: RenderMode? = nil) {
+        self.page = page
+        self.zoom = zoom
+        self.flow = flow
+        self.pan = pan
+        self.mode = mode
+    }
+
+    // Field by field, so positions saved before a key existed still load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        page = try c.decodeIfPresent(Double.self, forKey: .page) ?? 0
+        zoom = try c.decodeIfPresent(Double.self, forKey: .zoom)
+        flow = try c.decodeIfPresent(Double.self, forKey: .flow) ?? 0
+        pan = try c.decodeIfPresent(Double.self, forKey: .pan) ?? 0
+        mode = (try? c.decodeIfPresent(String.self, forKey: .mode)).flatMap(RenderMode.init)
+    }
 }
 
 /// UI state of one space; file keys are paths relative to the space folder.

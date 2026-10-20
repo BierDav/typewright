@@ -21,6 +21,9 @@ mkdir -p "$root/dist"
 app="$dd/Build/Products/Release/Typewright.app"
 zip="$root/dist/Typewright-$version.zip"
 rm -f "$zip"
+# Extensions are signed on their own first: they need their sandbox entitlements, which --deep would drop.
+appex="$app/Contents/PlugIns/TypewrightQuickLook.appex"
+appex_entitlements="$root/macApp/Resources/QuickLook.entitlements"
 
 if [ -n "${TYPEWRIGHT_SIGN_IDENTITY:-}" ] && [ -n "${TYPEWRIGHT_PROVISIONING_PROFILE:-}" ]; then
   team=$(security cms -D -i "$TYPEWRIGHT_PROVISIONING_PROFILE" | plutil -extract TeamIdentifier.0 raw -)
@@ -34,6 +37,8 @@ if [ -n "${TYPEWRIGHT_SIGN_IDENTITY:-}" ] && [ -n "${TYPEWRIGHT_PROVISIONING_PRO
     -c "Add :com.apple.developer.team-identifier string $team" "$entitlements"
   cp "$TYPEWRIGHT_PROVISIONING_PROFILE" "$app/Contents/embedded.provisionprofile"
   # A dedicated keychain (TYPEWRIGHT_SIGN_KEYCHAIN) avoids the login keychain's access prompts.
+  codesign --force --options runtime --timestamp --entitlements "$appex_entitlements" \
+    ${TYPEWRIGHT_SIGN_KEYCHAIN:+--keychain "$TYPEWRIGHT_SIGN_KEYCHAIN"} --sign "$TYPEWRIGHT_SIGN_IDENTITY" "$appex"
   codesign --force --options runtime --timestamp --entitlements "$entitlements" \
     ${TYPEWRIGHT_SIGN_KEYCHAIN:+--keychain "$TYPEWRIGHT_SIGN_KEYCHAIN"} --sign "$TYPEWRIGHT_SIGN_IDENTITY" "$app"
   if [ -n "${TYPEWRIGHT_NOTARY_APPLE_ID:-}" ] || [ -n "${TYPEWRIGHT_NOTARY_PROFILE:-}" ]; then
@@ -54,7 +59,8 @@ if [ -n "${TYPEWRIGHT_SIGN_IDENTITY:-}" ] && [ -n "${TYPEWRIGHT_PROVISIONING_PRO
     || { echo "error: associated-domains entitlement missing" >&2; exit 1; }
 else
   echo "warning: ad-hoc signing; passkeys and sync won't work in this build" >&2
-  codesign --force --deep --sign - --options runtime "$app"
+  codesign --force --sign - --options runtime --entitlements "$appex_entitlements" "$appex"
+  codesign --force --sign - --options runtime "$app"
 fi
 
 ditto -c -k --keepParent "$app" "$zip"

@@ -55,6 +55,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     /// Opens find, with the replace field when true.
     var onFind: ((Bool) -> Void)?
     var onFindStep: ((Int) -> Void)?
+    /// The scroll bar's diagnostic ticks, which want the arrow over the text's edge.
+    weak var markers: DiagnosticMarkers?
     // MARK: Auto-closing
 
     /// Openers and the closers typed along with them; empty turns it off.
@@ -521,6 +523,29 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     /// Space kerned in before a color literal for its swatch.
     static func swatchGap(for font: NSFont?) -> CGFloat { swatchSize(for: font) + 5 }
 
+    // MARK: Zooming
+
+    static let fontSizes = 9.0...32.0
+    private var zoomDelta: CGFloat = 0
+
+    /// ⌘-scroll changes the editor font size, like ⌘+ and ⌘- in browsers.
+    override func scrollWheel(with event: NSEvent) {
+        guard event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command else {
+            return super.scrollWheel(with: event)
+        }
+        guard event.momentumPhase.isEmpty else { return }
+        if event.phase == .began { zoomDelta = 0 }
+        // Trackpads report points, wheels report lines.
+        zoomDelta += event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 12 : event.scrollingDeltaY
+        let steps = zoomDelta.rounded(.towardZero)
+        guard steps != 0 else { return }
+        zoomDelta -= steps
+        let defaults = UserDefaults.standard
+        let size = defaults.object(forKey: "editorFontSize") as? Double ?? 14
+        let next = min(max(size + Double(steps), Self.fontSizes.lowerBound), Self.fontSizes.upperBound)
+        if next != size { defaults.set(next, forKey: "editorFontSize") }
+    }
+
     // NSTextView sets the I-beam on every move, even under floating controls.
     override func mouseMoved(with event: NSEvent) {
         guideHovered = isOnGuide(convert(event.locationInWindow, from: nil), flags: event.modifierFlags)
@@ -603,6 +628,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     private func cursor(for event: NSEvent) -> NSCursor? {
         if let cursor = CursorArea.cursor(for: event) { return cursor }
+        if markers?.hasMarker(atWindowPoint: event.locationInWindow) == true { return .arrow }
         if isOnGuide(convert(event.locationInWindow, from: nil), flags: event.modifierFlags) { return .resizeLeftRight }
         return swatch(at: convert(event.locationInWindow, from: nil)) != nil ? .pointingHand : nil
     }
@@ -1034,6 +1060,11 @@ struct CodeEditor: NSViewRepresentable {
         scroll.verticalRulerView = ruler
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = true
+        let markers = DiagnosticMarkers(textView: tv)
+        markers.isHidden = true
+        scroll.addSubview(markers)
+        tv.markers = markers
+        context.coordinator.markers = markers
 
         context.coordinator.textView = tv
         context.coordinator.ruler = ruler
@@ -1110,9 +1141,12 @@ struct CodeEditor: NSViewRepresentable {
         let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         if c.documentID != documentID || c.font != font {
             let isNewDocument = c.documentID != documentID
+            // Zooming keeps the line at the top in place.
+            let anchor = isNewDocument || c.font == nil ? nil : c.topCharacter()
             c.documentID = documentID
             c.font = font
             tv.font = font
+            if let anchor { DispatchQueue.main.async { c.scroll(toCharacter: anchor) } }
             if isNewDocument {
                 c.dropRename()
                 c.completion?.hide()
@@ -1138,7 +1172,14 @@ struct CodeEditor: NSViewRepresentable {
 
         if c.diagnostics != diagnostics {
             c.diagnostics = diagnostics
-            c.hover?.diagnostics = markDiagnostics(in: tv)
+            let marked = markDiagnostics(in: tv)
+            c.hover?.diagnostics = marked
+            c.markers?.diagnostics = marked
+            c.markers?.isHidden = marked.isEmpty
+        }
+        if let markers = c.markers {
+            markers.language = highlights ? "typ" : markdown ? "md" : "text"
+            markers.topInset = topInset
         }
 
         if let reveal, c.reveal != reveal {
@@ -1221,6 +1262,7 @@ struct CodeEditor: NSViewRepresentable {
         private static weak var colorOwner: Coordinator?
         weak var textView: NSTextView?
         weak var ruler: NSRulerView?
+        weak var markers: DiagnosticMarkers?
         var completion: CompletionController?
         var hover: HoverController?
         weak var language: (any EditorLanguage)?
@@ -1279,13 +1321,29 @@ struct CodeEditor: NSViewRepresentable {
         }
 
         func report() {
-            guard !isRestoring, let tv = textView, let lm = tv.layoutManager, let container = tv.textContainer,
-                  let scroll = tv.enclosingScrollView else { return }
+            guard !isRestoring, let tv = textView, let top = topCharacter() else { return }
             let selection = tv.selectedRange()
+            onStateChange(EditorState(selection: selection.location, length: selection.length, top: top))
+        }
+
+        /// The first character visible below the top inset.
+        func topCharacter() -> Int? {
+            guard let tv = textView, let lm = tv.layoutManager, let container = tv.textContainer,
+                  let scroll = tv.enclosingScrollView else { return nil }
             let y = scroll.contentView.bounds.minY + scroll.contentInsets.top - tv.textContainerOrigin.y
             let glyph = lm.glyphIndex(for: NSPoint(x: 0, y: max(0, y)), in: container)
-            let top = (tv.string as NSString).length == 0 ? 0 : lm.characterIndexForGlyph(at: glyph)
-            onStateChange(EditorState(selection: selection.location, length: selection.length, top: top))
+            return (tv.string as NSString).length == 0 ? 0 : lm.characterIndexForGlyph(at: glyph)
+        }
+
+        func scroll(toCharacter index: Int) {
+            guard let tv = textView, let lm = tv.layoutManager, let scroll = tv.enclosingScrollView else { return }
+            let length = (tv.string as NSString).length
+            guard length > 0, index > 0 else { return }
+            let rect = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: min(index, length - 1)), effectiveRange: nil)
+            let clip = scroll.contentView
+            let y = rect.minY + tv.textContainerOrigin.y - scroll.contentInsets.top
+            clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: NSPoint(x: 0, y: y), size: clip.bounds.size)).origin)
+            scroll.reflectScrolledClipView(clip)
         }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {

@@ -297,7 +297,7 @@ private struct SpacesPane: View {
                         .padding(.horizontal, 10)
                         .frame(height: 34)
                 }
-                OpenSpaceRow { Opener.shared.openPanel(in: state) }
+                LinkFolderRow { Opener.shared.openPanel(in: state) }
                     .offset(y: externalDrop == nil ? 0 : Self.pitch)
                 if !sync.elsewhere.isEmpty {
                     Text("On Other Devices")
@@ -610,7 +610,7 @@ private struct SpaceRow: View {
 }
 
 /// Like Zen's "New Tab" row: a quiet plus at the end of the list.
-private struct OpenSpaceRow: View {
+private struct LinkFolderRow: View {
     let action: () -> Void
     @State private var hovered = false
 
@@ -618,7 +618,7 @@ private struct OpenSpaceRow: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: "plus").frame(width: 16)
-                Text("Open Space…")
+                Text("Link Folder as Space…")
                 Spacer(minLength: 0)
             }
             .font(.system(size: 13))
@@ -631,7 +631,7 @@ private struct OpenSpaceRow: View {
         .buttonStyle(ZenRowPressStyle())
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
-        .help("Open a folder as a space")
+        .help("Link a folder as a space")
     }
 }
 

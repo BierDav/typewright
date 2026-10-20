@@ -39,8 +39,10 @@ final class LineNumberRuler: NSRulerView {
         let chars = lm.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
         let caretLine = string.lineRange(for: NSRange(location: min(tv.selectedRange().location, string.length), length: 0))
 
+        // The view may start inside a wrapped line; counting up to its middle would shift every number.
+        let start = string.lineRange(for: NSRange(location: min(chars.location, string.length), length: 0)).location
         var line = 1
-        string.enumerateSubstrings(in: NSRange(location: 0, length: chars.location),
+        string.enumerateSubstrings(in: NSRange(location: 0, length: start),
                                    options: [.byLines, .substringNotRequired]) { _, _, _, _ in line += 1 }
 
         func draw(_ n: Int, y: CGFloat, height: CGFloat, highlighted: Bool) {
@@ -51,7 +53,7 @@ final class LineNumberRuler: NSRulerView {
                        withAttributes: highlighted ? current : attrs)
         }
 
-        var index = chars.location
+        var index = start
         while index < NSMaxRange(chars) {
             let lineRange = string.lineRange(for: NSRange(location: index, length: 0))
             let rect = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: lineRange.location), effectiveRange: nil)

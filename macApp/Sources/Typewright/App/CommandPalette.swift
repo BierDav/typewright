@@ -411,7 +411,7 @@ struct CommandPalette: View {
         items += fontItems
         items += settingsItems
         items += [
-            PaletteItem(id: "spaces.open", title: "Open Space…", icon: "folder.badge.plus", shortcut: "⌘O", section: "Spaces",
+            PaletteItem(id: "spaces.open", title: "Link Folder as Space…", icon: "folder.badge.plus", shortcut: "⌘O", section: "Spaces",
                         action: .run { Opener.shared.openPanel(in: state) }),
             PaletteItem(id: "spaces.search", title: "Search All Spaces", icon: "magnifyingglass", section: "Spaces",
                         action: .run { DispatchQueue.main.async { state.overlay = .search(allSpaces: true) } }),

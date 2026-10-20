@@ -25,3 +25,52 @@ object PackageSpecs {
         }
     }
 }
+
+/** A package's name and version from its `typst.toml`. */
+data class PackageManifest(val name: String, val version: String)
+
+/** Local packages cloned from GitHub. */
+object PackageRepos {
+    /**
+     * The clone URL for `owner/repo`, a github.com link (also to a tree or `.git`), or any other git URL as is;
+     * null when it's none of these.
+     */
+    fun cloneURL(input: String): String? {
+        val text = input.trim().removeSuffix("/")
+        if (text.isEmpty()) return null
+        val short = Regex("^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$").find(text)
+        if (short != null) return "https://github.com/${short.groupValues[1]}/${short.groupValues[2].removeSuffix(".git")}.git"
+        val github = Regex("^(?:https?://)?(?:www\\.)?github\\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)").find(text)
+        if (github != null) return "https://github.com/${github.groupValues[1]}/${github.groupValues[2].removeSuffix(".git")}.git"
+        if (text.startsWith("git@") || Regex("^[a-z][a-z0-9+.-]*://").containsMatchIn(text)) return text
+        return null
+    }
+
+    /** The repository's name from its clone URL, e.g. for a namespace made of the whole repository. */
+    fun repoName(url: String): String =
+        url.removeSuffix("/").substringAfterLast('/').substringAfterLast(':').removeSuffix(".git")
+
+    /** `name` and `version` of the `[package]` table; null when either is missing. */
+    fun manifest(toml: String): PackageManifest? {
+        var inPackage = false
+        var name: String? = null
+        var version: String? = null
+        for (raw in toml.lineSequence()) {
+            val line = raw.substringBefore('#').trim()
+            if (line.startsWith("[")) {
+                inPackage = line == "[package]"
+                continue
+            }
+            if (!inPackage) continue
+            val key = line.substringBefore('=').trim()
+            val value = line.substringAfter('=', "").trim().removeSurrounding("\"").removeSurrounding("'")
+            when (key) {
+                "name" -> name = value
+                "version" -> version = value
+            }
+        }
+        val validName = name?.takeIf { Regex("^[A-Za-z0-9_-]+$").matches(it) } ?: return null
+        val validVersion = version?.takeIf { Regex("^\\d+\\.\\d+\\.\\d+$").matches(it) } ?: return null
+        return PackageManifest(validName, validVersion)
+    }
+}

@@ -9,7 +9,7 @@ final class FontLibrary {
     /// Posted, debounced, whenever the folders or their fonts change.
     static let didChange = Notification.Name("FontLibraryDidChange")
 
-    /// Folders relative to each space's root.
+    /// Folders searched in a space's root and every folder above it, or absolute ones.
     var spacePaths: [String] {
         didSet { UserDefaults.standard.set(spacePaths, forKey: "fontSpacePaths"); changed() }
     }
@@ -24,9 +24,8 @@ final class FontLibrary {
     private(set) var lastError: String?
 
     /// Fonts are used straight from here, never installed into the system.
-    let googleDirectory = URL.applicationSupportDirectory
-        .appending(path: "Typewright/fonts/google", directoryHint: .isDirectory)
-    private let catalogFile = URL.applicationSupportDirectory.appending(path: "Typewright/fonts/google-catalog.json")
+    let googleDirectory = FontSearch.googleDirectory
+    private let catalogFile = FontSearch.support.appending(path: "fonts/google-catalog.json")
     @ObservationIgnored private var notifyTask: Task<Void, Never>?
     @ObservationIgnored private var isLoadingCatalog = false
 
@@ -34,29 +33,21 @@ final class FontLibrary {
         spacePaths = UserDefaults.standard.stringArray(forKey: "fontSpacePaths") ?? ["./fonts"]
         machinePaths = UserDefaults.standard.stringArray(forKey: "fontMachinePaths") ?? []
         refreshInstalled()
+        FontSearch.save(settings)
     }
 
-    /// Existing font folders for a space, in search order: its own, the machine's, then Google Fonts.
-    func directories(for root: URL) -> [URL] {
-        let space = spacePaths.map { path -> URL in
-            let expanded = (path as NSString).expandingTildeInPath
-            return expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : root.appending(path: path)
-        }
-        let machine = machinePaths.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
-        var seen = Set<String>()
-        return (space + machine + [googleDirectory])
-            .map(\.standardizedFileURL)
-            .filter { url in
-                var isDir: ObjCBool = false
-                return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
-                    && seen.insert(url.path).inserted
-            }
+    private var settings: FontSearch.Settings { FontSearch.Settings(space: spacePaths, machine: machinePaths) }
+
+    /// Existing font folders for `folder` (a space's root or a file's folder) in search order:
+    /// the space paths there and in every folder above, the machine's, then Google Fonts.
+    func directories(for folder: URL) -> [URL] {
+        FontSearch.directories(settings, from: folder)
     }
 
-    /// The space font folders as configured, whether they exist yet or not.
+    /// The space font folders in the root as configured, whether they exist yet or not.
     func spaceFolders(for root: URL) -> [URL] {
         spacePaths.map { path in
-            let expanded = (path as NSString).expandingTildeInPath
+            let expanded = FontSearch.expand(path)
             return (expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : root.appending(path: path)).standardizedFileURL
         }
     }
@@ -73,6 +64,7 @@ final class FontLibrary {
         notifyTask = Task {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
+            FontSearch.save(settings)
             NotificationCenter.default.post(name: Self.didChange, object: nil)
         }
     }

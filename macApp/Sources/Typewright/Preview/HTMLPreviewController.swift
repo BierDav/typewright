@@ -55,6 +55,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     @ObservationIgnored private let scrollReporter = ScrollReporter()
     @ObservationIgnored private var scrollFraction = 0.0
     @ObservationIgnored private var pagePosition = 0.0
+    @ObservationIgnored private var panFraction = 0.0
     /// Scroll and zoom to apply once the next document is on screen.
     @ObservationIgnored var pendingRestore: DocumentPosition? {
         didSet { if pendingRestore != nil { restoreIfShown() } }
@@ -62,7 +63,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
 
     /// Page and zoom only mean something with A4 pages; `flow` is the reflowing scroll.
     func position() -> DocumentPosition {
-        DocumentPosition(page: pagePosition, zoom: pageScale.map(Double.init), flow: scrollFraction)
+        DocumentPosition(page: pagePosition, zoom: pageScale.map(Double.init), flow: scrollFraction, pan: panFraction)
     }
 
     /// Applies the pending state when the document it's meant for is already shown.
@@ -75,8 +76,9 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             pagePosition = state.page
         }
         scrollFraction = state.flow
+        panFraction = state.pan
         view.callAsyncJavaScript(ScrollReporter.restoreScript,
-                                 arguments: ["page": paged ? state.page : NSNull(), "fraction": state.flow],
+                                 arguments: ["page": paged ? state.page : NSNull(), "fraction": state.flow, "pan": state.pan],
                                  in: nil, in: .page)
     }
     @ObservationIgnored private var pending: String?
@@ -94,8 +96,9 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
         scrollReporter.install(in: config.userContentController)
         view = WKWebView(frame: .zero, configuration: config)
         super.init()
-        scrollReporter.onScroll = { [weak self] fraction, page in
+        scrollReporter.onScroll = { [weak self] fraction, page, pan in
             self?.scrollFraction = fraction
+            self?.panFraction = pan
             if let page { self?.pagePosition = page }
         }
         // Like the PDF preview, A4 sheets float on the pane's material.
@@ -214,7 +217,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
 
     private func applyTextSize() {
         guard isReady else { return }
-        view.evaluateJavaScript("document.documentElement.style.setProperty('--tw-text', '\(textSize)px')")
+        view.callAsyncJavaScript("tw.setTextSize(px)", arguments: ["px": textSize], in: nil, in: .page)
     }
 
     /// Forcing light appearance makes `prefers-color-scheme` light inside the page.
@@ -259,7 +262,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     // MARK: - Page
 
     private var shell: String {
-        let style = isMarkdown ? Self.markdownStyle + MarkdownRenderer.codeCSS : Self.style
+        let style = isMarkdown ? MarkdownRenderer.style + MarkdownRenderer.codeCSS : Self.style
         return "<!DOCTYPE html><html class=\"\(paged ? "tw-paged" : "")\" style=\"--tw-text: \(textSize)px\">"
             + "<head><meta charset=\"utf-8\"><style>\(style)</style><script>\(Self.script)\ntw.pages = \(paged);"
             + "tw.markdown = \(isMarkdown);</script></head><body class=\"\(isMarkdown ? "markdown-body" : "")\"></body></html>"
@@ -285,56 +288,28 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
         @media (prefers-color-scheme: dark) { svg { filter: invert(1) hue-rotate(180deg); } }
         """
 
-    /// After GitHub's Markdown style.
-    private static let markdownStyle = """
-        :root { color-scheme: light dark; --fg: #1f2328; --muted: #59636e; --border: #d1d9e0; --soft: #f6f8fa;
-          --link: #0969da; --note: #0969da; --tip: #1a7f37; --important: #8250df; --warning: #9a6700; --caution: #d1242f; }
-        @media (prefers-color-scheme: dark) {
-          :root { --fg: #f0f6fc; --muted: #9198a1; --border: #3d444d; --soft: #151b23; --link: #4493f8;
-            --note: #4493f8; --tip: #3fb950; --important: #ab7df8; --warning: #d29922; --caution: #f85149; }
-        }
-        html { background: Canvas; }
-        body { margin: 0; padding: 24px 32px 88px; color: var(--fg); word-wrap: break-word;
-          font: var(--tw-text, 16px)/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
-        body > * { max-width: 980px; margin-left: auto; margin-right: auto; }
-        body > :first-child { margin-top: 0 !important; }
-        a { color: var(--link); text-decoration: none; } a:hover { text-decoration: underline; }
-        p, blockquote, ul, ol, dl, table, pre, details, .markdown-alert, .math-display { margin-top: 0; margin-bottom: 16px; }
-        h1, h2, h3, h4, h5, h6 { margin: 24px 0 16px; font-weight: 600; line-height: 1.25; }
-        h1 { font-size: 2em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
-        h2 { font-size: 1.5em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
-        h3 { font-size: 1.25em; } h4 { font-size: 1em; } h5 { font-size: .875em; } h6 { font-size: .85em; color: var(--muted); }
-        ul, ol { padding-left: 2em; } li + li { margin-top: .25em; } li > p { margin-top: 16px; }
-        ul.contains-task-list { padding-left: 1.2em; } li.task-list-item { list-style: none; }
-        li.task-list-item input { margin: 0 .3em .25em -1.4em; vertical-align: middle; }
-        blockquote { margin-left: 0; padding: 0 1em; color: var(--muted); border-left: .25em solid var(--border); }
-        hr { height: .25em; padding: 0; margin: 24px 0; background: var(--border); border: 0; }
-        code, kbd, pre, samp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 85%; }
-        :not(pre) > code { padding: .2em .4em; border-radius: 6px; background: color-mix(in srgb, var(--muted) 20%, transparent); }
-        pre { padding: 16px; overflow: auto; line-height: 1.45; border-radius: 6px; background: var(--soft); }
-        pre code { font-size: 100%; background: transparent; padding: 0; }
-        kbd { padding: 3px 5px; font-size: 11px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 6px; background: var(--soft); }
-        table { border-spacing: 0; border-collapse: collapse; display: block; width: max-content; max-width: 100%; overflow: auto; }
-        th, td { padding: 6px 13px; border: 1px solid var(--border); } th { font-weight: 600; }
-        tr:nth-child(2n) { background: var(--soft); }
-        img { max-width: 100%; box-sizing: content-box; }
-        del { color: var(--muted); }
-        .footnotes { font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 8px; }
-        .math-display { overflow-x: auto; text-align: center; } math[display="block"] { font-size: 1.15em; }
-        pre.mermaid { background: transparent; text-align: center; }
-        details summary { cursor: pointer; }
-        .markdown-alert { padding: 8px 16px; border-left: .25em solid var(--alert); }
-        .markdown-alert > :last-child { margin-bottom: 0; }
-        .markdown-alert-title { font-weight: 500; color: var(--alert); }
-        .markdown-alert-note { --alert: var(--note); } .markdown-alert-tip { --alert: var(--tip); }
-        .markdown-alert-important { --alert: var(--important); } .markdown-alert-warning { --alert: var(--warning); }
-        .markdown-alert-caution { --alert: var(--caution); }
-        """
-
     /// Keeps the rendered top-level blocks and swaps only the range that differs from the new output.
     private static let script = """
         window.tw = {
           nodes: [], sources: [], head: [], headSource: null, pages: false, markdown: false, wrap: null, mermaid: null,
+
+          // Eases the reflowing text to its new size, keeping the same spot of the document in view.
+          setTextSize(px) {
+            const root = document.documentElement;
+            const start = parseFloat(root.style.getPropertyValue('--tw-text')) || px;
+            const max = () => Math.max(root.scrollHeight - innerHeight, 0);
+            const fraction = max() > 0 ? scrollY / max() : 0;
+            const began = performance.now();
+            cancelAnimationFrame(this.textFrame);
+            const step = now => {
+              const t = Math.min((now - began) / 200, 1);
+              root.style.setProperty('--tw-text', (start + (px - start) * (1 - Math.pow(1 - t, 3))) + 'px');
+              scrollTo(0, fraction * max());
+              if (t < 1) this.textFrame = requestAnimationFrame(step);
+              else if (window.twReport) twReport();
+            };
+            this.textFrame = requestAnimationFrame(step);
+          },
 
           setFonts(css) {
             let style = document.getElementById('tw-fonts');

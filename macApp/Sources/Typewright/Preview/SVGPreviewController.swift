@@ -31,13 +31,14 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
     @ObservationIgnored private var isReady = false
     @ObservationIgnored private let scrollReporter = ScrollReporter()
     @ObservationIgnored private var pagePosition = 0.0
+    @ObservationIgnored private var panFraction = 0.0
     /// Scroll and zoom to apply once the next document is on screen.
     @ObservationIgnored var pendingRestore: DocumentPosition? {
         didSet { if pendingRestore != nil { restoreIfShown() } }
     }
 
     func position() -> DocumentPosition {
-        DocumentPosition(page: pagePosition, zoom: autoScales ? nil : Double(scale))
+        DocumentPosition(page: pagePosition, zoom: autoScales ? nil : Double(scale), pan: panFraction)
     }
 
     /// Applies the pending state when the pages it's meant for are already shown.
@@ -51,8 +52,10 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
             autoScales = true
         }
         pagePosition = state.page
+        panFraction = state.pan
         view.callAsyncJavaScript("tw.setZoom(auto, scale, false); " + ScrollReporter.restoreScript,
-                                 arguments: ["auto": autoScales, "scale": scale, "page": state.page, "fraction": 0],
+                                 arguments: ["auto": autoScales, "scale": scale, "page": state.page, "fraction": 0,
+                                             "pan": state.pan],
                                  in: nil, in: .page)
     }
     @ObservationIgnored private var pending: [String]?
@@ -66,7 +69,10 @@ final class SVGPreviewController: NSObject, WKNavigationDelegate {
         scrollReporter.install(in: config.userContentController)
         view = WKWebView(frame: .zero, configuration: config)
         super.init()
-        scrollReporter.onScroll = { [weak self] _, page in if let page { self?.pagePosition = page } }
+        scrollReporter.onScroll = { [weak self] _, page, pan in
+            if let page { self?.pagePosition = page }
+            self?.panFraction = pan
+        }
         view.navigationDelegate = self
         // Pages float on the pane's material, like the PDF preview.
         view.setValue(false, forKey: "drawsBackground")

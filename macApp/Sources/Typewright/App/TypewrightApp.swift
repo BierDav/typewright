@@ -49,7 +49,7 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Window") { Opener.shared.newWindow() }
                 .keyboardShortcut("n")
-            Button("Open Space…") { Opener.shared.openPanel() }
+            Button("Link Folder as Space…") { Opener.shared.openPanel() }
                 .keyboardShortcut("o")
             Menu("Spaces") {
                 ForEach(SpaceList.all, id: \.self) { url in

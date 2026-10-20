@@ -157,8 +157,8 @@ final class Opener {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        panel.prompt = "Open"
-        panel.message = "Choose a folder to open as a space"
+        panel.prompt = "Link"
+        panel.message = "Choose a folder to link as a space"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         if let state { open(url, in: state) } else { open(url) }
     }

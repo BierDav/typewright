@@ -17,11 +17,11 @@ struct DeviceSettings: View {
                         Button("Sign Out", role: .destructive) { identity.signOut() }
                     }
                 } else {
-                    TextField("Name", text: $accountName, prompt: Text("you@example.com"))
+                    TextField("Passkey Name", text: $accountName, prompt: Text("Typewright"))
+                        .multilineTextAlignment(.trailing)
                     LabeledContent("Passkey") {
                         HStack {
                             Button("Create…") { Task { await identity.createPasskey(name: accountName) } }
-                                .disabled(accountName.trimmingCharacters(in: .whitespaces).isEmpty)
                             Button("Sign In…") { Task { await identity.signInWithPasskey() } }
                         }
                     }
@@ -36,7 +36,7 @@ struct DeviceSettings: View {
                     Text("This build can't use passkeys, so syncing is off. Release builds signed by the developer can.")
                         .foregroundStyle(.secondary)
                 } else if identity.account == nil {
-                    Text("Create a passkey once, then sign in with it on each Mac; iCloud Keychain brings it along. Synced spaces then show up on all of them, with nothing to exchange.")
+                    Text("The name only labels the passkey in Passwords; no email or other account is needed. Create a passkey once, then sign in with it on each Mac; iCloud Keychain brings it along. Synced spaces then show up on all of them, with nothing to exchange.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -98,11 +98,12 @@ struct DeviceSettings: View {
 
             Section {
                 LabeledContent("Merge text files up to") {
-                    HStack(spacing: 4) {
-                        TextField("", value: $sync.lfsThresholdMB, format: .number)
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        TextField("Merge text files up to", value: $sync.lfsThresholdMB, format: .number)
+                            .labelsHidden()
                             .frame(width: 60)
                             .multilineTextAlignment(.trailing)
-                        Text("MB")
+                        Text("MB").foregroundStyle(.secondary)
                     }
                 }
             } header: {
