@@ -124,6 +124,8 @@ enum Highlighter {
         let text = range.location == 0 && range.length == ns.length ? storage.string : ns.substring(with: range)
 
         storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor], range: range)
+        // solveng's `plain-code: true` makes code without a language a calculation.
+        let plain = !code && Solveng.shared.plainCode(document: text)
         for run in runs(in: text, code: code) where NSMaxRange(run.range) <= range.length {
             let r = NSRange(location: range.location + run.range.location, length: run.range.length)
             var attrs: [NSAttributedString.Key: Any] = [:]
@@ -136,16 +138,21 @@ enum Highlighter {
             }
             if run.tag == .link { attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue }
             if !attrs.isEmpty { storage.addAttributes(attrs, range: r) }
-            if run.tag == .raw, depth < InjectedLanguages.maxDepth { injectRaw(in: storage, run: r, font: font, depth: depth) }
+            if run.tag == .raw, depth < InjectedLanguages.maxDepth { injectRaw(in: storage, run: r, font: font, depth: depth, plain: plain) }
         }
     }
 
-    /// Colours the body of a ```` ```lang ```` raw block in its language.
-    private static func injectRaw(in storage: NSTextStorage, run: NSRange, font: NSFont, depth: Int) {
+    /// Colours the body of a ```` ```lang ```` raw block in its language; with `plain`, untagged raw is solveng.
+    private static func injectRaw(in storage: NSTextStorage, run: NSRange, font: NSFont, depth: Int, plain: Bool) {
         let raw = (storage.string as NSString).substring(with: run)
-        guard raw.hasPrefix("```") else { return }
-        let parts = CodeHighlight.shared.rawBlock(raw: raw)
-        guard parts.size == 4 else { return }
+        let parts = raw.hasPrefix("```") ? CodeHighlight.shared.rawBlock(raw: raw) : KotlinIntArray(size: 0)
+        guard parts.size == 4 else {
+            let body = plain ? Solveng.shared.body(raw: raw, plain: true) : KotlinIntArray(size: 0)
+            guard body.size == 2 else { return }
+            let range = NSRange(location: run.location + Int(body.get(index: 0)), length: Int(body.get(index: 1) - body.get(index: 0)))
+            InjectedLanguages.apply(Solveng.shared.TAG, to: storage, range: range, font: font, depth: depth + 1)
+            return
+        }
         let tag = (raw as NSString).substring(with: NSRange(location: Int(parts.get(index: 0)),
                                                             length: Int(parts.get(index: 1) - parts.get(index: 0))))
         guard let language = InjectedLanguages.language(tag) else { return }

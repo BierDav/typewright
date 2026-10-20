@@ -3,7 +3,7 @@
 import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { compiler } from "../compiler";
-import { CodeHighlight } from "../core";
+import { CodeHighlight, Solveng } from "../core";
 
 /** Typst's highlighting tags as the bridge numbers them (`HlTag`). */
 const TAG_CLASS: Record<number, string> = {
@@ -32,7 +32,7 @@ const ITALIC = 2;
 const MATH = 4;
 
 /** `CodeTokenKind` from the Kotlin core. */
-const CODE_CLASS = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword"];
+const CODE_CLASS = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit"];
 
 const marks = new Map<string, Decoration>();
 function mark(cls: string): Decoration {
@@ -51,24 +51,34 @@ function classes(tag: number, flags: number): string {
   return parts.join(" ");
 }
 
-function build(text: string, runs: Uint32Array): DecorationSet {
+/** The language and body range of a raw element; `plain` makes untagged raw solveng (its `plain-code: true`). */
+function injection(raw: string, plain: boolean): { language: string; from: number; to: number } | null {
+  if (raw.startsWith("```")) {
+    const parts = CodeHighlight.rawBlock(raw);
+    const language = parts.length ? CodeHighlight.language(raw.slice(parts[0], parts[1])) : null;
+    if (language) return { language, from: parts[2], to: parts[3] };
+    if (parts.length) return null;
+  }
+  const body = plain ? Solveng.body(raw, true) : new Int32Array();
+  return body.length ? { language: Solveng.TAG, from: body[0], to: body[1] } : null;
+}
+
+function build(text: string, runs: Uint32Array, plain: boolean): DecorationSet {
   const ranges: { from: number; to: number; cls: string }[] = [];
   for (let i = 0; i + 2 < runs.length; i += 3) {
     const from = runs[i];
     const to = from + runs[i + 1];
     const tag = runs[i + 2] & 0xff;
     const cls = classes(tag, runs[i + 2] >> 8);
-    if (tag === RAW && text.startsWith("```", from)) {
-      const raw = text.slice(from, to);
-      const parts = CodeHighlight.rawBlock(raw);
-      const language = parts.length ? CodeHighlight.language(raw.slice(parts[0], parts[1])) : null;
-      const tokens = language ? CodeHighlight.tokens(language, raw.slice(parts[2], parts[3])) : new Int32Array();
+    const inject = tag === RAW ? injection(text.slice(from, to), plain) : null;
+    if (inject) {
+      const tokens = CodeHighlight.tokens(inject.language, text.slice(from + inject.from, from + inject.to));
       if (tokens.length) {
         // The fence keeps the raw colour; the body gets the language's.
-        ranges.push({ from, to: from + parts[2], cls });
-        ranges.push({ from: from + parts[3], to, cls });
+        ranges.push({ from, to: from + inject.from, cls });
+        ranges.push({ from: from + inject.to, to, cls });
         for (let t = 0; t + 2 < tokens.length; t += 3) {
-          const start = from + parts[2] + tokens[t];
+          const start = from + inject.from + tokens[t];
           ranges.push({ from: start, to: start + tokens[t + 1], cls: CODE_CLASS[tokens[t + 2]] ?? "" });
         }
         continue;
@@ -113,7 +123,7 @@ export function typstHighlighting(code = false) {
           .then((runs) => {
             // Results for older text would land in the wrong places.
             if (version !== this.version || view.state.doc.length !== text.length) return;
-            view.dispatch({ effects: setHighlights.of(build(text, runs)) });
+            view.dispatch({ effects: setHighlights.of(build(text, runs, !code && Solveng.plainCode(text))) });
           })
           .catch(() => {});
       }

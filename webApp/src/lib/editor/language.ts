@@ -4,6 +4,7 @@ import { autocompletion, type Completion, type CompletionContext, type Completio
 import { StateEffect, StateField } from "@codemirror/state";
 import { EditorView, hoverTooltip, keymap, showTooltip, type Tooltip } from "@codemirror/view";
 import { compiler, type Completion as TypstCompletion } from "../compiler";
+import { Solveng, SolvengItemKind } from "../core";
 import { settings } from "../settings";
 
 export type LanguageContext = {
@@ -42,9 +43,29 @@ function toCompletion(item: TypstCompletion): Completion {
   };
 }
 
+/** Inside solveng code the names and units of the calculation, from the document; null elsewhere. */
+function solvengCompletions(ctx: CompletionContext): CompletionResult | null {
+  const result = Solveng.complete(ctx.state.doc.toString(), ctx.pos);
+  if (!result) return null;
+  const type = (kind: number) =>
+    kind === SolvengItemKind.FUNCTION ? "function" : kind === SolvengItemKind.UNIT ? "property" : kind === SolvengItemKind.CONSTANT ? "constant" : "variable";
+  const options = result.items.map((item, i): Completion => ({
+    label: item.label,
+    displayLabel: item.label,
+    type: type(item.kind),
+    detail: item.detail,
+    boost: -i / result.items.length,
+    // Units like Ω are typed as Ohm.
+    apply: item.insert.includes("$0") ? snippet(item.insert.replace("$0", "${}")) : item.insert,
+  }));
+  return { from: result.from, options, validFor: /^[\p{L}\p{N}_°%‰µΩ]*$/u };
+}
+
 function completionSource(context: LanguageContext) {
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
     if (!settings.language) return null;
+    const solveng = solvengCompletions(ctx);
+    if (solveng) return solveng.options.length || ctx.explicit ? solveng : null;
     const before = ctx.state.sliceDoc(Math.max(0, ctx.pos - 64), ctx.pos);
     // Package names complete from Typst Universe's index, fetched once on first use.
     if (/"@[\w/:.-]*$/.test(before) && !indexRequested) {

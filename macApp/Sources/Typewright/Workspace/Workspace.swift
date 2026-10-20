@@ -798,11 +798,30 @@ final class Workspace: EditorLanguage {
 
     func completions(at offset: Int) async -> [CompletionItem] {
         guard let file = selectedFile, selectedKind == .typst else { return [] }
+        if let solveng = Self.solvengCompletions(in: text, at: offset) { return solveng }
         let packages = packageCompletions(at: offset)
         guard let client = languageClient() else { return packages }
         let items = await client.completions(in: file, text: text as NSString, at: offset)
         let labels = Set(items.map(\.label))
         return items + packages.filter { !labels.contains($0.label) }
+    }
+
+    /// Inside solveng code tinymist has nothing to offer; the calculation's names and units come from the document.
+    private static func solvengCompletions(in text: String, at offset: Int) -> [CompletionItem]? {
+        guard let result = Solveng.shared.complete(document: text, offset: Int32(offset)) else { return nil }
+        let range = NSRange(location: Int(result.from), length: offset - Int(result.from))
+        let items = (0..<result.items.size).compactMap { result.items.get(index: $0) }
+        return items.enumerated().map { index, item in
+            let kind: CompletionItem.Kind = switch item.kind {
+            case SolvengItemKind.shared.FUNCTION: .function
+            case SolvengItemKind.shared.UNIT: .field
+            case SolvengItemKind.shared.CONSTANT: .constant
+            default: .variable
+            }
+            return CompletionItem(label: item.label, detail: item.detail, kind: kind, filterText: item.insert.replacingOccurrences(of: "$0", with: ""),
+                                  sortText: String(format: "%05d", index), newText: item.insert, isSnippet: item.insert.contains("$0"),
+                                  range: range, documentation: "`\(item.label)` \(item.detail)")
+        }
     }
 
     /// tinymist only knows `@preview`; local namespaces and downloaded packages come from the package folders.
