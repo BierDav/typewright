@@ -165,6 +165,8 @@ final class ConcealTests: XCTestCase {
         defer { window.close() }
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         window.contentView = tv
+        // Without a window on screen its number is 0 and the tracker never sees the posted drags.
+        window.makeKeyAndOrderFront(nil)
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a Omega b$"
         tv.setSelectedRange(NSRange(location: 1, length: 0))
@@ -186,9 +188,23 @@ final class ConcealTests: XCTestCase {
                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                context: nil, eventNumber: number, clickCount: 1, pressure: 1)!
         }
-        NSApp.postEvent(event(.leftMouseDragged, at: collapsedEnd, number: 2), atStart: false)
-        NSApp.postEvent(event(.leftMouseDragged, at: middle, number: 3), atStart: false)
-        NSApp.postEvent(event(.leftMouseUp, at: middle, number: 4), atStart: false)
+        // One event per tracking-loop tick; a slow runner may not have consumed a whole queue by mouse-up.
+        var ticks = 0
+        let timer = Timer(timeInterval: 0.025, repeats: true) { timer in
+            MainActor.assumeIsolated {
+                ticks += 1
+                switch ticks {
+                case 1: NSApp.postEvent(event(.leftMouseDragged, at: collapsedEnd, number: 2), atStart: false)
+                case 2: NSApp.postEvent(event(.leftMouseDragged, at: middle, number: 3), atStart: false)
+                default:
+                    NSApp.postEvent(event(.leftMouseUp, at: middle, number: 4), atStart: false)
+                    timer.invalidate()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        RunLoop.main.add(timer, forMode: .default)
+        defer { timer.invalidate() }
         tv.mouseDown(with: event(.leftMouseDown, at: start, number: 1))
         XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 4))
     }
