@@ -88,9 +88,11 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
     func hide() {
         generation += 1
         requestTask?.cancel()
-        shown = []
         showsDocs = false
         hideDocs()
+        shown = []
+        // The table caches the row count from its last reload; a layout before the next one would ask for rows that are gone.
+        table.reloadData()
         if panel.isVisible {
             panel.parent?.removeChildWindow(panel)
             panel.orderOut(nil)
@@ -404,6 +406,8 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        // AppKit can ask for a cached row while the list is being cleared.
+        guard shown.indices.contains(row) else { return nil }
         let cell = tableView.makeView(withIdentifier: CompletionCell.identifier, owner: nil) as? CompletionCell ?? CompletionCell()
         cell.show(shown[row])
         return cell
