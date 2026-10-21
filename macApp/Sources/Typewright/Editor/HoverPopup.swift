@@ -14,13 +14,21 @@ final class HoverController {
     private var panel: NSPanel?
     /// The hovered text in view coordinates; the panel stays while the pointer is on it or the panel.
     private var anchor: NSRect = .null
+    private var dismissal: (any NSObjectProtocol)?
+    /// Links followed in the shown docs.
+    private var trail: DocsTrail?
 
     init(textView: NSTextView) {
         self.textView = textView
+        dismissal = Popups.observe(window: { [weak textView] in textView?.window }) { [weak self] in self?.hide() }
+        Popups.onBack(self, window: { [weak textView] in textView?.window }) { [weak self] in self?.trail?.back() ?? false }
     }
+
+    deinit { if let dismissal { NotificationCenter.default.removeObserver(dismissal) } }
 
     /// Called on every pointer move over the text.
     func pointerMoved(to point: NSPoint) {
+        if isPinned { return }
         // Nothing pops up through the command palette, the search or anything else on top of the text.
         guard isTopmost(at: point) else {
             if panel != nil, !pointerInPanel { hide() }
@@ -78,7 +86,43 @@ final class HoverController {
         return anchor.union(frame).contains(point)
     }
 
-    func hide() {
+    private var monitor: Any?
+
+    /// While docs show, F1 closes them, Esc goes back from a followed link or closes them, and any other key
+    /// or click outside them closes them. A click inside pins them. Watched app-wide, as shortcuts like ⌘K
+    /// never reach the text view and the panel takes key once clicked.
+    func handle(_ event: NSEvent) -> NSEvent? {
+        guard let panel else { return event }
+        let inPanel = event.window === panel
+        if event.type == .keyDown {
+            if KeyLayout.current.shortcuts.documentation.matches(event) {
+                hide()
+                return nil
+            }
+            if event.keyCode == 53, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+                if trail?.back() != true { hide() }
+                return nil
+            }
+            // Typing in the panel, like ⌘C, stays there.
+            if inPanel { return event }
+            hide()
+            return event
+        }
+        if inPanel {
+            isPinned = true
+            hideTask?.cancel()
+            hideTask = nil
+            return event
+        }
+        // The mouse's back button steps back through followed links first, see `Popups.back`.
+        if event.type == .otherMouseDown, event.buttonNumber == 3, trail?.canGoBack == true { return event }
+        hide()
+        return event
+    }
+
+    /// True when a panel was open.
+    @discardableResult
+    func hide() -> Bool {
         task?.cancel()
         task = nil
         hideTask?.cancel()
@@ -86,13 +130,17 @@ final class HoverController {
         pointerInPanel = false
         isPinned = false
         anchor = .null
-        guard let panel else { return }
+        trail = nil
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        guard let panel else { return false }
         self.panel = nil
         let parent = panel.parent
         parent?.removeChildWindow(panel)
         panel.orderOut(nil)
         // A click made it key to select text; typing goes back to the editor.
         if panel.isKeyWindow { parent?.makeKey() }
+        return true
     }
 
     private func show(at point: NSPoint) async {
@@ -109,29 +157,43 @@ final class HoverController {
         present(errors: errors.map(\.diagnostic), markdown: docs?.markdown, below: rect)
     }
 
-    /// Docs and problems of the symbol at the caret, e.g. on F1; they stay until typing, clicking or Esc.
-    func showAtCaret() {
+    /// F1: hides shown or loading docs, or shows and pins the docs at the caret.
+    /// Pinned docs only ignore the pointer; keys, clicks and scrolling still close them.
+    func toggleAtCaret() {
+        if isPinned || panel != nil { hide(); return }
+        showAtCaret()
+    }
+
+    /// Docs and problems of the symbol at the caret.
+    private func showAtCaret() {
         guard let tv = textView else { return }
         let index = tv.selectedRange().location
         task?.cancel()
+        // Pinned already, so pointer moves while the server answers neither cancel it nor show their own.
+        isPinned = true
         task = Task { [weak self] in
             let errors = self?.diagnostics.filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index } ?? []
             // The caret may sit just after the symbol.
             var docs = await self?.provider?(index)
             if docs == nil, index > 0 { docs = await self?.provider?(index - 1) }
-            guard let self, !Task.isCancelled, let tv = self.textView, tv.selectedRange().location == index else { return }
-            guard errors.count + (docs == nil ? 0 : 1) > 0 else { return NSSound.beep() }
+            guard let self, !Task.isCancelled else { return }
+            guard let tv = self.textView, tv.selectedRange().location == index else { return self.isPinned = false }
+            guard errors.count + (docs == nil ? 0 : 1) > 0 else {
+                self.isPinned = false
+                return NSSound.beep()
+            }
             let range = docs?.range ?? errors.first?.range ?? NSRange(location: index, length: 0)
             let caret = (tv as? TypstTextView)?.caretAnchor() ?? .zero
             var rect = Self.rect(of: range, in: tv) ?? caret
             if !rect.insetBy(dx: -3, dy: -3).intersects(caret) { rect = caret }
             self.present(errors: errors.map(\.diagnostic), markdown: docs?.markdown, below: rect)
-            self.isPinned = true
+            self.isPinned = self.panel != nil
         }
     }
 
     /// Shown from the keyboard, so pointer moves don't close it.
-    private var isPinned = false
+    private(set) var isPinned = false
+    var isShown: Bool { panel != nil }
 
     private static func rect(of range: NSRange, in tv: NSTextView) -> NSRect? {
         guard let lm = tv.layoutManager, let container = tv.textContainer, NSMaxRange(range) <= (tv.string as NSString).length
@@ -141,14 +203,13 @@ final class HoverController {
     }
 
     private func present(errors: [Diagnostic], markdown: String?, below rect: NSRect) {
-        guard let tv = textView else { return }
+        guard let tv = textView, !Popups.isCovered(tv.window) else { hide(); return }
         anchor = rect
 
-        // Long docs get three times the room, as far as the screen allows.
-        let screenWidth = tv.window?.screen?.visibleFrame.width ?? 1600
-        let width = HoverContent.isLarge(markdown) ? min(HoverContent.baseWidth * 2.4, screenWidth - 40) : HoverContent.baseWidth
+        let width = HoverContent.width(for: markdown, screen: tv.window?.screen)
         var placedAbove = false
         weak var placedPanel: NSPanel?
+        let trail = DocsTrail()
         let content = HoverContent(errors: errors, markdown: markdown, width: width,
                                    fixes: fixesProvider ?? { _ in [] }, onClose: { [weak self] in self?.hide() },
                                    onSize: { size in
@@ -158,8 +219,8 @@ final class HoverController {
             if !placedAbove { frame.origin.y = frame.maxY - size.height }
             frame.size = size
             panel.setFrame(frame, display: true)
-        })
-        let host = NSHostingView(rootView: content)
+        }, trail: trail)
+        let host = PopupHostingView(rootView: content)
         host.frame.size = host.fittingSize
         // Takes key on a click, so its text can be selected and copied.
         let panel = HoverPanel(contentRect: NSRect(origin: .zero, size: host.frame.size),
@@ -196,9 +257,15 @@ final class HoverController {
         placedPanel = panel
         hide()
         anchor = rect
+        self.trail = trail
         self.panel = panel
         window.addChildWindow(panel, ordered: .above)
         panel.orderFront(nil)
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+            // `self?.handle(event) ?? event` would turn a swallowed Esc (nil) back into the event.
+            guard let self else { return event }
+            return self.handle(event)
+        }
     }
 
     /// The character under the pointer, or nil past a line's end.
@@ -213,6 +280,11 @@ final class HoverController {
     }
 }
 
+/// Takes the click that makes its popup key, instead of only activating with it.
+final class PopupHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// Reports when the pointer leaves the panel.
 final class HoverPanel: NSPanel {
     var onEnter: (() -> Void)?
@@ -224,6 +296,12 @@ final class HoverPanel: NSPanel {
     private var tracking: NSTrackingArea?
 
     override var canBecomeKey: Bool { becomesKey }
+
+    // Key before the click is handled, so the first click already selects text or presses a link.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, becomesKey, !isKeyWindow { makeKey() }
+        super.sendEvent(event)
+    }
 
     override var contentView: NSView? {
         didSet {
@@ -247,6 +325,8 @@ struct HoverContent: View {
     let fixes: (Diagnostic) -> [QuickFix]
     let onClose: () -> Void
     let onSize: (CGSize) -> Void
+    /// The links followed in function docs, for popups that step back on Esc.
+    var trail: DocsTrail?
 
     static let baseWidth: CGFloat = 480
 
@@ -255,6 +335,13 @@ struct HoverContent: View {
         guard let markdown else { return false }
         let longestLine = markdown.split(separator: "\n").map(\.count).max() ?? 0
         return markdown.count > 700 || longestLine > 90
+    }
+
+    /// The same for hovers and a completion's docs, so F1 looks alike from both.
+    static func width(for markdown: String?, screen: NSScreen?) -> CGFloat {
+        // Function docs fold what's long, so they stay narrow and easy to read.
+        guard isLarge(markdown), FunctionDocs(markdown: markdown!) == nil else { return baseWidth }
+        return min(baseWidth * 1.4, (screen?.visibleFrame.width ?? 1600) - 40)
     }
 
     var body: some View {
@@ -276,6 +363,7 @@ struct HoverContent: View {
                                             Label(fix.title, systemImage: fix.icon)
                                         }
                                         .buttonStyle(.link)
+                                        .pointerStyle(.link)
                                     } else {
                                         Label(fix.title, systemImage: fix.icon).foregroundStyle(.secondary)
                                     }
@@ -294,13 +382,19 @@ struct HoverContent: View {
             }
             if !errors.isEmpty && markdown != nil { Divider() }
             if let markdown {
-                ScrollView {
-                    MarkdownView(blocks: MarkdownBlock.parse(markdown))
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                // Function docs scroll under their own pinned header.
+                if let docs = FunctionDocs(markdown: markdown) {
+                    FunctionDocsView(docs: docs, trail: trail)
+                } else {
+                    ScrollView {
+                        MarkdownView(blocks: MarkdownBlock.parse(markdown))
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 640)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                 }
-                .frame(maxHeight: 640)
-                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .font(.callout)
@@ -312,58 +406,93 @@ struct HoverContent: View {
     }
 }
 
-/// The parts of tinymist's Markdown worth rendering: code blocks, headings, rules and paragraphs.
+/// The parts of tinymist's Markdown worth rendering: code blocks, headings, rules, lists and paragraphs.
 enum MarkdownBlock: Equatable {
     /// Code with its fence's language, like `typc` for code mode or `typ` for markup.
     case code(String, language: String)
     case heading(String)
     case rule
     case paragraph(String)
+    /// Items with their markers, `•` or `1.`.
+    case list([String], markers: [String])
     /// A line that is only `![](url)`.
     case image(URL)
 
     static func parse(_ markdown: String) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
         var paragraph: [String] = []
+        var items: [String] = []
+        var markers: [String] = []
         var code: [String]?
+        var fence = 0
         var language = ""
         func flush() {
             let text = paragraph.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty { blocks.append(.paragraph(text)) }
             paragraph = []
         }
+        func flushList() {
+            if !items.isEmpty { blocks.append(.list(items, markers: markers)) }
+            items = []
+            markers = []
+        }
         for line in markdown.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
-                if let lines = code {
+            let ticks = trimmed.prefix { $0 == "`" }.count
+            if let lines = code {
+                // Only a fence at least as long closes, so ```` blocks can show ``` ones.
+                if ticks >= fence, trimmed.allSatisfy({ $0 == "`" }) {
                     blocks.append(.code(lines.joined(separator: "\n"), language: language))
                     code = nil
                 } else {
-                    flush()
-                    code = []
-                    language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                    code?.append(line)
                 }
-            } else if code != nil {
-                code?.append(line)
+            } else if ticks >= 3 {
+                flush()
+                flushList()
+                code = []
+                fence = ticks
+                language = String(trimmed.dropFirst(ticks)).trimmingCharacters(in: .whitespaces)
             } else if trimmed.hasPrefix("![]("), trimmed.hasSuffix(")"),
                       let url = URL(string: String(trimmed.dropFirst(4).dropLast())) {
                 flush()
+                flushList()
                 blocks.append(.image(url))
             } else if trimmed == "---" || trimmed == "***" {
                 flush()
+                flushList()
                 blocks.append(.rule)
             } else if trimmed.hasPrefix("#") {
                 flush()
+                flushList()
                 blocks.append(.heading(String(trimmed.drop { $0 == "#" }).trimmingCharacters(in: .whitespaces)))
+            } else if let marker = listMarker(trimmed) {
+                flush()
+                let shown = marker == "-" || marker == "*" ? "•" : marker
+                if let last = markers.last, (last == "•") != (shown == "•") { flushList() }
+                items.append(String(trimmed.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces))
+                markers.append(shown)
             } else if trimmed.isEmpty {
                 flush()
+            } else if !items.isEmpty, paragraph.isEmpty, line.first?.isWhitespace == true {
+                items[items.count - 1] += " " + trimmed
             } else {
+                flushList()
                 paragraph.append(line)
             }
         }
         if let code { blocks.append(.code(code.joined(separator: "\n"), language: language)) }
         flush()
+        flushList()
         return blocks
+    }
+
+    /// `-`, `*` or `1.` followed by a space.
+    private static func listMarker(_ line: String) -> String? {
+        if line.hasPrefix("- ") || line.hasPrefix("* ") { return String(line.prefix(1)) }
+        let digits = line.prefix { $0.isNumber }
+        guard !digits.isEmpty, line.dropFirst(digits.count).hasPrefix(". ") else { return nil }
+        return digits + "."
     }
 }
 
@@ -392,8 +521,10 @@ private struct ImageThumbnail: View {
     }
 }
 
-private struct MarkdownView: View {
+struct MarkdownView: View {
     let blocks: [MarkdownBlock]
+    /// Names in inline code that link to their own docs.
+    var links: (String) -> Bool = { _ in false }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -411,10 +542,17 @@ private struct MarkdownView: View {
                     Text(text).font(.callout.weight(.semibold)).padding(.top, 4)
                 case .rule:
                     Divider()
+                case .list(let items, let markers):
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { i, item in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(markers[i]).foregroundStyle(.secondary)
+                                InlineText(text: Self.inline(item, links: links))
+                            }
+                        }
+                    }
                 case .paragraph(let text):
-                    Text(Self.inline(text))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    InlineText(text: Self.inline(text, links: links))
                 case .image(let url):
                     ImageThumbnail(url: url)
                 }
@@ -446,10 +584,41 @@ private struct MarkdownView: View {
         return (try? AttributedString(storage, including: \.appKit)) ?? AttributedString(shown)
     }
 
-    private static func inline(_ text: String) -> AttributedString {
+    /// The scheme of links to another function's docs, `typewright-docs:defined`.
+    static let docsScheme = "typewright-docs"
+
+    /// Inline Markdown with its code highlighted as typst, and names `links` accepts linked to their docs.
+    static func inline(_ text: String, links: (String) -> Bool = { _ in false }) -> AttributedString {
         // Markdown hard breaks ("\" at a line end) and soft wraps both join into flowing text.
+        // tinymist doubles bold that's already Markdown, `**x**` → `****x****`.
         let joined = text.replacingOccurrences(of: "\\\n", with: "\n").replacingOccurrences(of: "\n", with: " ")
-        return (try? AttributedString(markdown: joined, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(joined)
+            .replacingOccurrences(of: "****", with: "**")
+        guard let parsed = try? AttributedString(markdown: joined, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        else { return AttributedString(joined) }
+        var result = AttributedString()
+        for run in parsed.runs {
+            let part = AttributedString(parsed[run.range])
+            guard run.inlinePresentationIntent?.contains(.code) == true else {
+                result += part
+                continue
+            }
+            let code = String(part.characters)
+            // `#clear(all: true)` and `$t =$` are markup, `heading.where(level: 1)` is code.
+            var shown = Highlighter.highlighted(code, code: !(code.hasPrefix("#") || code.hasPrefix("$")), size: 12)
+            shown.inlinePresentationIntent = .code
+            let hashes = code.prefix { $0 == "#" }
+            let name = code.dropFirst(hashes.count).prefix { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+            if !name.isEmpty, links(String(name)), let url = URL(string: "\(docsScheme):\(name)") {
+                // Only the name is the link, so the rest keeps its colours.
+                let start = shown.characters.index(shown.startIndex, offsetBy: hashes.count)
+                let range = start..<shown.characters.index(start, offsetBy: name.count)
+                shown[range].link = url
+                // The link's colour, not the highlighter's, and underlined, as function names are blue too.
+                shown[range].foregroundColor = nil
+                shown[range].underlineStyle = .single
+            }
+            result += shown
+        }
+        return result
     }
 }

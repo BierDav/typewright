@@ -83,9 +83,52 @@ final class ColumnSelectionTests: XCTestCase {
             return NSPoint(x: box.minX + tv.textContainerOrigin.x, y: box.midY + tv.textContainerOrigin.y)
         }
         let found = tv.columnCarets(from: point(1), to: point(10))
-        XCTAssertEqual(found.carets.map(\.range), [NSRange(location: 1, length: 2), NSRange(location: 6, length: 0),
-                                                   NSRange(location: 8, length: 2)], "the short line gets a caret at its end")
-        XCTAssertEqual(found.primary, 2)
+        XCTAssertEqual(found.carets.map(\.range), [NSRange(location: 1, length: 2), NSRange(location: 8, length: 2)],
+                       "the line too short for the column's start gets no caret")
+        XCTAssertEqual(found.primary, 1)
+    }
+
+    func testColumnsDrawTheirOwnBackground() {
+        let tv = editor("ab\ncd")
+        tv.setColumns([.init(anchor: 0, head: 1), .init(anchor: 3, head: 4)], primary: 1)
+        XCTAssertEqual(tv.selectedTextAttributes[.backgroundColor] as? NSColor, .clear)
+        tv.endColumns()
+        XCTAssertEqual(tv.selectedTextAttributes[.backgroundColor] as? NSColor, tv.selectionColor)
+    }
+
+    func testColumnBackgroundRoundsOnlyItsOuterCorners() {
+        let tv = editor("ab\ncd")
+        let path = tv.selectionPath(for: [NSRect(x: 10, y: 10, width: 20, height: 15),
+                                          NSRect(x: 10, y: 25, width: 20, height: 15)])
+        XCTAssertTrue(path.contains(NSPoint(x: 20, y: 20)))
+        XCTAssertTrue(path.contains(NSPoint(x: 10.5, y: 25)), "the lines join without a notch")
+        XCTAssertFalse(path.contains(NSPoint(x: 10.5, y: 10.5)), "the outer corner is rounded")
+        XCTAssertFalse(path.contains(NSPoint(x: 10.5, y: 11.5)), "the corner radius is wide")
+    }
+
+    func testColumnBackgroundRoundsInwardCornersOnEitherSide() {
+        let tv = editor("ab\ncd")
+        for boxes in [
+            [NSRect(x: 10, y: 10, width: 40, height: 15), NSRect(x: 20, y: 25, width: 20, height: 15)],
+            [NSRect(x: 20, y: 10, width: 20, height: 15), NSRect(x: 10, y: 25, width: 40, height: 15)],
+        ] {
+            let path = tv.selectionPath(for: boxes)
+            let narrowBelow = boxes[1].width < boxes[0].width
+            let y: CGFloat = narrowBelow ? 25.5 : 24.5
+            XCTAssertTrue(path.contains(NSPoint(x: 19.5, y: y)), "the inward left corner curves outward")
+            XCTAssertTrue(path.contains(NSPoint(x: 40.5, y: y)), "the inward right corner curves outward")
+            XCTAssertFalse(path.contains(NSPoint(x: 15, y: narrowBelow ? 30 : 20)))
+            XCTAssertTrue(path.contains(NSPoint(x: 30, y: 25)), "the join stays filled")
+        }
+    }
+
+    func testColumnBackgroundKeepsSeparateSelectionsApart() {
+        let tv = editor("ab\ncd")
+        let path = tv.selectionPath(for: [NSRect(x: 10, y: 10, width: 20, height: 15),
+                                          NSRect(x: 40, y: 25, width: 20, height: 15)])
+        XCTAssertTrue(path.contains(NSPoint(x: 20, y: 20)))
+        XCTAssertTrue(path.contains(NSPoint(x: 50, y: 30)))
+        XCTAssertFalse(path.contains(NSPoint(x: 35, y: 25)))
     }
 
     func testExtendsAndShrinksTheColumn() {

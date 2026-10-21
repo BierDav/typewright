@@ -15,6 +15,7 @@ struct SpaceView: View {
     @AppStorage("autoClose") private var autoClose = true
     @State private var vimMode: String?
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
+    @AppStorage(PreviewPosition.defaultsKey) private var previewPosition = PreviewPosition.trailing
     private var compilers: CompilerManager { .shared }
 
     /// The code's top fade; text starts below it but scrolls under it.
@@ -55,34 +56,52 @@ struct SpaceView: View {
             }
     }
 
-    /// Below this width a released divider closes the preview.
-    private static let closeWidth: CGFloat = 160
+    /// Below this size a released divider closes the preview.
+    private var closeLength: CGFloat { vertical ? 120 : 160 }
+
+    private var vertical: Bool { previewPosition != .trailing }
+
+    /// The preview comes before the editor in the stack.
+    private var leadingPreview: Bool { previewPosition == .top }
 
     private var content: some View {
         GeometryReader { geo in
-            let total = geo.size.width
-            let editorW = showsPreview ? editorWidth(total) : total
-            HStack(spacing: 0) {
+            let total = vertical ? geo.size.height : geo.size.width
+            let editorL = showsPreview ? editorLength(total) : total
+            // One layout for both directions keeps the editor's identity when the preview moves.
+            let stack = vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
+            stack {
+                if showsPreview && leadingPreview { previewSide(stack, total: total, faded: total - editorL < closeLength) }
+                // Same position in the builder either way, so the editor survives the preview moving.
                 main
-                    .frame(width: editorW)
-                if showsPreview {
-                    HStack(spacing: 0) {
-                        Divider()
-                        PreviewPane(workspace: workspace)
-                            .opacity(total - editorW < Self.closeWidth ? 0.4 : 1)
-                    }
-                    .transition(.move(edge: .trailing))
-                }
-            }
-            // Above both panes so the grab area reaches into the PDF side too.
-            .overlay(alignment: .leading) {
-                if showsPreview {
-                    dividerHandle(total).offset(x: editorW + 0.5 - Self.handleWidth / 2)
-                }
+                    .frame(width: vertical ? nil : editorL, height: vertical ? editorL : nil)
+                if showsPreview && !leadingPreview { previewSide(stack, total: total, faded: total - editorL < closeLength) }
             }
             .clipped()
             .animation(.smooth(duration: 0.3), value: showsPreview)
+            .animation(.smooth(duration: 0.3), value: previewPosition)
         }
+    }
+
+    /// The preview with its separator on the editor's side.
+    private func previewSide(_ stack: AnyLayout, total: CGFloat, faded: Bool) -> some View {
+        let separator = Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: vertical ? nil : 1, height: vertical ? 1 : nil)
+        return stack {
+            if !leadingPreview { separator }
+            PreviewPane(workspace: workspace)
+                .opacity(faded ? 0.4 : 1)
+            if leadingPreview { separator }
+        }
+        // Part of the pane so it slides out with it; centered on the separator, reaching into the editor too.
+        .overlay(alignment: leadingPreview ? .bottom : vertical ? .top : .leading) {
+            let offset = (leadingPreview ? -1 : 1) * (0.5 - Self.handleWidth / 2)
+            dividerHandle(total).offset(x: vertical ? 0 : offset, y: vertical ? offset : 0)
+        }
+        // Above the editor, which comes after it in the stack when the preview is on top.
+        .zIndex(1)
+        .transition(.move(edge: previewPosition == .top ? .top : previewPosition == .bottom ? .bottom : .trailing))
     }
 
     /// Only Typst and Markdown files get the split view; other files use the full width.
@@ -113,8 +132,8 @@ struct SpaceView: View {
         .transition(.opacity)
     }
 
-    private func editorWidth(_ total: CGFloat) -> CGFloat {
-        let minEditor: CGFloat = 220, minPreview: CGFloat = 280
+    private func editorLength(_ total: CGFloat) -> CGFloat {
+        let minEditor: CGFloat = vertical ? 160 : 220, minPreview: CGFloat = vertical ? 160 : 280
         // While dragging the preview may shrink past its minimum to show it will close.
         if let dragSplit { return min(max(total * dragSplit, minEditor), total) }
         guard total > minEditor + minPreview else { return total / 2 }
@@ -136,27 +155,29 @@ struct SpaceView: View {
 
     /// Invisible grab area centered on the divider; brightens the 1pt line while hovered or dragged.
     private func dividerHandle(_ total: CGFloat) -> some View {
-        DividerLine(active: dividerHovered || dragStart != nil)
-            .frame(width: Self.handleWidth)
+        DividerLine(active: dividerHovered || dragStart != nil, vertical: vertical)
+            .frame(width: vertical ? nil : Self.handleWidth, height: vertical ? Self.handleWidth : nil)
             .contentShape(Rectangle())
             // The cursor is forced since the text and PDF views set their own.
-            .background(CursorArea(cursor: .resizeLeftRight))
+            .background(CursorArea(cursor: vertical ? .resizeUpDown : .resizeLeftRight))
             .background(HoverTracker { dividerHovered = $0 })
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
-                        let start = dragStart ?? Double(editorWidth(total) / max(total, 1))
+                        let start = dragStart ?? Double(editorLength(total) / max(total, 1))
                         dragStart = start
-                        dragSplit = start + value.translation.width / max(total, 1)
+                        let delta = (vertical ? value.translation.height : value.translation.width) / max(total, 1)
+                        // The split is the editor's share, which shrinks as a top divider moves down.
+                        dragSplit = start + (leadingPreview ? -delta : delta)
                     }
                     .onEnded { _ in
-                        let width = editorWidth(total)
+                        let length = editorLength(total)
                         dragStart = nil
                         dragSplit = nil
-                        if total - width < Self.closeWidth {
+                        if total - length < closeLength {
                             workspace.setPreview(nil)
                         } else {
-                            workspace.split = Double(width / max(total, 1))
+                            workspace.split = Double(length / max(total, 1))
                         }
                     }
             )
@@ -179,6 +200,7 @@ struct SpaceView: View {
         .help("Errors and warnings")
         .padding(.bottom, 10)
         .padding(.trailing, 16)
+        .dismissWithPopups { showIssues = false }
         .popover(isPresented: $showIssues, arrowEdge: .bottom) {
             IssuesView(diagnostics: diagnostics) { d in
                 showIssues = false
@@ -300,11 +322,12 @@ extension SpaceView {
 /// 1pt line that brightens over a divider while it's hovered or dragged.
 private struct DividerLine: View {
     let active: Bool
+    var vertical = false
 
     var body: some View {
         Rectangle()
             .fill(Color.primary.opacity(0.4))
-            .frame(width: 1)
+            .frame(width: vertical ? nil : 1, height: vertical ? 1 : nil)
             .opacity(active ? 1 : 0)
             .animation(.easeOut(duration: 0.15), value: active)
     }

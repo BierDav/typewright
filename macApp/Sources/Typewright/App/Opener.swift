@@ -65,6 +65,19 @@ final class Opener {
 
     /// The layout's window shortcuts, also covering built-in alternates like IntelliJ's ⌘K.
     func installShortcuts() {
+        Popups.menuCommands = { [weak self] in
+            let keys = KeyLayout.current.shortcuts
+            return [
+                Popups.MenuCommand(keys: keys.palette) { [weak self] in self?.state(for: $0)?.overlay = .palette() },
+                Popups.MenuCommand(keys: keys.findInSpace) { [weak self] in self?.state(for: $0)?.overlay = .search(allSpaces: nil) },
+                Popups.MenuCommand(keys: keys.showSpaces) { [weak self] window in
+                    guard let state = self?.state(for: window), state.space != nil else { return }
+                    state.setSpacesOpen(!state.spacesOpen)
+                },
+                Popups.MenuCommand(keys: keys.moveFile) { [weak self] in self?.state(for: $0)?.overlay = .palette(page: "file.move") },
+            ]
+        }
+        Popups.installTracking()
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let handled = MainActor.assumeIsolated {
                 guard !KeyLayout.isRecordingShortcut, NSApp.modalWindow == nil else { return false }
@@ -82,7 +95,7 @@ final class Opener {
                     self.openPanel()
                     return true
                 }
-                guard let state = self.controllers.first(where: { $0.window === event.window })?.state,
+                guard let state = self.state(for: event.window),
                       state.overlay == nil else { return false }
                 if keys.palette.matches(event) { self.showPalette(); return true }
                 if keys.showSpaces.matches(event) { self.toggleSpaces(); return true }
@@ -116,8 +129,9 @@ final class Opener {
     func installNavigationButtons() {
         NSEvent.addLocalMonitorForEvents(matching: .otherMouseDown) { event in
             let handled = MainActor.assumeIsolated {
-                guard event.buttonNumber == 3 || event.buttonNumber == 4,
-                      let state = self.controllers.first(where: { $0.window === event.window })?.state,
+                guard event.buttonNumber == 3 || event.buttonNumber == 4 else { return false }
+                if event.buttonNumber == 3, Popups.back(in: event.window) { return true }
+                guard let state = self.state(for: event.window),
                       state.overlay == nil, let workspace = state.workspace else { return false }
                 if event.buttonNumber == 3 { workspace.goBack() } else { workspace.goForward() }
                 return true
@@ -172,7 +186,14 @@ final class Opener {
     }
 
     private var keyState: WindowState? {
-        controllers.first { $0.window?.isKeyWindow == true }?.state
+        state(for: NSApp.keyWindow)
+    }
+
+    /// The state of the main window showing `window`, which may be one of its popups, as a clicked docs panel takes key.
+    func state(for window: NSWindow?) -> WindowState? {
+        let host = Popups.hostWindow(for: window)
+        return controllers.first { $0.window === host }?.state
+            ?? controllers.first { $0.window === Popups.menuWindow }?.state
     }
 
     /// Reopens the spaces from the last session, or an empty window.

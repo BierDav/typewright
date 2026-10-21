@@ -41,11 +41,13 @@ extension TypstTextView {
             columnCarets = []
             return setSelectedRange(merged[0].range)
         }
+        isUpdatingColumns = true
         columnCarets = merged
         primaryColumn = main
-        isUpdatingColumns = true
         setSelectedRange(merged[main].range)
         isUpdatingColumns = false
+        updateRevealedEquation()
+        refreshCaret(animated: true)
         scrollRangeToVisible(NSRange(location: merged[main].head, length: 0))
     }
 
@@ -53,6 +55,8 @@ extension TypstTextView {
     func endColumns() {
         guard !columnCarets.isEmpty else { return }
         columnCarets = []
+        updateRevealedEquation()
+        refreshCaret()
     }
 
     // MARK: Mouse
@@ -67,21 +71,43 @@ extension TypstTextView {
         let glyphs = lm.glyphRange(forBoundingRect: NSRect(x: 0, y: top, width: container.size.width, height: max(bottom - top, 1)),
                                    in: container)
         var carets: [ColumnCaret] = []
-        lm.enumerateLineFragments(forGlyphRange: glyphs) { rect, used, _, glyphRange, _ in
+        lm.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, glyphRange, _ in
             guard rect.maxY > top, rect.minY <= bottom else { return }
             let chars = lm.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
             var lineEnd = NSMaxRange(chars)
             if lineEnd > chars.location, s.character(at: lineEnd - 1) == 10 { lineEnd -= 1 }
-            // Past the end of a short line is its end.
-            func index(_ x: CGFloat) -> Int {
-                let x = x - origin.x
-                if x >= used.maxX { return lineEnd }
-                var fraction: CGFloat = 0
-                let i = lm.characterIndex(for: NSPoint(x: x, y: rect.midY), in: container, fractionOfDistanceBetweenInsertionPoints: &fraction)
-                let at = fraction > 0.5 && i < s.length ? NSMaxRange(s.rangeOfComposedCharacterSequence(at: i)) : i
-                return min(max(at, chars.location), lineEnd)
+            var positions = [CGFloat](repeating: 0, count: chars.length + 1)
+            var indexes = [Int](repeating: 0, count: chars.length + 1)
+            let count = lm.getLineFragmentInsertionPoints(forCharacterAt: chars.location, alternatePositions: false,
+                                                         inDisplayOrder: true, positions: &positions, characterIndexes: &indexes)
+            // Hidden glyphs can shift or omit the insertion boundary before the next visible character.
+            for i in 0..<count where indexes[i] < NSMaxRange(chars) {
+                var glyph = lm.glyphIndexForCharacter(at: indexes[i])
+                guard lm.propertyForGlyph(at: glyph).contains(.null) else {
+                    if glyph > glyphRange.location, lm.propertyForGlyph(at: glyph - 1).contains(.null) {
+                        positions[i] = lm.location(forGlyphAt: glyph).x
+                    }
+                    continue
+                }
+                while glyph < NSMaxRange(glyphRange), lm.propertyForGlyph(at: glyph).contains(.null) { glyph += 1 }
+                positions[i] = glyph < NSMaxRange(glyphRange) ? lm.location(forGlyphAt: glyph).x
+                    : lm.lineFragmentUsedRect(forGlyphAt: glyphRange.location, effectiveRange: nil).maxX - rect.minX
+                if let conceal = self.conceal(at: indexes[i]), conceal.replacement != 0 {
+                    indexes[i] = NSMaxRange(conceal.range)
+                }
             }
-            carets.append(ColumnCaret(anchor: index(start.x), head: index(end.x)))
+            func index(_ x: CGFloat) -> Int {
+                let x = x - origin.x - rect.minX
+                let closest = (0..<count).filter { indexes[$0] <= lineEnd }.min {
+                    let a = abs(positions[$0] - x), b = abs(positions[$1] - x)
+                    return a == b ? indexes[$0] < indexes[$1] : a < b
+                }
+                return closest.map { self.insertionIndexForConceals(indexes[$0]) } ?? lineEnd
+            }
+            // Lines not reaching the column's start don't get a caret.
+            let anchor = index(start.x)
+            guard anchor != lineEnd else { return }
+            carets.append(ColumnCaret(anchor: anchor, head: index(end.x)))
         }
         return (carets, end.y >= start.y ? carets.count - 1 : 0)
     }
@@ -91,6 +117,10 @@ extension TypstTextView {
         window?.makeFirstResponder(self)
         let start = convert(event.locationInWindow, from: nil)
         var current = event
+        defer {
+            updateRevealedEquation()
+            refreshCaret()
+        }
         while true {
             let found = columnCarets(from: start, to: convert(current.locationInWindow, from: nil))
             setColumns(found.carets, primary: found.primary)
@@ -302,28 +332,76 @@ extension TypstTextView {
 
     // MARK: Drawing
 
-    /// The selections and carets other than the primary one, which the text view draws itself.
+    /// Every column selection, including the primary one, as rounded boxes that join along the column.
     func drawColumnSelections(in rect: NSRect) {
         guard isColumnMode, let lm = layoutManager, let container = textContainer else { return }
         let length = (string as NSString).length
-        (selectedTextAttributes[.backgroundColor] as? NSColor ?? .selectedTextBackgroundColor).setFill()
-        for (i, caret) in columnCarets.enumerated() where i != primaryColumn && caret.range.length > 0 && NSMaxRange(caret.range) <= length {
+        let origin = textContainerOrigin
+        var boxes: [NSRect] = []
+        for caret in columnCarets where caret.range.length > 0 && NSMaxRange(caret.range) <= length {
             let glyphs = lm.glyphRange(forCharacterRange: caret.range, actualCharacterRange: nil)
             lm.enumerateEnclosingRects(forGlyphRange: glyphs, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
                                        in: container) { box, _ in
-                let shifted = box.offsetBy(dx: self.textContainerOrigin.x, dy: self.textContainerOrigin.y)
-                if shifted.intersects(rect) { shifted.fill() }
+                let shifted = box.offsetBy(dx: origin.x, dy: origin.y)
+                boxes.append(shifted)
             }
         }
+        guard !boxes.isEmpty else { return }
+        selectionColor.setFill()
+        selectionPath(for: boxes).fill()
     }
 
-    func drawColumnCarets(in rect: NSRect) {
-        guard isColumnMode else { return }
-        let length = (string as NSString).length
-        insertionPointColor.setFill()
-        for (i, caret) in columnCarets.enumerated() where i != primaryColumn && caret.range.length == 0 && caret.head <= length {
-            guard let bar = caretBar(at: caret.head), bar.intersects(rect) else { continue }
-            bar.fill()
+    /// Round the joined outline, including inward corners where neighboring lines are wider.
+    func selectionPath(for boxes: [NSRect]) -> NSBezierPath {
+        let outline = CGMutablePath()
+        for box in boxes where box.width > 0 && box.height > 0 {
+            outline.addRect(box.insetBy(dx: 0, dy: -0.5))
         }
+        let path = NSBezierPath()
+        var points: [NSPoint] = []
+        outline.normalized(using: .winding).applyWithBlock { element in
+            switch element.pointee.type {
+            case .moveToPoint:
+                points = [element.pointee.points[0]]
+            case .addLineToPoint:
+                points.append(element.pointee.points[0])
+            case .closeSubpath:
+                path.append(self.roundedOutline(points))
+            default:
+                break
+            }
+        }
+        return path
+    }
+
+    private func roundedOutline(_ vertices: [NSPoint]) -> NSBezierPath {
+        let points = vertices.indices.compactMap { i -> NSPoint? in
+            let previous = vertices[(i + vertices.count - 1) % vertices.count]
+            let point = vertices[i], next = vertices[(i + 1) % vertices.count]
+            // Collinear points would needlessly limit the corner radius.
+            return (previous.x == point.x && point.x == next.x)
+                || (previous.y == point.y && point.y == next.y) ? nil : point
+        }
+        let path = NSBezierPath()
+        guard points.count >= 3 else { return path }
+        for i in points.indices {
+            let previous = points[(i + points.count - 1) % points.count]
+            let point = points[i], next = points[(i + 1) % points.count]
+            let before = hypot(point.x - previous.x, point.y - previous.y)
+            let after = hypot(next.x - point.x, next.y - point.y)
+            let radius = min(6, before / 2, after / 2)
+            let entry = NSPoint(x: point.x + (previous.x - point.x) * radius / before,
+                                y: point.y + (previous.y - point.y) * radius / before)
+            let exit = NSPoint(x: point.x + (next.x - point.x) * radius / after,
+                               y: point.y + (next.y - point.y) * radius / after)
+            if i == 0 { path.move(to: entry) } else { path.line(to: entry) }
+            path.curve(to: exit,
+                       controlPoint1: NSPoint(x: entry.x + (point.x - entry.x) * 0.5523,
+                                              y: entry.y + (point.y - entry.y) * 0.5523),
+                       controlPoint2: NSPoint(x: exit.x + (point.x - exit.x) * 0.5523,
+                                              y: exit.y + (point.y - exit.y) * 0.5523))
+        }
+        path.close()
+        return path
     }
 }

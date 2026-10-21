@@ -15,9 +15,15 @@ enum WindowOverlay: Equatable {
 final class WindowState {
     var space: URL?
     /// Whether the space selector covers the file tree.
-    var spacesOpen = false
+    var spacesOpen = false {
+        didSet { if spacesOpen { Popups.dismiss(in: window) } }
+    }
     /// The command palette or full text search over the window.
-    var overlay: WindowOverlay?
+    var overlay: WindowOverlay? {
+        didSet { if overlay != nil { Popups.dismiss(in: window) } }
+    }
+    /// The window showing this state, whose popups close when something covers its content.
+    @ObservationIgnored weak var window: NSWindow?
     /// A file and line to show once the window switched to its space.
     var pendingReveal: SourceLocation?
     /// A file to select once the window opened its space, keeping its saved caret.
@@ -117,6 +123,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         super.init(window: window)
+        state.window = window
         window.delegate = self
         if !window.setFrameUsingName("MainWindow") { window.center() }
         window.setFrameAutosaveName("MainWindow")
@@ -259,7 +266,8 @@ private struct FloatingSidebar: View {
                 .frame(width: state.panelFrame.width)
                 // The card reaches up behind the traffic lights; the file tree stays below them.
                 .background {
-                    SidebarMaterial()
+                    // Floats over the space, so it blurs the editor and preview beneath it.
+                    SidebarMaterial(blending: .withinWindow)
                         .clipShape(Self.shape)
                         .overlay(Self.shape.stroke(Color.primary.opacity(0.12)))
                         .shadow(color: .black.opacity(0.25), radius: 18, y: 6)

@@ -19,6 +19,35 @@ final class ConcealTests: XCTestCase {
         return result
     }
 
+    func testHighlightBoxesFollowVisibleGlyphsAndRevealedNames() throws {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
+        tv.string = "$ \"pytagoras\"(a) + Omega $"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let source = tv.string as NSString
+        let quoted = source.range(of: "\"pytagoras\"")
+        let letters = source.range(of: "pytagoras")
+        let omega = source.range(of: "Omega")
+        let lm = tv.layoutManager!, container = tv.textContainer!
+        lm.ensureLayout(for: container)
+        XCTAssertEqual(tv.highlightBoxes(for: quoted), tv.highlightBoxes(for: letters))
+        let collapsed = try XCTUnwrap(tv.highlightBoxes(for: omega).first)
+        let symbol = lm.boundingRect(forGlyphRange: lm.glyphRange(
+            forCharacterRange: NSRange(location: omega.location, length: 1), actualCharacterRange: nil), in: container)
+        XCTAssertEqual(collapsed.width, symbol.width, accuracy: 0.01)
+        tv.setSelectedRange(NSRange(location: quoted.location + 2, length: 0))
+        tv.updateRevealedEquation()
+        lm.ensureLayout(for: container)
+        let revealed = try XCTUnwrap(tv.highlightBoxes(for: quoted).first)
+        let inner = try XCTUnwrap(tv.highlightBoxes(for: letters).first)
+        XCTAssertGreaterThan(revealed.width, inner.width)
+        tv.setSelectedRange(NSRange(location: omega.location + 2, length: 0))
+        tv.updateRevealedEquation()
+        lm.ensureLayout(for: container)
+        XCTAssertGreaterThan(try XCTUnwrap(tv.highlightBoxes(for: omega).first).width, collapsed.width)
+    }
+
     func testMathShowsRenderedUntilTheCaretTouchesIt() {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -65,43 +94,139 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "$ ?r $ and $ Σ\"\"r $")
     }
 
-    func testSelectionTakesConcealedPiecesWhole() {
+    func testSelectionRevealsThePieceItTouches() {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a Omega b$"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
-        // Dragging from before into Omega takes all of it.
+        XCTAssertEqual(shown(tv), "$a ? b$")
+        // Dragging into Omega keeps the endpoints where they are and uncollapses it.
         tv.setSelectedRange(NSRange(location: 1, length: 4))
-        XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 7))
-        // Shrinking back into it lets go of it.
-        tv.setSelectedRange(NSRange(location: 1, length: 6))
-        XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 2))
-        // From behind, the start snaps the same way.
-        tv.setSelectedRange(NSRange(location: 10, length: 0))
-        tv.setSelectedRange(NSRange(location: 6, length: 4))
-        XCTAssertEqual(tv.selectedRange(), NSRange(location: 3, length: 7))
-        // Inside it, which then shows as typed, every character selects.
-        tv.setSelectedRange(NSRange(location: 4, length: 2))
-        XCTAssertEqual(tv.selectedRange(), NSRange(location: 4, length: 2))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 4), "the selection isn't snapped to the piece")
+        XCTAssertEqual(shown(tv), "$a Omega b$")
+        // Leaving it again collapses it.
+        tv.setSelectedRange(NSRange(location: 1, length: 1))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(shown(tv), "$a ? b$")
+        // Inside the uncollapsed piece every character selects.
+        tv.setSelectedRange(NSRange(location: 4, length: 3))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 4, length: 3))
+        XCTAssertEqual(shown(tv), "$a Omega b$")
     }
 
-    func testCaretEntersPiecesBeforeTheirHiddenQuote() {
+    func testShrinkingADragCollapsesPiecesBeforeMouseUp() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$a Omega b$"
+        tv.concealsMath = true
+        tv.setSelectedRanges([NSValue(range: NSRange(location: 1, length: 4))],
+                             affinity: .downstream, stillSelecting: true)
+        XCTAssertEqual(shown(tv), "$a Omega b$")
+        for end in 4...7 {
+            let proposed = NSRange(location: 1, length: end - 1)
+            XCTAssertEqual(tv.selectionRange(forProposedRange: proposed, granularity: .selectByCharacter), proposed)
+            tv.setSelectedRanges([NSValue(range: proposed)], affinity: .downstream, stillSelecting: true)
+            XCTAssertEqual(tv.selectedRange(), proposed)
+        }
+        tv.setSelectedRanges([NSValue(range: NSRange(location: 1, length: 1))],
+                             affinity: .downstream, stillSelecting: true)
+        XCTAssertEqual(shown(tv), "$a ? b$", "leaving the piece collapses it before mouse-up")
+        XCTAssertEqual(shown(tv), "$a ? b$")
+    }
+
+    func testShrinkingADragKeepsOnlyTheSymbolsItStillTouches() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$a Omega Gamma b$"
+        tv.concealsMath = true
+        func select(_ location: Int, _ length: Int) {
+            tv.setSelectedRanges([NSValue(range: NSRange(location: location, length: length))],
+                                 affinity: .downstream, stillSelecting: true)
+        }
+        select(1, 13)
+        XCTAssertEqual(shown(tv), "$a Omega Gamma b$")
+        select(1, 7)
+        XCTAssertEqual(shown(tv), "$a Omega ? b$")
+        select(4, 11)
+        XCTAssertEqual(shown(tv), "$a Omega Gamma b$")
+        select(10, 5)
+        XCTAssertEqual(shown(tv), "$a ? Gamma b$", "shrinking from the other side collapses Omega")
+        select(14, 1)
+        XCTAssertEqual(shown(tv), "$a ? ? b$")
+    }
+
+    func testMouseDragCanEndInsideAnExpandedSymbol() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        window.contentView = tv
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$a Omega b$"
+        tv.setSelectedRange(NSRange(location: 1, length: 0))
+        tv.concealsMath = true
+        let lm = tv.layoutManager!, container = tv.textContainer!
+        func point(_ index: Int) -> NSPoint {
+            lm.ensureLayout(for: container)
+            let rect = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: NSRange(location: index, length: 1),
+                                                                  actualCharacterRange: nil), in: container)
+            return tv.convert(NSPoint(x: rect.minX + tv.textContainerOrigin.x,
+                                      y: rect.midY + tv.textContainerOrigin.y), to: nil)
+        }
+        let start = point(1), collapsedEnd = point(8)
+        tv.setSelectedRange(NSRange(location: 4, length: 0))
+        let middle = point(5)
+        tv.setSelectedRange(NSRange(location: 1, length: 0))
+        func event(_ type: NSEvent.EventType, at location: NSPoint, number: Int) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                               context: nil, eventNumber: number, clickCount: 1, pressure: 1)!
+        }
+        NSApp.postEvent(event(.leftMouseDragged, at: collapsedEnd, number: 2), atStart: false)
+        NSApp.postEvent(event(.leftMouseDragged, at: middle, number: 3), atStart: false)
+        NSApp.postEvent(event(.leftMouseUp, at: middle, number: 4), atStart: false)
+        tv.mouseDown(with: event(.leftMouseDown, at: start, number: 1))
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 4))
+    }
+
+    func testShrinkingAColumnDragCollapsesNamesBeforeMouseUp() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$a Omega b$\n$c Omega d$"
+        tv.concealsMath = true
+        tv.setColumns([.init(anchor: 1, head: 4), .init(anchor: 12, head: 16)], primary: 1)
+        XCTAssertEqual(tv.selectedRange(), tv.columnCarets[1].range)
+        for _ in 0..<4 {
+            tv.setColumns([.init(anchor: 1, head: 2), .init(anchor: 12, head: 13)], primary: 0)
+            XCTAssertEqual(shown(tv), "$a ? b$?$c ? d$")
+            tv.setColumns([.init(anchor: 1, head: 4), .init(anchor: 12, head: 16)], primary: 1)
+            XCTAssertEqual(shown(tv), "$a Omega b$?$c Omega d$")
+        }
+        tv.setColumns([.init(anchor: 1, head: 2), .init(anchor: 12, head: 13)], primary: 0)
+        XCTAssertEqual(shown(tv), "$a ? b$?$c ? d$", "both collapse while the mouse is still down")
+        XCTAssertEqual(shown(tv), "$a ? b$?$c ? d$")
+    }
+
+    func testCaretEntersPiecesAtTheHiddenQuote() {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a \"abc\" b$"
         tv.setSelectedRange(NSRange(location: 2, length: 0))
         tv.concealsMath = true
         tv.moveRight(nil)
-        XCTAssertEqual(tv.selectedRange().location, 3, "in front of the hidden quote, not after it")
+        XCTAssertEqual(tv.selectedRange().location, 3, "in front of the invisible opening quote")
         tv.updateRevealedEquation()
         tv.moveRight(nil)
         XCTAssertEqual(tv.selectedRange().location, 4, "shown as typed, one character at a time")
-        // A click on the piece's start lands after the hidden quote.
+        // A click where the piece starts lands where it lands, not snapped in front of the hidden quote.
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.updateRevealedEquation()
         tv.setSelectedRange(NSRange(location: 4, length: 0))
-        XCTAssertEqual(tv.selectedRange().location, 3)
+        XCTAssertEqual(tv.selectedRange().location, 4)
     }
 
     func testUpAndDownLandUnderTheCaretOnceThePieceShows() {
@@ -154,11 +279,67 @@ final class ConcealTests: XCTestCase {
         tv.updateRevealedEquation()
         XCTAssertEqual(storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont,
                        Highlighter.operatorFont(size: 13, ligatures: false))
+        tv.setSelectedRange(NSRange(location: 3, length: 0))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont,
+                       Highlighter.operatorFont(size: 13), "the start keeps the ligature")
+        tv.setSelectedRange(NSRange(location: 5, length: 0))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont,
+                       Highlighter.operatorFont(size: 13), "so does the end")
+        tv.setSelectedRange(NSRange(location: 3, length: 2))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont,
+                       Highlighter.operatorFont(size: 13), "a selection over it doesn't break it")
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.updateRevealedEquation()
         XCTAssertEqual(storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont,
                        Highlighter.operatorFont(size: 13))
         XCTAssertTrue(tv.conceals.isEmpty)
+    }
+
+    func testColumnSelectionBreaksOperatorsOnlyBetweenTheirCharacters() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.string = "$x -> y$\n$x -> y$"
+        let storage = tv.textStorage!
+        Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        func font() -> NSFont? { storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont }
+        tv.setColumns([.init(anchor: 3, head: 5), .init(anchor: 12, head: 14)], primary: 0)
+        XCTAssertEqual(font(), Highlighter.operatorFont(size: 13), "endpoints at the edges keep it")
+        tv.setColumns([.init(anchor: 3, head: 4), .init(anchor: 12, head: 13)], primary: 0)
+        XCTAssertEqual(font(), Highlighter.operatorFont(size: 13, ligatures: false),
+                       "an endpoint between the characters breaks it")
+    }
+
+    func testDraggingExpandsOperatorsOnlyWhileAnEndpointIsInside() {
+        let cases: [(NSRange, Bool)] = [
+            (NSRange(location: 0, length: 4), true),
+            (NSRange(location: 0, length: 7), false),
+            (NSRange(location: 4, length: 3), true),
+            (NSRange(location: 3, length: 2), false),
+            (NSRange(location: 4, length: 0), true),
+            (NSRange(location: 3, length: 0), false),
+            (NSRange(location: 5, length: 0), false),
+        ]
+        for op in ["->", ":="] {
+            let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+            tv.string = "$x \(op) y$\n$x \(op) y$"
+            let storage = tv.textStorage!
+            Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+            for (range, expanded) in cases {
+                tv.setSelectedRanges([NSValue(range: range)], affinity: .downstream, stillSelecting: true)
+                XCTAssertEqual(storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont,
+                               Highlighter.operatorFont(size: 13, ligatures: !expanded), "\(op): \(range)")
+            }
+            for (range, expanded) in cases {
+                tv.setColumns([.init(anchor: range.location, head: NSMaxRange(range)),
+                               .init(anchor: range.location + 9, head: NSMaxRange(range) + 9)], primary: 1)
+                for index in [3, 12] {
+                    XCTAssertEqual(storage.attribute(.font, at: index, effectiveRange: nil) as? NSFont,
+                                   Highlighter.operatorFont(size: 13, ligatures: !expanded), "\(op): \(range)")
+                }
+            }
+        }
     }
 
     func testEscapesShowTheirCharacter() {
@@ -187,6 +368,211 @@ final class ConcealTests: XCTestCase {
         }
         let width = ("M" as NSString).size(withAttributes: [.font: tv.font!]).width
         XCTAssertEqual(x(4) - x(2), width, accuracy: 0.5, "the comma follows the V directly")
+    }
+
+    func testColumnDragExpandsTheMathItTouches() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$a Omega b$\n$c Omega d$"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let lm = tv.layoutManager!, container = tv.textContainer!
+        lm.ensureLayout(for: container)
+        func box(_ range: NSRange) -> NSRect {
+            lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil), in: container)
+        }
+        let origin = tv.textContainerOrigin
+        let start = NSPoint(x: box(NSRange(location: 1, length: 1)).minX + origin.x,
+                            y: box(NSRange(location: 1, length: 1)).midY + origin.y)
+        // Inside the collapsed Omega on the second line.
+        let omega = box(NSRange(location: 15, length: 5))
+        let end = NSPoint(x: omega.minX + omega.width * 0.75 + origin.x, y: omega.midY + origin.y)
+        var previous: [NSRange] = []
+        for i in 0..<4 {
+            let found = tv.columnCarets(from: start, to: end)
+            tv.setColumns(found.carets, primary: found.primary)
+            XCTAssertEqual(shown(tv), "$a Omega b$?$c Omega d$",
+                           "the columns uncollapse what they touch while dragging")
+            XCTAssertEqual(tv.selectedRange(), tv.columnCarets[tv.primaryColumn].range)
+            // The first pass reveals them; after that the layout is settled.
+            if i >= 2 { XCTAssertEqual(tv.columnCarets.map(\.range), previous) }
+            previous = tv.columnCarets.map(\.range)
+        }
+    }
+
+    func testColumnHitTestingStaysStableNearHiddenOpeningQuotes() {
+        for (step, delta) in (-40...80).flatMap({ step in [-0.4, -0.2, 0, 0.2, 0.4].map { (step, $0) } }) {
+            let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+            tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            tv.string = "#worksheet(\n  $ \"pytagoras\"(a, b) $\n  $ \"circle\"(x, r) $\n  $ r := 3 $\n)"
+            Highlighter.apply(to: tv.textStorage!, font: tv.font!)
+            tv.concealsMath = true
+            let lm = tv.layoutManager!, container = tv.textContainer!
+            lm.ensureLayout(for: container)
+            let source = tv.string as NSString
+            func box(_ text: String) -> NSRect {
+                lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: source.range(of: text),
+                                                           actualCharacterRange: nil), in: container)
+            }
+            let letter = box("p"), top = box("#"), bottom = box("r :=")
+            let width = ("M" as NSString).size(withAttributes: [.font: tv.font!]).width
+            let x = letter.minX + CGFloat(step) * width / 40 + tv.textContainerOrigin.x
+            let start = NSPoint(x: x, y: top.midY + tv.textContainerOrigin.y)
+            let end = NSPoint(x: x + CGFloat(delta) * width, y: bottom.midY + tv.textContainerOrigin.y)
+            var history: [[NSRange]] = []
+            for _ in 0..<6 {
+                let found = tv.columnCarets(from: start, to: end)
+                tv.setColumns(found.carets, primary: found.primary)
+                history.append(tv.columnCarets.map(\.range))
+            }
+            XCTAssertEqual(history[4], history[5], "step \(step), delta \(delta): \(history)")
+        }
+    }
+
+    func testColumnDragRevealsQuotesOnlyAfterCrossingTheirMidpoint() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$ \"p\" $\n$ \"p\" $"
+        Highlighter.apply(to: tv.textStorage!, font: tv.font!)
+        tv.concealsMath = true
+        let lm = tv.layoutManager!, container = tv.textContainer!
+        lm.ensureLayout(for: container)
+        func box(_ index: Int) -> NSRect {
+            lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: NSRange(location: index, length: 1),
+                                                       actualCharacterRange: nil), in: container)
+        }
+        let first = box(3), last = box(11), origin = tv.textContainerOrigin
+        let width = ("M" as NSString).size(withAttributes: [.font: tv.font!]).width
+        let start = NSPoint(x: first.minX - width + origin.x, y: first.midY + origin.y)
+        for fraction in [0.25, 0.75, 0.25, 0.75] {
+            let end = NSPoint(x: first.minX + fraction * width + origin.x, y: last.midY + origin.y)
+            for _ in 0..<4 {
+                let found = tv.columnCarets(from: start, to: end)
+                tv.setColumns(found.carets, primary: found.primary)
+                XCTAssertEqual(shown(tv).contains("\""), fraction > 0.5,
+                               "the quotes must stay stable on either side of the midpoint")
+            }
+        }
+    }
+
+    func testRegularMouseDragCanStopBeforeAnOpeningQuote() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        window.contentView = tv
+        window.makeKeyAndOrderFront(nil)
+        tv.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
+        tv.string = "$ \"pytagoras\"(a, b) $"
+        Highlighter.apply(to: tv.textStorage!, font: tv.font!)
+        tv.concealsMath = true
+        let lm = tv.layoutManager!, container = tv.textContainer!
+        lm.ensureLayout(for: container)
+        func point(_ index: Int) -> NSPoint {
+            let box = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: NSRange(location: index, length: 1),
+                                                                 actualCharacterRange: nil), in: container)
+            return NSPoint(x: box.minX + tv.textContainerOrigin.x, y: box.midY + tv.textContainerOrigin.y)
+        }
+        let start = point(0), letter = point(3)
+        let width = ("M" as NSString).size(withAttributes: [.font: tv.font!]).width
+        let end = NSPoint(x: letter.x + width / 4, y: letter.y)
+        func event(_ type: NSEvent.EventType, point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: tv.convert(point, to: nil), modifierFlags: [],
+                               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                               context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        var history: [NSRange] = []
+        var ticks = 0
+        let timer = Timer(timeInterval: 0.025, repeats: true) { timer in
+            MainActor.assumeIsolated {
+                history.append(tv.selectedRange())
+                window.displayIfNeeded()
+                ticks += 1
+                if ticks < 9 {
+                    NSApp.postEvent(event(.leftMouseDragged, point: end), atStart: false)
+                } else {
+                    NSApp.postEvent(event(.leftMouseUp, point: end), atStart: false)
+                    timer.invalidate()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        RunLoop.main.add(timer, forMode: .default)
+        defer { timer.invalidate() }
+        tv.mouseDown(with: event(.leftMouseDown, point: start))
+        XCTAssertEqual(history.count, 9)
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 0, length: 2))
+        XCTAssertFalse(shown(tv).contains("\""))
+        XCTAssertTrue(history.suffix(3).allSatisfy { $0 == NSRange(location: 0, length: 2) }, "\(history)")
+    }
+
+    func testRegularDragHitTestingStaysStableAtHiddenQuotes() {
+        for fraction in [-0.25, 0, 0.25, 0.49, 0.51, 0.75] {
+            let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+            tv.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
+            tv.string = "$ \"pytagoras\"(a, b) $"
+            Highlighter.apply(to: tv.textStorage!, font: tv.font!)
+            tv.concealsMath = true
+            let lm = tv.layoutManager!, container = tv.textContainer!
+            lm.ensureLayout(for: container)
+            let letter = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: NSRange(location: 3, length: 1),
+                                                                    actualCharacterRange: nil), in: container)
+            let width = ("M" as NSString).size(withAttributes: [.font: tv.font!]).width
+            let point = NSPoint(x: letter.minX + fraction * width + tv.textContainerOrigin.x,
+                                y: letter.midY + tv.textContainerOrigin.y)
+            var history: [NSRange] = []
+            for _ in 0..<8 {
+                let head = tv.characterIndexForInsertion(at: point)
+                let proposed = NSRange(location: 0, length: head)
+                let range = tv.selectionRange(forProposedRange: proposed, granularity: .selectByCharacter)
+                tv.setSelectedRanges([NSValue(range: range)], affinity: .downstream, stillSelecting: true)
+                lm.ensureLayout(for: container)
+                history.append(tv.selectedRange())
+            }
+            XCTAssertEqual(history[6], history[7], "fraction \(fraction): \(history)")
+        }
+    }
+
+    func testColumnDragExpandsSolvengNames() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "```solveng\nDelta_T := 2\nDelta_T := 3\n```"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let lm = tv.layoutManager!, container = tv.textContainer!
+        lm.ensureLayout(for: container)
+        // `shown` draws line breaks as `?` too.
+        let drawn = "```solveng??_T := 2??_T := 3?```"
+        XCTAssertEqual(shown(tv), drawn)
+        func box(_ index: Int) -> NSRect {
+            lm.boundingRect(forGlyphRange: NSRange(location: index, length: 1), in: container)
+        }
+        // From the start of Delta on the first line to after it on the second.
+        let start = NSPoint(x: box(11).minX + tv.textContainerOrigin.x, y: box(11).midY + tv.textContainerOrigin.y)
+        let end = NSPoint(x: box(29).minX + tv.textContainerOrigin.x, y: box(29).midY + tv.textContainerOrigin.y)
+        let found = tv.columnCarets(from: start, to: end)
+        tv.setColumns(found.carets, primary: found.primary)
+        XCTAssertEqual(tv.columnCarets.map(\.range), [NSRange(location: 11, length: 5), NSRange(location: 24, length: 5)],
+                       "the drag covers both names")
+        XCTAssertEqual(shown(tv), "```solveng?Delta_T := 2?Delta_T := 3?```",
+                       "the names uncollapse while the drag is still going")
+    }
+
+    func testColumnSelectsIntoAPieceAndUncollapsesIt() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$a Omega b$\n$c Omega d$"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        XCTAssertEqual(shown(tv), "$a ? b$?$c ? d$")
+        // The endpoints stay inside the collapsed names instead of snapping to them whole.
+        tv.setColumns([.init(anchor: 1, head: 4), .init(anchor: 12, head: 16)], primary: 0)
+        XCTAssertEqual(tv.columnCarets.map(\.range), [NSRange(location: 1, length: 3), NSRange(location: 12, length: 4)])
+        XCTAssertEqual(shown(tv), "$a Omega b$?$c Omega d$", "touching them uncollapses them")
+        // Moving off them collapses them again.
+        tv.setColumns([.init(anchor: 1, head: 2), .init(anchor: 12, head: 13)], primary: 0)
+        XCTAssertEqual(shown(tv), "$a ? b$?$c ? d$")
     }
 
     func testEditingOneEquationKeepsTheOthersRight() {

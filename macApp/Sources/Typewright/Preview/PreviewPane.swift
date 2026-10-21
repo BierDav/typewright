@@ -35,10 +35,13 @@ struct WebViewHost: NSViewRepresentable {
 
 /// Behind-window blur, so the preview reads as a translucent sidebar.
 struct SidebarMaterial: NSViewRepresentable {
+    /// `.withinWindow` blurs the app's own content instead of the desktop.
+    var blending: NSVisualEffectView.BlendingMode = .behindWindow
+
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
         view.material = .sidebar
-        view.blendingMode = .behindWindow
+        view.blendingMode = blending
         view.state = .followsWindowActiveState
         return view
     }
@@ -47,6 +50,38 @@ struct SidebarMaterial: NSViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSVisualEffectView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+}
+
+/// Where the preview sits next to the editor; a setting, switchable from the command palette.
+enum PreviewPosition: String, CaseIterable, Identifiable {
+    case trailing, top, bottom
+    static let defaultsKey = "previewPosition"
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .trailing: "Right"
+        case .top: "Top"
+        case .bottom: "Bottom"
+        }
+    }
+
+    /// How the palette phrases moving the preview here.
+    var place: String {
+        switch self {
+        case .trailing: "on the Right"
+        case .top: "at the Top"
+        case .bottom: "at the Bottom"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .trailing: "rectangle.righthalf.filled"
+        case .top: "rectangle.tophalf.filled"
+        case .bottom: "rectangle.bottomhalf.filled"
+        }
     }
 }
 

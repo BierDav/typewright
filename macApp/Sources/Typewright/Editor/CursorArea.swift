@@ -21,10 +21,15 @@ struct CursorArea: NSViewRepresentable {
 
     /// The cursor of the area under the event's location, if any.
     @MainActor static func cursor(for event: NSEvent) -> NSCursor? {
-        guard let window = event.window else { return nil }
+        cursor(in: event.window, at: event.locationInWindow)
+    }
+
+    /// The cursor of the area under a window point, for callers without a mouse event.
+    @MainActor static func cursor(in window: NSWindow?, at point: NSPoint) -> NSCursor? {
+        guard let window else { return nil }
         let hits = areas.allObjects.filter { area in
             area.window === window && !area.isHiddenOrHasHiddenAncestor
-                && area.convert(area.bounds, to: nil).contains(event.locationInWindow)
+                && area.convert(area.bounds, to: nil).contains(point)
         }
         return (hits.first(where: \.isModal) ?? hits.first)?.cursor
     }

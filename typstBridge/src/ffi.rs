@@ -545,4 +545,77 @@ Text $a = 1$ more."#;
         assert_eq!(report["defined"][0]["name"], "a");
         assert_eq!(report["blocks"], 1);
     }
+
+    #[test]
+    fn compiles_typst_operator_symbol_aliases_without_changing_source_locations() {
+        for alias in ["ΛΩ", "Lambda\"\"Omega", "LambdaΩ", "ΛOmega"] {
+            let main = format!("#let ΛΩ = math.op(\"tri\")\n#let graph(body) = {{ let op = body.body.children.at(0); assert.eq(op.func(), math.op); assert.eq(op.text.children.at(0).text, \"tri\"); assert.eq(op.text.children.at(1).value, \"ΛΩ\") }}\n#graph($ {alias}(x) $)");
+            let root = CString::new(std::env::temp_dir().to_str().unwrap()).unwrap();
+            let path = CString::new("main.typ").unwrap();
+            unsafe {
+                let world = tw_world_new(root.as_ptr());
+                tw_world_set_main(world, path.as_ptr());
+                tw_world_set_overlay(world, path.as_ptr(), main.as_ptr(), main.len());
+                let (_, diagnostics) = (*world).compile(TWFormat::Check);
+                assert!(diagnostics.is_empty(), "{alias}: {diagnostics:?}");
+                let source = (*world).source((*world).main.unwrap()).unwrap();
+                assert_eq!(source.text(), main);
+                tw_world_free(world);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a local solveng package (SOLVENG_ROOT)"]
+    fn graph_labels_use_typst_binding_names() {
+        let package = std::env::var("SOLVENG_ROOT").expect("SOLVENG_ROOT");
+        let main = r#"#import "/src/graph.typ": graph
+#let Λ = math.op("tri")
+#let ΛΩ = math.op("tri")
+#let dreieick = math.op("tri")
+#let sqrt = math.op("tri")
+#let plain(c) = if c.has("text") and type(c.text) == str { c.text } else if c.has("children") { c.children.map(plain).join() } else { "" }
+#show math.op: it => { assert.ne(plain(it.text).trim(), "tri"); it }
+#graph($ Lambda(2x) $, errors: "panic", samples: 20)
+#graph($ Lambda""Omega(2x) + dreieick(x) $, errors: "panic", samples: 20)
+#graph($ dreieick(x) \ Lambda(x) $, errors: "panic", samples: 20)
+#graph($ sqrt(x) $, errors: "panic", samples: 20)
+"#;
+        let root = CString::new(package).unwrap();
+        let path = CString::new("operator-label-check.typ").unwrap();
+        unsafe {
+            let world = tw_world_new(root.as_ptr());
+            tw_world_set_main(world, path.as_ptr());
+            tw_world_set_overlay(world, path.as_ptr(), main.as_ptr(), main.len());
+            let (svg, diagnostics) = (*world).compile(TWFormat::Svg);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let svg = String::from_utf8(svg.expect("graph output")).unwrap();
+            let labels: String = svg.split("<text ").skip(1)
+                .filter_map(|text| text.split_once('>')?.1.split_once("</text>").map(|(text, _)| text))
+                .collect();
+            for name in ["Λ", "ΛΩ", "dreieick", "sqrt"] {
+                assert!(labels.contains(name), "missing graph label: {name} in {labels}");
+            }
+            tw_world_free(world);
+        }
+    }
+
+    #[test]
+    fn operator_aliases_do_not_make_other_names_available() {
+        let main = "#let dreieick = math.op(\"tri\")\n#graph($ tri(x) $)".replace("#graph", "#box");
+        let root = CString::new(std::env::temp_dir().to_str().unwrap()).unwrap();
+        let path = CString::new("main.typ").unwrap();
+        unsafe {
+            let world = tw_world_new(root.as_ptr());
+            tw_world_set_main(world, path.as_ptr());
+            tw_world_set_overlay(world, path.as_ptr(), main.as_ptr(), main.len());
+            let (_, diagnostics) = (*world).compile(TWFormat::Check);
+            assert!(diagnostics.iter().any(|d| d.message.contains("unknown variable: tri")));
+            let d = diagnostics.iter().find(|d| d.message.contains("unknown variable: tri")).unwrap();
+            let json = crate::diagnostic(&*world, d);
+            assert_eq!((json.line, json.column), (2, 8));
+            tw_world_free(world);
+        }
+    }
+
 }

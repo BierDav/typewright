@@ -913,6 +913,8 @@ final class Workspace: EditorLanguage {
     }
 
     func documentation(of item: CompletionItem) async -> String? {
+        // solveng's functions document themselves, the same as their hover.
+        if item.kind == .function, let f = SolvengSupport.function(item.label) { return FunctionDocs.markdown(for: f) }
         guard let client = languageClient() else { return item.documentation }
         if let docs = await client.documentation(of: item) { return docs }
         guard let file = selectedFile, selectedKind == .typst else { return nil }
@@ -1104,7 +1106,13 @@ final class Workspace: EditorLanguage {
     func hover(at offset: Int) async -> (markdown: String, range: NSRange?)? {
         guard let file = selectedFile, selectedKind == .typst else { return nil }
         if let solveng = SolvengSupport.hover(text, context: solvengContext(), offset: offset) {
-            return (solveng.markdown, NSRange(location: solveng.start, length: solveng.end - solveng.start))
+            let range = NSRange(location: solveng.start, length: solveng.end - solveng.start)
+            // One of solveng's functions: the docs its completion shows.
+            let name = (text as NSString).substring(with: range)
+            if solveng.markdown.hasPrefix("`\(name)` (solveng)"), let f = SolvengSupport.function(name) {
+                return (FunctionDocs.markdown(for: f), range)
+            }
+            return (solveng.markdown, range)
         }
         var docs = await languageClient()?.hover(in: file, text: text as NSString, at: offset)
         if docs == nil { docs = await languageClient()?.parameterDocs(in: file, text: text as NSString, at: offset) }
@@ -1198,13 +1206,20 @@ final class Workspace: EditorLanguage {
     private func quotingFixes(for diagnostic: Diagnostic) -> [QuickFix] {
         let prefix = "unknown variable: "
         guard diagnostic.message.hasPrefix(prefix), let file = selectedFile, diagnostic.path == relativePath(of: file),
-              text.contains(SolvengSupport.tag), let tv = find.textView else { return [] }
+              text.contains(SolvengSupport.tag) || text.contains("worksheet") || text.contains("graph"),
+              let tv = find.textView else { return [] }
         let name = String(diagnostic.message.dropFirst(prefix.count))
         let s = text as NSString
         guard let line = CodeEditor.lineRange(diagnostic.line, in: s) else { return [] }
         let range = NSRange(location: line.location + max(diagnostic.column - 1, 0), length: (name as NSString).length)
         guard NSMaxRange(range) <= s.length, s.substring(with: range) == name,
               s.substring(to: range.location).filter({ $0 == "$" }).count % 2 == 1 else { return [] }
+        if let declaration = SolvengSupport.operatorDeclaration(name) {
+            return [QuickFix(id: "solveng.operator", title: "Define “\(name)” with math.op", icon: "function") {
+                guard tv.string == s as String else { return }
+                tv.insertText(declaration + "\n", replacementRange: NSRange(location: 0, length: 0))
+            }]
+        }
         return [QuickFix(id: "solveng.quote", title: "Quote “\(name)” as a solveng name or unit", icon: "quote.opening") {
             guard tv.string == s as String else { return }
             tv.insertText("\"\(name)\"", replacementRange: range)

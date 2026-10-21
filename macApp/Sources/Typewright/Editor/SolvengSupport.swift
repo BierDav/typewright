@@ -37,6 +37,25 @@ enum SolvengSupport {
         let text: String
     }
 
+    /// One of the package's functions, read from its doc comments.
+    struct Function: Decodable {
+        let name: String
+        /// The first paragraph of its docs.
+        let doc: String
+        let positional: [Parameter]
+        let named: [Parameter]
+    }
+
+    struct Parameter: Decodable {
+        let name: String
+        /// `auto, str`, as the docs list them.
+        let types: String
+        let doc: String
+        /// As in the signature, `auto (4)` for options whose `auto` means a default.
+        let `default`: String
+        let variadic: Bool
+    }
+
     struct Hover: Decodable {
         let start: Int
         let end: Int
@@ -128,6 +147,8 @@ enum SolvengSupport {
         decode(call("complete", document, context: context, offset: offset))
     }
 
+    static func function(_ name: String) -> Function? { decode(call("function", name)) }
+
     static func hover(_ document: String, context: String, offset: Int) -> Hover? {
         decode(call("hover", document, context: context, offset: offset))
     }
@@ -161,5 +182,7 @@ enum SolvengSupport {
     }
 
     /// Local files a document imports or includes, as written.
+    static func operatorDeclaration(_ name: String) -> String? { decode(call("operatorDeclaration", name)) }
+
     static func references(_ document: String) -> [String] { decode(call("references", document)) ?? [] }
 }

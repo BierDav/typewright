@@ -448,7 +448,7 @@ struct ZenMenuButton: View {
         // Defer so the open state renders before the menu's tracking loop starts.
         DispatchQueue.main.async {
             if let view = anchor.view {
-                menu.popUp(positioning: nil, at: NSPoint(x: 0, y: -4), in: view)
+                Popups.show(menu, at: NSPoint(x: 0, y: -4), in: view)
             }
             isOpen = false
             onOpenChange(false)

@@ -31,10 +31,15 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// tinymist's trigger characters.
     private static let triggers: Set<Character> = ["#", "(", "<", ",", ".", ":", "/", "\"", "@"]
 
+    private var dismissal: (any NSObjectProtocol)?
+
     init(textView: NSTextView) {
         self.textView = textView
         super.init()
+        dismissal = Popups.observe(window: { [weak textView] in textView?.window }) { [weak self] in self?.hide() }
     }
+
+    deinit { if let dismissal { NotificationCenter.default.removeObserver(dismissal) } }
 
     var isVisible: Bool { panel.isVisible && !shown.isEmpty }
 
@@ -145,9 +150,17 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
     private func showDocs(_ markdown: String) {
         hideDocs()
         guard let window = panel.parent else { return }
-        let width = HoverContent.isLarge(markdown) ? HoverContent.baseWidth : Self.width
+        let width = HoverContent.width(for: markdown, screen: window.screen)
+        weak var placed: NSPanel?
         let host = NSHostingView(rootView: HoverContent(errors: [], markdown: markdown, width: width, fixes: { _ in [] },
-                                                        onClose: {}, onSize: { _ in }))
+                                                        onClose: {}, onSize: { size in
+            // Following a link grows it downwards, its top staying beside the list's.
+            guard let panel = placed, size.height > 0, abs(panel.frame.height - size.height) > 0.5 else { return }
+            var frame = panel.frame
+            frame.origin.y = frame.maxY - size.height
+            frame.size = size
+            panel.setFrame(frame, display: true)
+        }))
         host.frame.size = host.fittingSize
         let docs = NSPanel(contentRect: NSRect(origin: .zero, size: host.frame.size),
                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
@@ -163,6 +176,7 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
         if origin.x + host.frame.width > screen.maxX { origin.x = list.minX - host.frame.width - 4 }
         origin.y = max(origin.y, screen.minY)
         docs.setFrameOrigin(origin)
+        placed = docs
         window.addChildWindow(docs, ordered: .above)
         docs.orderFront(nil)
         docsPanel = docs
@@ -367,6 +381,7 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     private func show() {
         guard let tv = textView, let window = tv.window else { return }
+        guard !Popups.isCovered(window) else { return hide() }
         let height = CGFloat(min(shown.count, Self.maxRows)) * Self.rowHeight + 8
         let caret = tv.firstRect(forCharacterRange: NSRange(location: anchor, length: 0), actualRange: nil)
         let screen = window.screen?.visibleFrame ?? .infinite

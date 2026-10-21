@@ -659,6 +659,13 @@ struct CommandPalette: View {
                         section: "Settings", keywords: ["zoom out", "text size", "setting"],
                         action: .stay { defaults.set(max(size - 1, 9), forKey: "editorFontSize") }),
         ]
+        let position = defaults.string(forKey: PreviewPosition.defaultsKey) ?? PreviewPosition.trailing.rawValue
+        for other in PreviewPosition.allCases where other.rawValue != position {
+            items.append(PaletteItem(id: "settings.previewPosition.\(other.rawValue)", title: "Show Preview \(other.place)",
+                                     icon: other.icon, section: "Settings",
+                                     keywords: ["split", "horizontal", "vertical", "layout", "above", "below", "side by side", "setting"],
+                                     action: .run { defaults.set(other.rawValue, forKey: PreviewPosition.defaultsKey) }))
+        }
         let appearance = defaults.string(forKey: "appearance") ?? Appearance.system.rawValue
         for mode in Appearance.allCases where mode.rawValue != appearance {
             items.append(PaletteItem(id: "settings.appearance.\(mode.rawValue)", title: "Use \(mode.title) Appearance",

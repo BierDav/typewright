@@ -51,6 +51,7 @@ final class SettingsWindowController: NSWindowController {
 struct GeneralSettings: View {
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
+    @AppStorage(PreviewPosition.defaultsKey) private var previewPosition = PreviewPosition.trailing
     @Bindable private var compilers = CompilerManager.shared
     @Bindable private var textSize = PreviewTextSize.shared
 
@@ -64,6 +65,9 @@ struct GeneralSettings: View {
             }
 
             Section {
+                Picker("Position", selection: $previewPosition) {
+                    ForEach(PreviewPosition.allCases) { Text($0.title).tag($0) }
+                }
                 Stepper(value: $textSize.size, in: PreviewTextSize.range, step: 1) {
                     LabeledContent("Text size", value: "\(Int(textSize.size.rounded())) px")
                 }

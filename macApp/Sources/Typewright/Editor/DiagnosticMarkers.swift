@@ -26,11 +26,15 @@ final class DiagnosticMarkers: NSView {
     private var markers: [Marker] = []
     private var hovered: Int?
     private var panel: NSPanel?
+    private var dismissal: (any NSObjectProtocol)?
 
     init(textView: NSTextView) {
         self.textView = textView
         super.init(frame: .zero)
+        dismissal = Popups.observe(window: { [weak self] in self?.window }) { [weak self] in self?.hidePreview() }
     }
+
+    deinit { if let dismissal { NotificationCenter.default.removeObserver(dismissal) } }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -144,6 +148,7 @@ final class DiagnosticMarkers: NSView {
     override func mouseEntered(with event: NSEvent) { follow(event.locationInWindow) }
 
     private func follow(_ windowPoint: NSPoint) {
+        guard !Popups.isCovered(window) else { return }
         guard let index = marker(at: convert(windowPoint, from: nil)) else { return }
         NSCursor.arrow.set()
         hover(index)
@@ -213,7 +218,7 @@ final class DiagnosticMarkers: NSView {
         guard let tv = textView, let window else { return }
         let s = tv.string as NSString
         guard NSMaxRange(marker.range) <= s.length else { return }
-        let host = NSHostingView(rootView: HoverContent(errors: marker.diagnostics, markdown: nil, width: HoverContent.baseWidth,
+        let host = PopupHostingView(rootView: HoverContent(errors: marker.diagnostics, markdown: nil, width: HoverContent.baseWidth,
                                                         fixes: { _ in [] }, onClose: { [weak self] in self?.hidePreview() },
                                                         onSize: { _ in }))
         host.frame.size = host.fittingSize

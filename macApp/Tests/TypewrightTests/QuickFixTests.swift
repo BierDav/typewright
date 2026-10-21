@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Typewright
 
@@ -24,4 +25,25 @@ final class QuickFixTests: XCTestCase {
         XCTAssertEqual(fixes.last?.id, "font.search")
         XCTAssertNotNil(fixes.last?.run)
     }
+
+    func testUndeclaredOperatorsOfferAMathOpDefinition() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = "#graph($ tri(x) $)"
+        let main = root.appendingPathComponent("main.typ")
+        try document.write(to: main, atomically: true, encoding: .utf8)
+        let workspace = Workspace(url: main)
+        defer { workspace.close() }
+        let editor = TypstTextView(frame: .zero)
+        editor.string = document
+        workspace.find.textView = editor
+        let diagnostic = Diagnostic(path: "main.typ", line: 1, column: 10, severity: .error, message: "unknown variable: tri")
+        let fixes = workspace.quickFixes(for: diagnostic)
+        XCTAssertTrue(fixes.contains { $0.id == "solveng.operator" })
+        XCTAssertFalse(fixes.contains { $0.id == "solveng.quote" })
+        fixes.first { $0.id == "solveng.operator" }?.run?()
+        XCTAssertEqual(editor.string, "#let tri = math.op(\"tri\")\n" + document)
+    }
+
 }

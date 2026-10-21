@@ -85,9 +85,17 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     // MARK: Column selection
 
+    /// The fill of selections; a column selection draws rounded boxes of its own.
+    var selectionColor = NSColor.gray.withAlphaComponent(0.3) {
+        didSet { updateSelectionBackground() }
+    }
     /// Carets edited together (see ColumnSelection.swift); empty while there's one selection.
     var columnCarets: [ColumnCaret] = [] {
-        didSet { if columnCarets != oldValue { needsDisplay = true } }
+        didSet {
+            guard columnCarets != oldValue else { return }
+            needsDisplay = true
+            updateSelectionBackground()
+        }
     }
     /// The caret the text view selects itself, which scrolling and the caret drawing follow.
     var primaryColumn = 0
@@ -98,10 +106,31 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         didSet { if columnSelectionMode != oldValue { window?.invalidateCursorRects(for: self) } }
     }
 
+    /// While columns draw their own boxes, the text view's rectangular selection background steps aside.
+    private func updateSelectionBackground() {
+        let color = isColumnMode ? NSColor.clear : selectionColor
+        guard (selectedTextAttributes[.backgroundColor] as? NSColor) != color else { return }
+        var attributes = selectedTextAttributes
+        attributes[.backgroundColor] = color
+        selectedTextAttributes = attributes
+        needsDisplay = true
+    }
+
+    private var isSelectingWithMouse = false
+
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
         if !isUpdatingColumns { endColumns() }
         if !isMovingVertically { verticalGoal = nil }
-        super.setSelectedRanges(snappedToPieces(ranges), affinity: affinity, stillSelecting: stillSelecting)
+        // AppKit's mouse tracker bypasses public hit-testing for hidden glyphs.
+        let ranges = !isUpdatingColumns && (isSelectingWithMouse || stillSelecting) && selectionGranularity == .selectByCharacter
+            ? ranges.map { value in
+                let range = value.rangeValue
+                let start = insertionIndexForConceals(range.location)
+                let end = insertionIndexForConceals(NSMaxRange(range))
+                return NSValue(range: NSRange(location: start, length: max(0, end - start)))
+            } : ranges
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        if !isUpdatingColumns { updateRevealedEquation() }
     }
 
     override func doCommand(by selector: Selector) {
@@ -332,52 +361,44 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         }
     }
 
-    /// The piece the caret is in or right next to, shown as typed.
-    private var revealedPiece: NSRange?
-
-    /// A selection reaching into a concealed piece from outside takes all of it or none, so `Ω` selects as one
-    /// character; inside a piece, which then shows as typed, it goes character by character.
-    private func snappedToPieces(_ ranges: [NSValue]) -> [NSValue] {
-        guard concealsMath, !pieces.isEmpty else { return ranges }
-        let old = selectedRange()
-        let piece = { (i: Int) in self.pieces.first { $0.range.location < i && i < NSMaxRange($0.range) }?.range }
-        return ranges.map { value in
-            let r = value.rangeValue
-            if r.length == 0 { return NSValue(range: NSRange(location: snappedCaret(r.location), length: 0)) }
-            guard !pieces.contains(where: { NSIntersectionRange($0.range, r) == r }) else { return value }
-            var start = r.location, end = NSMaxRange(r)
-            // An end that moved snaps the way it moved; one that didn't takes in the whole piece.
-            if let p = piece(start) { start = start > old.location ? NSMaxRange(p) : p.location }
-            if let p = piece(end) { end = end < NSMaxRange(old) ? p.location : NSMaxRange(p) }
-            return NSValue(range: NSRange(location: start, length: max(end - start, 0)))
-        }
-    }
-
-    /// A caret coming into a concealed piece right after its hidden opening (a click on its start, → from before it)
-    /// goes in front of it: hidden characters take no space, so the text view puts the caret after them.
-    private func snappedCaret(_ caret: Int) -> Int {
-        guard let piece = pieces.first(where: { $0.range.location < caret && caret < NSMaxRange($0.range) })?.range,
-              piece != revealedPiece,
-              (piece.location..<caret).allSatisfy({ conceal(at: $0)?.replacement == 0 }) else { return caret }
-        return piece.location
-    }
+    /// The pieces shown as typed: the one the caret is in or next to, or all a selection or column touches.
+    private var revealedPieces: [NSRange] = []
 
     func updateRevealedEquation() {
         updateOperatorLigatures()
-        reveal(piece(revealedBy: selectedRange()))
+        reveal(piecesShown())
     }
 
-    /// The piece a selection shows as typed: the one it's in or right next to.
+    /// The piece at the caret, or every piece a selection or column touches.
+    private func piecesShown() -> [NSRange] {
+        let selections = isColumnMode ? columnCarets.map(\.range) : [selectedRange()]
+        return pieces.map(\.range).filter { piece in
+            selections.contains { selection in
+                selection.length == 0
+                    ? piece.location <= selection.location && selection.location <= NSMaxRange(piece)
+                    : NSIntersectionRange(piece, selection).length > 0
+            }
+        }
+    }
+
+    /// The piece a caret is in or right next to.
     private func piece(revealedBy selection: NSRange) -> NSRange? {
         pieces.first { $0.range.location <= selection.location && NSMaxRange(selection) <= NSMaxRange($0.range) }?.range
     }
 
-    private func reveal(_ piece: NSRange?) {
-        guard piece != revealedPiece else { return }
-        let old = revealedPiece
-        revealedPiece = piece
-        if let old { invalidateGlyphs(in: old) }
-        if let piece { invalidateGlyphs(in: piece) }
+    // A hidden opening quote shares its insertion point with the first visible character.
+    func insertionIndexForConceals(_ index: Int) -> Int {
+        guard let piece = piece(revealedBy: NSRange(location: index, length: 0)),
+              (piece.location..<index).allSatisfy({ conceal(at: $0)?.replacement == 0 }) else { return index }
+        return piece.location
+    }
+
+    private func reveal(_ pieces: [NSRange]) {
+        let shown = Set(pieces)
+        let changed = Set(revealedPieces).symmetricDifference(shown)
+        guard !changed.isEmpty else { return }
+        revealedPieces = shown.sorted { $0.location < $1.location }
+        for piece in changed { invalidateGlyphs(in: piece) }
     }
 
     /// The x the caret keeps while going up and down, and whether it's going so.
@@ -405,8 +426,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         let point = NSPoint(x: x, y: y)
         var index = characterIndexForInsertion(at: point)
         // The piece it lands in shows as typed, which moves what's after it; land where that line has the caret's x.
-        if let piece = piece(revealedBy: NSRange(location: index, length: 0)), piece != revealedPiece {
-            reveal(piece)
+        if let piece = piece(revealedBy: NSRange(location: index, length: 0)), !revealedPieces.contains(piece) {
+            reveal([piece])
             index = characterIndexForInsertion(at: point)
         }
         isMovingVertically = true
@@ -420,13 +441,15 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     private func updateOperatorLigatures() {
         guard let storage = textStorage else { return }
         let text = storage.string as NSString
-        let selection = selectedRange()
+        let selections = isColumnMode ? columnCarets.map(\.range) : [selectedRange()]
         var changes: [(NSRange, NSFont)] = []
         storage.enumerateAttribute(.font, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
             guard let font = value as? NSFont, font.fontName == "JetBrainsMono-Bold" else { return }
             let original = text.substring(with: range)
             guard original == ":=" || original == "->" else { return }
-            let touching = selection.location <= NSMaxRange(range) && NSMaxRange(selection) >= range.location
+            let touching = selections.contains { selection in
+                [selection.location, NSMaxRange(selection)].contains { range.location < $0 && $0 < NSMaxRange(range) }
+            }
             let desired = Highlighter.operatorFont(size: font.pointSize, ligatures: !touching)
             if !font.isEqual(desired) { changes.append((range, desired)) }
         }
@@ -465,13 +488,13 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     /// The conceal around a character, unless its equation is shown as typed.
-    private func conceal(at index: Int) -> Highlighter.Conceal? {
+    func conceal(at index: Int) -> Highlighter.Conceal? {
         var low = 0, high = conceals.count - 1
         while low <= high {
             let mid = (low + high) / 2
             let c = conceals[mid]
             if index < c.range.location { high = mid - 1 } else if index >= NSMaxRange(c.range) { low = mid + 1 } else {
-                return revealedPiece.map { NSLocationInRange(index, $0) } == true ? nil : c
+                return revealedPieces.contains { NSLocationInRange(index, $0) } ? nil : c
             }
         }
         return nil
@@ -535,7 +558,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     var onResign: (() -> Void)?
     var onPointerMoved: ((NSPoint) -> Void)?
     var onPointerExited: (() -> Void)?
-    /// Typing and clicking close the docs popup.
+    /// Clicks close the docs popup.
     var onDismissHover: (() -> Void)?
     /// Uses of the symbol under the caret.
     var occurrences: [NSRange] = [] {
@@ -622,14 +645,19 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     override func flagsChanged(with event: NSEvent) {
         super.flagsChanged(with: event)
         guard let window else { return }
-        // Holding ⌘ over the guide shows it can be dragged, holding ⌥ that a drag selects a column.
-        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        // Holding ⌘ over the guide shows it can be dragged; other modifiers leave the pointer alone.
+        let windowPoint = window.mouseLocationOutsideOfEventStream
+        let point = convert(windowPoint, from: nil)
         let inside = visibleRect.contains(point)
         guideHovered = inside && isOnGuide(point, flags: event.modifierFlags)
-        guard inside, markers?.isOnScroller(atWindowPoint: window.mouseLocationOutsideOfEventStream) != true else { return }
-        if guideHovered {
+        guard inside, markers?.isOnScroller(atWindowPoint: windowPoint) != true else { return }
+        if let overlay = CursorArea.cursor(in: window, at: windowPoint) {
+            overlay.set()
+        } else if guideHovered {
             NSCursor.resizeLeftRight.set()
-        } else if columnSelectionMode || event.modifierFlags.intersection([.command, .option, .control, .shift]) == .option {
+        } else if swatch(at: point) != nil {
+            NSCursor.pointingHand.set()
+        } else if columnSelectionMode {
             NSCursor.crosshair.set()
         } else {
             NSCursor.iBeam.set()
@@ -646,9 +674,9 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     var vim: VimEngine? {
         didSet { updateCaret(animated: false) }
     }
-    /// Gliding and Vim's block caret are drawn by this view instead of AppKit.
-    private var ownsCaret: Bool { glidingCaret || vim?.blockCaret == true }
-    func refreshCaret() { updateCaret(animated: false) }
+    /// Gliding, Vim's block caret and every caret of a column selection are drawn by this view instead of AppKit.
+    private var ownsCaret: Bool { isColumnMode || glidingCaret || vim?.blockCaret == true }
+    func refreshCaret(animated: Bool = false) { updateCaret(animated: animated) }
 
     private final class CaretView: NSView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -681,13 +709,27 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     private func updateCaret(animated: Bool) {
+        guard !isUpdatingColumns else { return }
         // Newer AppKit draws the caret with an indicator subview rather than drawInsertionPoint.
         for case let indicator as NSTextInsertionIndicator in subviews {
             indicator.displayMode = ownsCaret ? .hidden : .automatic
         }
+        if !isColumnMode, !columnCaretViews.isEmpty {
+            for view in columnCaretViews { view.removeFromSuperview() }
+            columnCaretViews = []
+            columnCaretHeads = []
+        }
+        guard ownsCaret, window?.firstResponder === self, window?.isKeyWindow == true else {
+            caretView.isHidden = true
+            for view in columnCaretViews { view.isHidden = true }
+            return
+        }
+        if isColumnMode {
+            caretView.isHidden = true
+            return updateColumnCarets(animated: animated)
+        }
         let selection = selectedRange()
-        guard ownsCaret, selection.length == 0, window?.firstResponder === self, window?.isKeyWindow == true,
-              let rect = caretRect(at: selection.location) else {
+        guard selection.length == 0, let rect = caretRect(at: selection.location) else {
             caretView.isHidden = true
             return
         }
@@ -710,20 +752,81 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         restartBlink()
     }
 
-    /// Solid while moving, then blinking like the system caret.
-    private func restartBlink() {
-        guard let layer = caretView.layer else { return }
-        layer.removeAnimation(forKey: "blink")
-        let blink = CAKeyframeAnimation(keyPath: "opacity")
-        blink.values = [1, 1, 0, 0, 1]
-        blink.keyTimes = [0, 0.45, 0.55, 0.95, 1]
-        blink.duration = 1.05
-        blink.repeatCount = .infinity
-        blink.beginTime = CACurrentMediaTime() + 0.5
-        layer.add(blink, forKey: "blink")
+    /// A view per caret, at the end of its selection; reused so they glide instead of jumping.
+    private var columnCaretViews: [CaretView] = []
+    /// The head each view last showed, to match views to carets when lines are added above.
+    private var columnCaretHeads: [Int] = []
+
+    private func updateColumnCarets(animated: Bool) {
+        var unusedViews = columnCaretViews
+        var unusedHeads = columnCaretHeads
+        var views: [CaretView] = []
+        var isNew: [Bool] = []
+        for caret in columnCarets {
+            let match: Int?
+            if let exact = unusedHeads.firstIndex(of: caret.head) {
+                match = exact
+            } else {
+                match = unusedHeads.indices.min { abs(unusedHeads[$0] - caret.head) < abs(unusedHeads[$1] - caret.head) }
+            }
+            if let match {
+                views.append(unusedViews.remove(at: match))
+                unusedHeads.remove(at: match)
+                isNew.append(false)
+            } else {
+                let view = CaretView()
+                view.wantsLayer = true
+                view.layer?.cornerRadius = 1
+                view.isHidden = true
+                addSubview(view)
+                views.append(view)
+                isNew.append(true)
+            }
+        }
+        for view in unusedViews { view.removeFromSuperview() }
+        columnCaretViews = views
+        columnCaretHeads = columnCarets.map(\.head)
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            for view in columnCaretViews { view.layer?.backgroundColor = insertionPointColor.cgColor }
+        }
+        for (i, caret) in columnCarets.enumerated() {
+            let view = columnCaretViews[i]
+            guard let rect = caretRect(at: caret.head) else {
+                view.isHidden = true
+                continue
+            }
+            if isNew[i] {
+                // A caret that wasn't there yet appears where it is instead of flying in from the corner.
+                view.frame = rect
+                view.isHidden = false
+                continue
+            }
+            let wasHidden = view.isHidden
+            view.isHidden = false
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = animated && !wasHidden && glidingCaret ? 0.09 : 0
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.allowsImplicitAnimation = true
+                view.animator().frame = rect
+            }
+        }
+        restartBlink()
     }
 
-    func caretBar(at caret: Int) -> NSRect? { caretRect(at: caret) }
+    /// Solid while moving, then blinking like the system caret.
+    private func restartBlink() {
+        for view in [caretView] + columnCaretViews {
+            guard let layer = view.layer else { continue }
+            layer.removeAnimation(forKey: "blink")
+            let blink = CAKeyframeAnimation(keyPath: "opacity")
+            blink.values = [1, 1, 0, 0, 1]
+            blink.keyTimes = [0, 0.45, 0.55, 0.95, 1]
+            blink.duration = 1.05
+            blink.repeatCount = .infinity
+            blink.beginTime = CACurrentMediaTime() + 0.5
+            layer.add(blink, forKey: "blink")
+        }
+    }
 
     private func caretRect(at caret: Int) -> NSRect? {
         guard let lm = layoutManager, let container = textContainer else { return nil }
@@ -778,7 +881,13 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     // NSTextView sets the I-beam on every move, even under floating controls.
     override func mouseMoved(with event: NSEvent) {
         guideHovered = isOnGuide(convert(event.locationInWindow, from: nil), flags: event.modifierFlags)
-        if let cursor = cursor(for: event) { cursor.set() } else { super.mouseMoved(with: event) }
+        if let cursor = cursor(for: event) {
+            cursor.set()
+        } else {
+            super.mouseMoved(with: event)
+            // ⌥ must not let AppKit swap in its column-selection pointer.
+            NSCursor.iBeam.set()
+        }
         onPointerMoved?(convert(event.locationInWindow, from: nil))
     }
 
@@ -798,6 +907,28 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         onPointerExited?()
     }
 
+    func highlightBoxes(for range: NSRange) -> [NSRect] {
+        guard let lm = layoutManager, let container = textContainer,
+              range.location != NSNotFound, NSMaxRange(range) <= (string as NSString).length else { return [] }
+        let glyphs = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var boxes: [NSRect] = []
+        for glyph in glyphs.location..<NSMaxRange(glyphs) {
+            let index = lm.characterIndexForGlyph(at: glyph)
+            guard index < NSMaxRange(range),
+                  index >= range.location || conceal(at: range.location)?.range.location == index else { continue }
+            // Null glyphs retain source bounds even though their quotes or spelling are hidden.
+            guard !lm.propertyForGlyph(at: glyph).contains(.null) else { continue }
+            let box = lm.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+            guard box.width > 0 else { continue }
+            if let last = boxes.last, last.minY == box.minY, last.height == box.height {
+                boxes[boxes.count - 1] = last.union(box)
+            } else {
+                boxes.append(box)
+            }
+        }
+        return boxes.map { $0.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y) }
+    }
+
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         drawColumnSelections(in: rect)
@@ -807,12 +938,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
             NSRect(x: x.rounded(), y: rect.minY, width: active ? 2 : 1, height: rect.height).fill()
         }
         func boxes(_ ranges: [NSRange]) -> [NSRect] {
-            guard let lm = layoutManager, let container = textContainer else { return [] }
-            let length = (string as NSString).length
-            return ranges.filter { NSMaxRange($0) <= length }.map { range in
-                lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil), in: container)
-                    .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
-            }
+            ranges.flatMap { highlightBoxes(for: $0) }
         }
         let length = (string as NSString).length
         // Only the visible part of a long match list is measured.
@@ -828,7 +954,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
             NSColor.systemYellow.withAlphaComponent(0.7).setFill()
             NSBezierPath(roundedRect: box.insetBy(dx: -1, dy: 0), xRadius: 3, yRadius: 3).fill()
         }
-        for (range, box) in zip(renameRanges, boxes(renameRanges)) where box.intersects(rect) {
+        for (range, box) in renameRanges.flatMap({ range in highlightBoxes(for: range).map { (range, $0) } }) where box.intersects(rect) {
             let primary = range == renamePrimary
             let path = NSBezierPath(roundedRect: box.insetBy(dx: -1.5, dy: 0.5), xRadius: 3, yRadius: 3)
             NSColor.controlAccentColor.withAlphaComponent(primary ? 0.18 : 0.1).setFill()
@@ -852,14 +978,14 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if let cursor = cursor(for: event) { cursor.set() } else { super.cursorUpdate(with: event) }
+        (cursor(for: event) ?? .iBeam).set()
     }
 
     private func cursor(for event: NSEvent) -> NSCursor? {
         if let cursor = CursorArea.cursor(for: event) { return cursor }
         if markers?.isOnScroller(atWindowPoint: event.locationInWindow) == true { return .arrow }
         if isOnGuide(convert(event.locationInWindow, from: nil), flags: event.modifierFlags) { return .resizeLeftRight }
-        if columnSelectionMode || event.modifierFlags.intersection([.command, .option, .control, .shift]) == .option {
+        if columnSelectionMode {
             return bounds.contains(convert(event.locationInWindow, from: nil)) ? .crosshair : nil
         }
         return swatch(at: convert(event.locationInWindow, from: nil)) != nil ? .pointingHand : nil
@@ -882,7 +1008,6 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        drawColumnCarets(in: dirtyRect)
         drawRemoteCursors(in: dirtyRect)
         for literal in swatches {
             guard let rect = swatchRect(for: literal), rect.intersects(dirtyRect) else { continue }
@@ -949,6 +1074,12 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
             return
         }
         let before = selectedRange().location
+        isSelectingWithMouse = true
+        defer {
+            isSelectingWithMouse = false
+            updateRevealedEquation()
+            refreshCaret()
+        }
         super.mouseDown(with: event)
         if let onJump, Self.isFar(before, selectedRange().location, in: string as NSString) { onJump(before) }
     }
@@ -966,6 +1097,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
+        Popups.onDismiss(menu, in: window) { $0.cancelTrackingWithoutAnimation() }
         guard onDefinition != nil else { return menu }
         let index = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
         let item = NSMenuItem(title: "Go to Definition", action: #selector(goToDefinition(_:)), keyEquivalent: "b")
@@ -1405,9 +1537,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     override func keyDown(with event: NSEvent) {
-        onDismissHover?()
         let keys = KeyLayout.current.shortcuts
-        // F1 shows the docs, at the caret when no completion is open.
+        // F1 shows, pins or hides the docs, of the selected completion when the list is open.
         if keys.documentation.matches(event), let onShowDocs { return onShowDocs() }
         if let vim, vim.handle(event) { return }
         // ⌥↩ shows the fixes for the problem at the caret.
@@ -1512,7 +1643,7 @@ struct CodeEditor: NSViewRepresentable {
         tv.backgroundColor = .textBackgroundColor
         tv.insertionPointColor = .labelColor
         // Neutral selection instead of the system accent.
-        tv.selectedTextAttributes = [.backgroundColor: NSColor.gray.withAlphaComponent(0.3)]
+        tv.selectedTextAttributes = [.backgroundColor: tv.selectionColor]
         tv.delegate = context.coordinator
 
         let scroll = NSScrollView()
@@ -1542,6 +1673,9 @@ struct CodeEditor: NSViewRepresentable {
         tv.onPointerExited = { [weak hover] in hover?.pointerExited() }
         tv.onDismissHover = { [weak hover] in hover?.hide() }
         tv.onSwatchClick = { [weak coordinator = context.coordinator] in coordinator?.editColor($0) }
+        context.coordinator.popupDismissal = Popups.observe(window: { [weak tv] in tv?.window }) {
+            [weak coordinator = context.coordinator] in coordinator?.colorPopover?.close()
+        }
         tv.onResign = { [weak coordinator = context.coordinator] in
             coordinator?.completion?.hide()
             coordinator?.commitRename()
@@ -1587,7 +1721,7 @@ struct CodeEditor: NSViewRepresentable {
         tv.onComplete = language == nil ? nil : { [weak c] in c?.completion?.request(force: true) }
         tv.solvengContext = language.map { l in { l.solvengContext() } }
         tv.onShowDocs = language == nil ? nil : { [weak c] in
-            if c?.completion?.toggleDocs() != true { c?.hover?.showAtCaret() }
+            if c?.completion?.toggleDocs() != true { c?.hover?.toggleAtCaret() }
         }
         tv.onFormat = language == nil ? nil : { [weak c] in c?.format() }
         tv.onRename = language == nil ? nil : { [weak c] in c?.startRename() }
@@ -1748,7 +1882,13 @@ struct CodeEditor: NSViewRepresentable {
         private var colorEdit: ColorEdit?
         private var isApplyingColor = false
         private var colorPanelObserver: (any NSObjectProtocol)?
-        private var colorPopover: NSPopover?
+        private(set) var colorPopover: NSPopover?
+        var popupDismissal: (any NSObjectProtocol)? {
+            didSet { if let oldValue { NotificationCenter.default.removeObserver(oldValue) } }
+        }
+
+        deinit { if let popupDismissal { NotificationCenter.default.removeObserver(popupDismissal) } }
+
         var documentID = -1
         var font: NSFont?
         var solvengRevision = 0
@@ -1863,13 +2003,17 @@ struct CodeEditor: NSViewRepresentable {
             // A change of the user's own ends a color session; the wheel's edits continue it.
             if !isApplyingColor { endColorEdit() }
             (tv as? TypstTextView)?.occurrences = []
-            onChange(tv.string, isApplyingColor)
-            find?.textDidChange()
             if renameSession != nil {
-                if !isMirroring { mirrorRename() }
+                if !isMirroring {
+                    mirrorRename()
+                    onChange(tv.string, isApplyingColor)
+                    find?.textDidChange()
+                }
                 lastTyped = nil
                 return
             }
+            onChange(tv.string, isApplyingColor)
+            find?.textDidChange()
             if completion?.isEditing != true, !isApplyingRemote { completion?.textDidChange(typed: lastTyped) }
             lastTyped = nil
         }
@@ -2020,7 +2164,7 @@ struct CodeEditor: NSViewRepresentable {
             }
             let caret = tv.firstRect(forCharacterRange: NSRange(location: index, length: 0), actualRange: nil)
             let point = tv.convert(window.convertPoint(fromScreen: NSPoint(x: caret.minX, y: caret.minY)), from: nil)
-            menu.popUp(positioning: nil, at: point, in: tv)
+            Popups.show(menu, at: point, in: tv)
         }
 
         // MARK: - Navigation
@@ -2040,7 +2184,7 @@ struct CodeEditor: NSViewRepresentable {
                     }
                     let caret = tv.firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
                     let point = tv.convert(window.convertPoint(fromScreen: NSPoint(x: caret.minX, y: caret.minY)), from: nil)
-                    menu.popUp(positioning: nil, at: point, in: tv)
+                    Popups.show(menu, at: point, in: tv)
                     return
                 }
                 let usages = await language.goToDefinition(at: offset)
@@ -2055,7 +2199,7 @@ struct CodeEditor: NSViewRepresentable {
                 let caret = tv.firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
                 guard let window = tv.window else { return }
                 let point = tv.convert(window.convertPoint(fromScreen: NSPoint(x: caret.minX, y: caret.minY)), from: nil)
-                menu.popUp(positioning: nil, at: point, in: tv)
+                Popups.show(menu, at: point, in: tv)
             }
         }
 
@@ -2080,6 +2224,9 @@ struct CodeEditor: NSViewRepresentable {
             /// Where the symbol was, for asking the server once the name is final.
             let origin: Int
             let text: String
+            let originalRanges: [NSRange]
+            let originalNames: [String]
+            let solvengContext: String?
             var ranges: [NSRange]
             var primary: Int
             var pending: (range: NSRange, length: Int)?
@@ -2092,11 +2239,15 @@ struct CodeEditor: NSViewRepresentable {
             /// still open when it goes off (like the extract's) never closes and swallows the rename.
             var registrationOff = false
 
-            init(original: String, origin: Int, text: String, ranges: [NSRange], primary: Int, local: Bool = false) {
+            init(original: String, origin: Int, text: String, ranges: [NSRange], primary: Int, local: Bool = false,
+                 solvengContext: String? = nil) {
                 self.original = original
                 self.origin = origin
                 self.text = text
                 self.ranges = ranges
+                self.originalRanges = ranges
+                self.originalNames = ranges.map { (text as NSString).substring(with: $0) }
+                self.solvengContext = solvengContext
                 self.primary = primary
                 self.local = local ? ranges : nil
             }
@@ -2122,15 +2273,18 @@ struct CodeEditor: NSViewRepresentable {
                 let uses = await language.occurrences(at: target.range.location)
                 guard tv.string == before, renameSession == nil else { return }
                 let s = before as NSString
-                // Only spots that still spell the name are edited along.
-                var ranges = (uses + [target.range]).filter { NSMaxRange($0) <= s.length && s.substring(with: $0) == target.name }
+                let context = language.solvengContext()
+                let solveng = SolvengSupport.renameTarget(before, context: context, offset: target.range.location) != nil
+                var ranges = (uses + [target.range]).filter {
+                    NSMaxRange($0) <= s.length && (solveng || s.substring(with: $0) == target.name)
+                }
                 ranges = Array(Set(ranges.map { [$0.location, $0.length] })).map { NSRange(location: $0[0], length: $0[1]) }
                     .sorted { $0.location < $1.location }
                 guard let primary = ranges.firstIndex(of: target.range) else { return NSSound.beep() }
                 tv.breakUndoCoalescing()
                 // The session's keystrokes become one rename step, registered when it's committed.
                 renameSession = RenameSession(original: target.name, origin: target.range.location, text: before,
-                                              ranges: ranges, primary: primary)
+                                              ranges: ranges, primary: primary, solvengContext: solveng ? context : nil)
                 tv.setSelectedRange(target.range)
                 showRenameRanges()
             }
@@ -2169,17 +2323,39 @@ struct CodeEditor: NSViewRepresentable {
             for j in session.ranges.indices where j > session.primary { session.ranges[j].location += delta }
             let name = (tv.string as NSString).substring(with: session.ranges[session.primary])
             let caret = tv.selectedRange().location - session.ranges[session.primary].location
-            for i in session.ranges.indices.reversed() where i != session.primary {
-                let old = session.ranges[i]
-                replaceForRename(old, with: name)
-                let d = (name as NSString).length - old.length
-                session.ranges[i].length = (name as NSString).length
+            renderRename(name, caret: caret)
+        }
+
+        private func renderRename(_ name: String, caret: Int) {
+            guard let tv = textView, let session = renameSession else { return }
+            var names = Array(repeating: name, count: session.ranges.count)
+            if name == session.originalNames[session.primary] {
+                names = session.originalNames
+            } else if let context = session.solvengContext {
+                let edits = SolvengSupport.rename(session.text, context: context, offset: session.origin, to: name)
+                    .filter { $0.path == nil }
+                for i in names.indices {
+                    let original = session.originalRanges[i]
+                    if let edit = edits.first(where: { $0.start == original.location && $0.end == NSMaxRange(original) }) {
+                        names[i] = edit.text
+                    } else if i != session.primary {
+                        names[i] = (tv.string as NSString).substring(with: session.ranges[i])
+                    }
+                }
+            }
+            for i in session.ranges.indices.reversed() {
+                let old = session.ranges[i], replacement = names[i]
+                if (tv.string as NSString).substring(with: old) != replacement { replaceForRename(old, with: replacement) }
+                let d = (replacement as NSString).length - old.length
+                session.ranges[i].length = (replacement as NSString).length
                 for j in session.ranges.indices where j > i { session.ranges[j].location += d }
             }
-            // Uses before the edited one moved it; the caret follows.
             let primary = session.ranges[session.primary]
+            let formatted = names[session.primary]
+            let closingQuote = formatted.hasSuffix("\"") && !name.hasSuffix("\"") ? 1 : 0
+            let position = primary.length - ((name as NSString).length - caret) - closingQuote
             isMirroring = true
-            tv.setSelectedRange(NSRange(location: primary.location + min(max(caret, 0), primary.length), length: 0))
+            tv.setSelectedRange(NSRange(location: primary.location + min(max(position, 0), primary.length), length: 0))
             isMirroring = false
             showRenameRanges()
         }
@@ -2202,9 +2378,9 @@ struct CodeEditor: NSViewRepresentable {
             let caret = tv.selectedRange().location - session.ranges[session.primary].location
             var ranges = session.ranges
             // Untouched names need no edit, which would otherwise leave an empty undo step.
-            for i in ranges.indices.reversed() where (tv.string as NSString).substring(with: ranges[i]) != session.original {
-                replaceForRename(ranges[i], with: session.original)
-                let d = (session.original as NSString).length - ranges[i].length
+            for i in ranges.indices.reversed() where (tv.string as NSString).substring(with: ranges[i]) != session.originalNames[i] {
+                replaceForRename(ranges[i], with: session.originalNames[i])
+                let d = (session.originalNames[i] as NSString).length - ranges[i].length
                 for j in ranges.indices where j > i { ranges[j].location += d }
             }
             renameSession = nil
@@ -2212,6 +2388,7 @@ struct CodeEditor: NSViewRepresentable {
             showRenameRanges()
             let p = ranges[session.primary]
             tv.setSelectedRange(NSRange(location: p.location + min(max(caret, 0), p.length), length: 0))
+            onChange(tv.string, false)
             return name
         }
 
@@ -2242,18 +2419,8 @@ struct CodeEditor: NSViewRepresentable {
 
         /// Writes `name` into every use and puts the caret at the end of the edited one.
         private func setRenameName(_ name: String) {
-            guard let tv = textView, let session = renameSession else { return }
-            for i in session.ranges.indices.reversed() {
-                let old = session.ranges[i]
-                replaceForRename(old, with: name)
-                let d = (name as NSString).length - old.length
-                session.ranges[i].length = (name as NSString).length
-                for j in session.ranges.indices where j > i { session.ranges[j].location += d }
-            }
-            isMirroring = true
-            tv.setSelectedRange(NSRange(location: NSMaxRange(session.ranges[session.primary]), length: 0))
-            isMirroring = false
-            showRenameRanges()
+            renderRename(name, caret: (name as NSString).length)
+            if let tv = textView { onChange(tv.string, false) }
         }
 
         /// A new document replaced the text; there's nothing to restore.
@@ -2377,15 +2544,16 @@ struct CodeEditor: NSViewRepresentable {
                 menu.addItem(ClosureMenuItem(title: label) { run(value) })
             }
             let rect = tv.caretAnchor()
-            menu.popUp(positioning: nil, at: NSPoint(x: rect.minX, y: rect.maxY + 4), in: tv)
+            Popups.show(menu, at: NSPoint(x: rect.minX, y: rect.maxY + 4), in: tv)
         }
 
         private func showRefactorMessage(_ message: String) {
-            guard let tv = textView as? TypstTextView else { return }
+            guard let tv = textView as? TypstTextView, !Popups.isCovered(tv.window) else { return }
             NSSound.beep()
             let popover = NSPopover()
             popover.behavior = .transient
             popover.contentViewController = NSHostingController(rootView: Text(message).padding(10))
+            Popups.track(popover, in: tv.window)
             popover.show(relativeTo: tv.caretAnchor(), of: tv, preferredEdge: .maxY)
         }
 
@@ -2462,6 +2630,7 @@ struct CodeEditor: NSViewRepresentable {
             popover.contentViewController = NSHostingController(rootView: wheel)
             popover.delegate = self
             colorPopover = popover
+            Popups.track(popover, in: tv.window)
             popover.show(relativeTo: rect, of: tv, preferredEdge: .maxY)
         }
 
@@ -2484,6 +2653,7 @@ struct CodeEditor: NSViewRepresentable {
             panel.setAction(#selector(colorChanged(_:)))
             Self.colorOwner = self
             colorPopover?.close()
+            Popups.track(panel, in: textView?.window)
             panel.orderFront(nil)
             if colorPanelObserver == nil {
                 colorPanelObserver = NotificationCenter.default.addObserver(
@@ -2502,6 +2672,7 @@ struct CodeEditor: NSViewRepresentable {
             colorPanelObserver = nil
             let panel = NSColorPanel.shared
             if Self.colorOwner === self {
+                Popups.remove(panel)
                 Self.colorOwner = nil
                 panel.setTarget(nil)
                 panel.setAction(nil)

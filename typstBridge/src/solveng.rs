@@ -62,8 +62,9 @@ fn context(raw: &str) -> Context {
             } else {
                 (Report::parse(&e.file_report), true, e.path.clone())
             };
-            // Only the compiler's report can enable calculations in the editor.
-            let c = Context::new(&solveng_ide::with_compiled(&text, 0)).with_files(files).with_report(&report, &e.path, main);
+            // Use the main file's syntax until its first successful compile reports calculations.
+            let fallback = if e.main && report.blocks == 0 { text } else { solveng_ide::with_compiled(&text, 0) };
+            let c = Context::new(&fallback).with_files(files).with_report(&report, &e.path, main);
             if main_path.is_empty() { c } else { c.with_main(&main_path) }
         }
         Err(_) => Context::new(raw),
@@ -76,9 +77,10 @@ fn context(raw: &str) -> Context {
 /// `documentTokens`, `conceals` (flat UTF-16 triples and
 /// quintuples), `highlight` (`{tokens, plain}`, plain as start/end pairs), `complete`, `hover`, `definition`
 /// (an object or null), `conversions`, `diagnostics`, `usages`, `references` (arrays), `renameTarget` (an object or
-/// null), `rename:<new name>` (edits) and `version`.
+/// null), `rename:<new name>` (edits), `function` (a package function's docs by name, or null) and `version`.
 pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> String {
     let value = match op {
+        "operatorDeclaration" => json!(solveng_ide::operator_declaration(document)),
         "tokens" => json!(solveng_ide::tokens(document).iter().flat_map(|t| [t.start, t.length, t.kind as u32]).collect::<Vec<_>>()),
         "pretty" => {
             // the context is the document's own units, comma separated
@@ -87,6 +89,8 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
             json!({ "text": text, "tokens": tokens.iter().flat_map(|t| [t.start, t.length, t.kind as u32]).collect::<Vec<_>>() })
         }
         "references" => json!(solveng_ide::references(document)),
+        // the document is the function's name
+        "function" => json!(solveng_ide::params::functions().iter().find(|f| f.name == document)),
         "version" => json!(solveng_ide::VERSION),
         _ => {
             let c = context(raw_context);
@@ -136,6 +140,34 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
 mod tests {
     use super::call;
     use serde_json::Value;
+
+    #[test]
+    fn main_worksheet_supports_names_before_a_successful_compile() {
+        let doc = r##"#import "@solveng/solveng:1.0.0": *
+#worksheet(evaluate: true)[
+  $ "pytagoras"(a, b, c) := a^2 + b^2 = c^2 $
+  $ "circle"(x, r) := "pytagoras"(x,b,r) -> solve(b) $
+  $ x´ := 3 $
+  $ r` := 3 $
+  $ z := x´ + r` $
+  #graph("tri(2x)", xrange: ("r","-r"))
+]"##;
+        let context = serde_json::json!({"files": [], "report": "", "path": "main.typ", "main": true}).to_string();
+        let at = |needle: &str| doc[..doc.rfind(needle).unwrap()].encode_utf16().count() as u32;
+        let json = |op, offset| serde_json::from_str::<Value>(&call(op, doc, &context, offset)).unwrap();
+        let definition = json("definition", at("\"pytagoras\"") + 2);
+        assert_eq!(definition["start"], doc.find("\"pytagoras\"").unwrap());
+        assert_eq!(json("usages", at("\"pytagoras\"") + 2).as_array().unwrap().len(), 2);
+        assert_eq!(json("rename:hypotenuse", at("\"pytagoras\"") + 2).as_array().unwrap().len(), 2);
+        let tokens = json("documentTokens", 0);
+        for name in ["x´", "r`"] {
+            let offset = at(name);
+            assert_eq!(json("renameTarget", offset + 1)["name"], name);
+            assert_eq!(json("usages", offset + 1).as_array().unwrap().len(), 2);
+            assert_eq!(json("rename:q", offset + 1).as_array().unwrap().len(), 2);
+            assert!(tokens.as_array().unwrap().chunks_exact(3).any(|t| t[0] == offset && t[1] == 2 && t[2] == solveng_ide::TokenKind::VARIABLE));
+        }
+    }
 
     #[test]
     fn bundles_solveng_one() {
