@@ -297,6 +297,9 @@ struct Shortcuts: Equatable {
     var commentBlock = KeyBinding(.character("/"), [.command, .option])
     var moveLineUp = KeyBinding(.upArrow, [.option, .shift])
     var moveLineDown = KeyBinding(.downArrow, [.option, .shift])
+    var addCaretAbove = KeyBinding(.upArrow, [.control, .shift])
+    var addCaretBelow = KeyBinding(.downArrow, [.control, .shift])
+    var columnSelection = KeyBinding(.character("8"), [.command, .shift])
     var completions = KeyBinding(.space, .control)
     var documentation = KeyBinding(.function(1), [])
 }
@@ -311,6 +314,7 @@ enum ShortcutCommand: String, CaseIterable, Identifiable {
     case definition, format, contextActions, documentation, completions
     case rename, extractVariable, inlineVariable, extractFunction, extractFunctionToScope
     case duplicateLine, deleteLine, commentLine, commentBlock, moveLineUp, moveLineDown
+    case addCaretAbove, addCaretBelow, columnSelection
 
     var id: String { rawValue }
 
@@ -349,6 +353,9 @@ enum ShortcutCommand: String, CaseIterable, Identifiable {
         case .commentBlock: return "Comment Block"
         case .moveLineUp: return "Move Line Up"
         case .moveLineDown: return "Move Line Down"
+        case .addCaretAbove: return "Add Caret Above"
+        case .addCaretBelow: return "Add Caret Below"
+        case .columnSelection: return "Column Selection Mode"
         }
     }
 
@@ -362,7 +369,8 @@ enum ShortcutCommand: String, CaseIterable, Identifiable {
         case .find, .replace, .findNext, .findPrevious: return "Search"
         case .definition, .format, .contextActions, .documentation, .completions: return "Code"
         case .rename, .extractVariable, .inlineVariable, .extractFunction, .extractFunctionToScope: return "Refactor"
-        case .duplicateLine, .deleteLine, .commentLine, .commentBlock, .moveLineUp, .moveLineDown: return "Editing"
+        case .duplicateLine, .deleteLine, .commentLine, .commentBlock, .moveLineUp, .moveLineDown, .addCaretAbove, .addCaretBelow,
+             .columnSelection: return "Editing"
         }
     }
 
@@ -402,6 +410,9 @@ enum ShortcutCommand: String, CaseIterable, Identifiable {
         case .commentBlock: return \.commentBlock
         case .moveLineUp: return \.moveLineUp
         case .moveLineDown: return \.moveLineDown
+        case .addCaretAbove: return \.addCaretAbove
+        case .addCaretBelow: return \.addCaretBelow
+        case .columnSelection: return \.columnSelection
         }
     }
 }

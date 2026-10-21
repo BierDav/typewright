@@ -65,7 +65,7 @@ async function solvengCompletions(ctx: CompletionContext, around: string): Promi
     // Units like kΩ are found by typing kOmega.
     apply: item.insert.includes("$0") ? snippet(item.insert.replace("$0", "${}")) : item.insert,
   }));
-  return { from: result.from, options, validFor: /^[\p{L}\p{N}_°%‰µΩ]*$/u, exclusive: result.exclusive };
+  return { from: result.from, to: result.to, options, exclusive: result.exclusive };
 }
 
 function completionSource(context: LanguageContext) {
@@ -84,11 +84,12 @@ function completionSource(context: LanguageContext) {
     const result = await compiler.complete(context.path(), ctx.pos, ctx.explicit).catch(() => null);
     if (ctx.aborted) return null;
     if (!result) return solveng;
+    if (solveng?.options.length && (solveng.from !== result.from || (solveng.to ?? ctx.pos) > ctx.pos)) return solveng;
     const options = result.items.map(toCompletion);
     // In math the calculation's names come before Typst's symbols.
     if (solveng && solveng.from === result.from) {
       const named = new Set(solveng.options.map((o) => o.label));
-      return { from: result.from, options: [...solveng.options.map((o) => ({ ...o, boost: 50 + (o.boost ?? 0) })), ...options.filter((o) => !named.has(o.label))], validFor: /^[\p{L}\p{N}_-]*$/u };
+      return { from: result.from, to: solveng.to, options: [...solveng.options.map((o) => ({ ...o, boost: 50 + (o.boost ?? 0) })), ...options.filter((o) => !named.has(o.label))] };
     }
     return { from: result.from, options, validFor: /^[\p{L}\p{N}_-]*$/u };
   };

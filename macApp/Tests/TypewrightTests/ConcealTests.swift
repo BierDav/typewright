@@ -65,6 +65,62 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "$ ?r $ and $ Σ\"\"r $")
     }
 
+    func testSelectionTakesConcealedPiecesWhole() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$a Omega b$"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        // Dragging from before into Omega takes all of it.
+        tv.setSelectedRange(NSRange(location: 1, length: 4))
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 7))
+        // Shrinking back into it lets go of it.
+        tv.setSelectedRange(NSRange(location: 1, length: 6))
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 2))
+        // From behind, the start snaps the same way.
+        tv.setSelectedRange(NSRange(location: 10, length: 0))
+        tv.setSelectedRange(NSRange(location: 6, length: 4))
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 3, length: 7))
+        // Inside it, which then shows as typed, every character selects.
+        tv.setSelectedRange(NSRange(location: 4, length: 2))
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 4, length: 2))
+    }
+
+    func testCaretEntersPiecesBeforeTheirHiddenQuote() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$a \"abc\" b$"
+        tv.setSelectedRange(NSRange(location: 2, length: 0))
+        tv.concealsMath = true
+        tv.moveRight(nil)
+        XCTAssertEqual(tv.selectedRange().location, 3, "in front of the hidden quote, not after it")
+        tv.updateRevealedEquation()
+        tv.moveRight(nil)
+        XCTAssertEqual(tv.selectedRange().location, 4, "shown as typed, one character at a time")
+        // A click on the piece's start lands after the hidden quote.
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.updateRevealedEquation()
+        tv.setSelectedRange(NSRange(location: 4, length: 0))
+        XCTAssertEqual(tv.selectedRange().location, 3)
+    }
+
+    func testUpAndDownLandUnderTheCaretOnceThePieceShows() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "xxxxxx\n$\"abc\"$\nxxxxxx"
+        tv.setSelectedRange(NSRange(location: 3, length: 0))
+        tv.concealsMath = true
+        tv.moveDown(nil)
+        // Under column 3 once the quotes show: `$"a|bc"$`.
+        XCTAssertEqual(tv.selectedRange().location, 10)
+        tv.updateRevealedEquation()
+        tv.moveDown(nil)
+        XCTAssertEqual(tv.selectedRange().location, 18, "back in column 3")
+        tv.updateRevealedEquation()
+        tv.moveUp(nil)
+        XCTAssertEqual(tv.selectedRange().location, 10)
+    }
+
     func testOperatorsUseBoldLigaturesWithoutFolds() {
         let text = "$ x := 1 -> $"
         XCTAssertTrue(Highlighter.conceals(in: text).isEmpty)
@@ -195,5 +251,20 @@ final class AutoCloseTests: XCTestCase {
         let after = editor("don", caret: 3)
         type(after, "\"")
         XCTAssertEqual(after.string, "don\"", "no pair for a quote right after a letter")
+    }
+
+    func testQuotesPairAfterLettersWhereTheyGlueNames() {
+        let block = "```solveng\nt\n```"
+        let code = editor(block, caret: 12)
+        type(code, "\"")
+        XCTAssertEqual(code.string, "```solveng\nt\"\"\n```")
+        type(code, "\"tau")
+        XCTAssertEqual(code.string, "```solveng\nt\"\"tau\n```", "the second quote steps over")
+        let math = editor("$Delta$", caret: 6)
+        type(math, "\"\"")
+        XCTAssertEqual(math.string, "$Delta\"\"$")
+        let other = editor("```py\nt\n```", caret: 7)
+        type(other, "\"")
+        XCTAssertEqual(other.string, "```py\nt\"\n```")
     }
 }

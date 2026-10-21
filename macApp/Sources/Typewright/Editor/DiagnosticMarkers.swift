@@ -103,8 +103,8 @@ final class DiagnosticMarkers: NSView {
             let height = height(of: i)
             let color: NSColor = marker.isError ? .systemRed : .systemYellow
             markerLayers[i].backgroundColor = color.withAlphaComponent(i == hovered ? 1 : 0.85).cgColor
-            // The layer tree isn't flipped; ticks count from the top.
-            markerLayers[i].frame = NSRect(x: 0, y: bounds.height - marker.y - height / 2, width: bounds.width, height: height)
+            // AppKit flips the layer's geometry along with the view, so ticks count from the top here too.
+            markerLayers[i].frame = NSRect(x: 0, y: marker.y - height / 2, width: bounds.width, height: height)
         }
         CATransaction.commit()
     }
@@ -118,9 +118,12 @@ final class DiagnosticMarkers: NSView {
         return nearest.flatMap { abs(markers[$0].y - point.y) <= Self.tick / 2 ? $0 : nil }
     }
 
-    /// Whether a window point is on a tick, where the arrow replaces the text cursor.
-    func hasMarker(atWindowPoint point: NSPoint) -> Bool {
-        !isHiddenOrHasHiddenAncestor && marker(at: convert(point, from: nil)) != nil
+    /// Whether a window point is over the scroll bar's strip, ticks or not, where the arrow replaces the text cursor.
+    func isOnScroller(atWindowPoint point: NSPoint) -> Bool {
+        guard let scroll = superview as? NSScrollView, let window = scroll.window, window === self.window else { return false }
+        let local = scroll.convert(point, from: nil)
+        let width = NSScroller.scrollerWidth(for: .regular, scrollerStyle: scroll.scrollerStyle)
+        return scroll.bounds.contains(local) && local.x >= scroll.bounds.maxX - width
     }
 
     // Only the ticks take the pointer; between them the scroll bar underneath works as usual.

@@ -22,9 +22,10 @@ enum SolvengSupport {
         let filter: String?
     }
 
-    /// `items` replace `from..<offset`; `exclusive` ones replace the language server's.
+    /// `items` replace `from..<(to ?? offset)`; `exclusive` ones replace the language server's.
     struct Completions: Decodable {
         let from: Int
+        let to: Int?
         let items: [Item]
         let exclusive: Bool
     }

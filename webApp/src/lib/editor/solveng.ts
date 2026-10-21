@@ -28,9 +28,9 @@ export const Solveng = {
     JSON.stringify({ files, report, path, main, mainPath: main ? path : mainPath, fileReport }),
   /** Every solveng token as flat `(start, length, kind)` triples, and `(start, end)` pairs shown plain under them. */
   highlight: (document: string, context: string) => compiler.solveng<{ tokens: number[]; plain: number[] } | null>("highlight", document, context),
-  /** `items` replace `from..<offset`; `exclusive` ones replace typst's completions. */
+  /** `items` replace `from..<(to ?? offset)`; `exclusive` ones replace typst's completions. */
   complete: (document: string, context: string, offset: number) =>
-    compiler.solveng<{ from: number; items: SolvengItem[]; exclusive: boolean } | null>("complete", document, context, offset),
+    compiler.solveng<{ from: number; to?: number; items: SolvengItem[]; exclusive: boolean } | null>("complete", document, context, offset),
   conversions: (document: string, context: string, offset: number) =>
     compiler.solveng<{ title: string; start: number; end: number; text: string }[]>("conversions", document, context, offset),
   hover: (document: string, context: string, offset: number) =>

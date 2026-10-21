@@ -490,6 +490,10 @@ fn conceal_math(node: &LinkedNode, src: &str, equation: (u32, u32), utf16: &[u32
         }
         SyntaxKind::Escape => conceal_escape(node, equation, utf16, out),
         SyntaxKind::MathShorthand => {
+            // `*` would show as a `∗` that looks just like it.
+            if text == "*" {
+                return;
+            }
             if let Some(shorthand) = node.cast::<typst::syntax::ast::MathShorthand>() {
                 let c = shorthand.get() as u32;
                 if c <= 0xFFFF {
@@ -600,6 +604,7 @@ mod conceal_tests {
         assert_eq!(shown(r#"R = $12"k"Omega$ and "k" Omega"#), r#"R = $12kΩ$ and "k" Omega"#);
         assert_eq!(shown("$a -> b != c, arrow.r.double, alpha sqrt(x)$"), "$a → b ≠ c, ⇒, α sqrt(x)$");
         assert_eq!(shown(r#"$#"x" + "y"$"#), r#"$#"x" + y$"#);
+        assert_eq!(shown("$cos(pi*t)$"), "$cos(π*t)$");
         assert_eq!(shown(r"1\. Rechenübung \# \u{2014} $a \$ b$ #raw(`\.`) \"), r"1. Rechenübung # — $a $ b$ #raw(`\.`) \");
     }
 

@@ -114,6 +114,21 @@ enum Highlighter {
         return (folds + solveng.filter(isFold)).sorted { $0.range.location < $1.range.location }
     }
 
+    /// Whether `location` is in math or a ```` ```solveng ```` block, where `""` glues names (`Delta""tau`).
+    static func gluesNames(in text: String, at location: Int) -> Bool {
+        let all = runs(in: text)
+        // The run of the character before, which a quote typed here continues.
+        guard location > 0, var i = all.firstIndex(where: { NSLocationInRange(location - 1, $0.range) }) else { return false }
+        if all[i].math { return true }
+        guard all[i].tag == .raw else { return false }
+        // A raw block's lines are runs of their own; its fence starts the first.
+        while i > 0, all[i - 1].tag == .raw, NSMaxRange(all[i - 1].range) == all[i].range.location { i -= 1 }
+        let fence = "```" + SolvengSupport.tag
+        let ns = text as NSString
+        let start = all[i].range.location
+        return ns.substring(with: NSRange(location: start, length: min((fence as NSString).length, ns.length - start))) == fence
+    }
+
     /// Highlighted text for SwiftUI, e.g. code samples in the docs popup.
     static func highlighted(_ text: String, code: Bool, size: CGFloat) -> AttributedString {
         let font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)

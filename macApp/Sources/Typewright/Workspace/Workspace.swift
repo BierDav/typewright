@@ -937,7 +937,7 @@ final class Workspace: EditorLanguage {
     /// from solveng. In math and argument lists they join tinymist's.
     private static func solvengCompletions(in text: String, context: String, at offset: Int) -> (items: [CompletionItem], exclusive: Bool)? {
         guard let result = SolvengSupport.complete(text, context: context, offset: offset), result.from <= offset else { return nil }
-        let range = NSRange(location: result.from, length: offset - result.from)
+        let range = NSRange(location: result.from, length: max(offset, result.to ?? offset) - result.from)
         return (result.items.enumerated().map { index, item in
             let kind: CompletionItem.Kind = switch item.kind {
             case 1: .function

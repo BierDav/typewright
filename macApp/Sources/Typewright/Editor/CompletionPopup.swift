@@ -27,7 +27,7 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
     private static let rowHeight: CGFloat = 22
     private static let width: CGFloat = 380
     private static let maxRows = 9
-    private static let identifier = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+    private static let identifier = CharacterSet.alphanumerics.union(.nonBaseCharacters).union(CharacterSet(charactersIn: "_-\u{200D}"))
     /// tinymist's trigger characters.
     private static let triggers: Set<Character> = ["#", "(", "<", ",", ".", ":", "/", "\"", "@"]
 
@@ -47,14 +47,15 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
         let cursor = tv.selectedRange().location
         if typed.isEmpty {
             // Deleting keeps the list while still inside the completed word.
-            if isVisible, cursor >= anchor { refilter() } else { hide() }
+            if isVisible, cursor >= anchor { refilter(); request(force: false) } else { hide() }
             return
         }
         guard let last = typed.last else { return }
         if Self.triggers.contains(last) {
             request(force: false)
-        } else if last.unicodeScalars.allSatisfy(Self.identifier.contains) {
-            if isVisible { refilter() } else { request(force: false) }
+        } else if last.unicodeScalars.allSatisfy({ Self.identifier.contains($0) || $0.properties.isEmoji }) {
+            if isVisible { refilter() }
+            request(force: false)
         } else {
             hide()
         }
@@ -201,8 +202,9 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
             let start = start(of: item)
             guard start <= cursor, cursor <= s.length else { return nil }
             let typed = s.substring(with: NSRange(location: start, length: cursor - start)).lowercased()
-            let key = item.filterText.trimmingCharacters(in: CharacterSet(charactersIn: "\"")).lowercased()
-            guard let score = Self.score(typed, key) else { return nil }
+            let key = item.filterText.lowercased()
+            let quotes = CharacterSet(charactersIn: "\"")
+            guard let score = Self.score(typed, key) ?? Self.score(typed.trimmingCharacters(in: quotes), key.trimmingCharacters(in: quotes)) else { return nil }
             return (score, item)
         }
         shown = scored.sorted { a, b in

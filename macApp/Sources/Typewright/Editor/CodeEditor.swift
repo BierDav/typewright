@@ -82,12 +82,68 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     var comments: CommentSyntax?
     /// The scroll bar's diagnostic ticks, which want the arrow over the text's edge.
     weak var markers: DiagnosticMarkers?
+
+    // MARK: Column selection
+
+    /// Carets edited together (see ColumnSelection.swift); empty while there's one selection.
+    var columnCarets: [ColumnCaret] = [] {
+        didSet { if columnCarets != oldValue { needsDisplay = true } }
+    }
+    /// The caret the text view selects itself, which scrolling and the caret drawing follow.
+    var primaryColumn = 0
+    /// Set while the carets change the text view's selection, which otherwise ends them.
+    var isUpdatingColumns = false
+    /// ⇧⌘8: a plain drag selects a column and ⇧↑ and ⇧↓ add lines to it.
+    var columnSelectionMode = false {
+        didSet { if columnSelectionMode != oldValue { window?.invalidateCursorRects(for: self) } }
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        if !isUpdatingColumns { endColumns() }
+        if !isMovingVertically { verticalGoal = nil }
+        super.setSelectedRanges(snappedToPieces(ranges), affinity: affinity, stillSelecting: stillSelecting)
+    }
+
+    override func doCommand(by selector: Selector) {
+        if isColumnMode {
+            if performInColumns(selector) { return }
+            endColumns()
+        } else if columnSelectionMode, selector == #selector(moveUpAndModifySelection(_:)) || selector == #selector(moveDownAndModifySelection(_:)) {
+            return extendColumn(up: selector == #selector(moveUpAndModifySelection(_:)))
+        }
+        super.doCommand(by: selector)
+    }
+
+    override func copy(_ sender: Any?) {
+        if isColumnMode { copyColumns() } else { super.copy(sender) }
+    }
+
+    override func cut(_ sender: Any?) {
+        guard isColumnMode else { return super.cut(sender) }
+        copyColumns()
+        replaceInColumns(columnCarets.map { ($0.range, "") }, action: "Cut")
+    }
+
+    override func paste(_ sender: Any?) {
+        if isColumnMode { pasteInColumns() } else { super.paste(sender) }
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        // Composed input goes to the primary caret only.
+        endColumns()
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+    }
+
     // MARK: Auto-closing
 
     /// Openers and the closers typed along with them; empty turns it off.
     var autoPairs: [Character: Character] = [:]
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
+        if isColumnMode, replacementRange.location == NSNotFound || replacementRange == selectedRange(),
+           let typed = (string as? String) ?? (string as? NSAttributedString)?.string {
+            return insertInColumns(typed)
+        }
         guard !autoPairs.isEmpty, !hasMarkedText(), replacementRange.location == NSNotFound || replacementRange == selectedRange(),
               let typed = (string as? String) ?? (string as? NSAttributedString)?.string, typed.count == 1,
               let c = typed.first, isEditable else { return super.insertText(string, replacementRange: replacementRange) }
@@ -120,9 +176,16 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         let symmetric = c == closer
         let freeAfter = next.map { $0.isWhitespace || closers.contains($0) || ",;:.".contains($0) } ?? true
         let freeBefore = !symmetric || !(previous.map { $0.isLetter || $0.isNumber } ?? false)
+            || c == "\"" && gluesNames(at: selection.location)
         guard freeAfter, freeBefore else { return super.insertText(string, replacementRange: replacementRange) }
         super.insertText(String(c) + String(closer), replacementRange: selection)
         setSelectedRange(NSRange(location: selection.location + 1, length: 0))
+    }
+
+    /// Whether a `"` typed at `location` glues names, in math and solveng code (`Delta""tau`), so it pairs after letters too.
+    private func gluesNames(at location: Int) -> Bool {
+        // Only Typst pairs `$`.
+        autoPairs["$"] != nil && Highlighter.gluesNames(in: string, at: location)
     }
 
     /// Backspace in an empty pair takes the closer along.
@@ -272,17 +335,86 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     /// The piece the caret is in or right next to, shown as typed.
     private var revealedPiece: NSRange?
 
+    /// A selection reaching into a concealed piece from outside takes all of it or none, so `Ω` selects as one
+    /// character; inside a piece, which then shows as typed, it goes character by character.
+    private func snappedToPieces(_ ranges: [NSValue]) -> [NSValue] {
+        guard concealsMath, !pieces.isEmpty else { return ranges }
+        let old = selectedRange()
+        let piece = { (i: Int) in self.pieces.first { $0.range.location < i && i < NSMaxRange($0.range) }?.range }
+        return ranges.map { value in
+            let r = value.rangeValue
+            if r.length == 0 { return NSValue(range: NSRange(location: snappedCaret(r.location), length: 0)) }
+            guard !pieces.contains(where: { NSIntersectionRange($0.range, r) == r }) else { return value }
+            var start = r.location, end = NSMaxRange(r)
+            // An end that moved snaps the way it moved; one that didn't takes in the whole piece.
+            if let p = piece(start) { start = start > old.location ? NSMaxRange(p) : p.location }
+            if let p = piece(end) { end = end < NSMaxRange(old) ? p.location : NSMaxRange(p) }
+            return NSValue(range: NSRange(location: start, length: max(end - start, 0)))
+        }
+    }
+
+    /// A caret coming into a concealed piece right after its hidden opening (a click on its start, → from before it)
+    /// goes in front of it: hidden characters take no space, so the text view puts the caret after them.
+    private func snappedCaret(_ caret: Int) -> Int {
+        guard let piece = pieces.first(where: { $0.range.location < caret && caret < NSMaxRange($0.range) })?.range,
+              piece != revealedPiece,
+              (piece.location..<caret).allSatisfy({ conceal(at: $0)?.replacement == 0 }) else { return caret }
+        return piece.location
+    }
+
     func updateRevealedEquation() {
         updateOperatorLigatures()
-        let selection = selectedRange()
-        let piece = pieces.first {
-            $0.range.location <= selection.location && NSMaxRange(selection) <= NSMaxRange($0.range)
-        }?.range
+        reveal(piece(revealedBy: selectedRange()))
+    }
+
+    /// The piece a selection shows as typed: the one it's in or right next to.
+    private func piece(revealedBy selection: NSRange) -> NSRange? {
+        pieces.first { $0.range.location <= selection.location && NSMaxRange(selection) <= NSMaxRange($0.range) }?.range
+    }
+
+    private func reveal(_ piece: NSRange?) {
         guard piece != revealedPiece else { return }
         let old = revealedPiece
         revealedPiece = piece
         if let old { invalidateGlyphs(in: old) }
         if let piece { invalidateGlyphs(in: piece) }
+    }
+
+    /// The x the caret keeps while going up and down, and whether it's going so.
+    private var verticalGoal: CGFloat?
+    private var isMovingVertically = false
+
+    override func moveUp(_ sender: Any?) {
+        if !moveVertically(up: true) { super.moveUp(sender) }
+    }
+
+    override func moveDown(_ sender: Any?) {
+        if !moveVertically(up: false) { super.moveDown(sender) }
+    }
+
+    /// Up and down past concealed pieces: the caret lands right above or below where it was, as the line looks once
+    /// the piece it lands in shows as typed. False leaves it to the text view, e.g. on the first and last line.
+    private func moveVertically(up: Bool) -> Bool {
+        let selection = selectedRange()
+        guard concealsMath, !pieces.isEmpty, !isColumnMode, selection.length == 0, let lm = layoutManager,
+              let container = textContainer, let caret = caretRect(at: selection.location) else { return false }
+        let x = verticalGoal ?? caret.midX
+        let y = up ? caret.minY - 1 : caret.maxY + 1
+        let origin = textContainerOrigin
+        guard y > origin.y, y < origin.y + lm.usedRect(for: container).maxY else { return false }
+        let point = NSPoint(x: x, y: y)
+        var index = characterIndexForInsertion(at: point)
+        // The piece it lands in shows as typed, which moves what's after it; land where that line has the caret's x.
+        if let piece = piece(revealedBy: NSRange(location: index, length: 0)), piece != revealedPiece {
+            reveal(piece)
+            index = characterIndexForInsertion(at: point)
+        }
+        isMovingVertically = true
+        setSelectedRange(NSRange(location: index, length: 0))
+        isMovingVertically = false
+        verticalGoal = x
+        scrollRangeToVisible(NSRange(location: index, length: 0))
+        return true
     }
 
     private func updateOperatorLigatures() {
@@ -489,11 +621,19 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func flagsChanged(with event: NSEvent) {
         super.flagsChanged(with: event)
-        guard let window, wrapColumn > 0 else { return }
-        // Holding ⌘ over the guide shows it can be dragged.
+        guard let window else { return }
+        // Holding ⌘ over the guide shows it can be dragged, holding ⌥ that a drag selects a column.
         let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        guideHovered = visibleRect.contains(point) && isOnGuide(point, flags: event.modifierFlags)
-        if guideHovered { NSCursor.resizeLeftRight.set() } else if visibleRect.contains(point) { NSCursor.iBeam.set() }
+        let inside = visibleRect.contains(point)
+        guideHovered = inside && isOnGuide(point, flags: event.modifierFlags)
+        guard inside, markers?.isOnScroller(atWindowPoint: window.mouseLocationOutsideOfEventStream) != true else { return }
+        if guideHovered {
+            NSCursor.resizeLeftRight.set()
+        } else if columnSelectionMode || event.modifierFlags.intersection([.command, .option, .control, .shift]) == .option {
+            NSCursor.crosshair.set()
+        } else {
+            NSCursor.iBeam.set()
+        }
     }
 
     // MARK: Gliding caret
@@ -583,6 +723,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         layer.add(blink, forKey: "blink")
     }
 
+    func caretBar(at caret: Int) -> NSRect? { caretRect(at: caret) }
+
     private func caretRect(at caret: Int) -> NSRect? {
         guard let lm = layoutManager, let container = textContainer else { return nil }
         let length = (string as NSString).length
@@ -658,6 +800,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
+        drawColumnSelections(in: rect)
         if let x = guideX, x < bounds.maxX {
             let active = isDraggingGuide || guideHovered
             (active ? NSColor.controlAccentColor.withAlphaComponent(0.7) : NSColor.separatorColor).setFill()
@@ -714,8 +857,11 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     private func cursor(for event: NSEvent) -> NSCursor? {
         if let cursor = CursorArea.cursor(for: event) { return cursor }
-        if markers?.hasMarker(atWindowPoint: event.locationInWindow) == true { return .arrow }
+        if markers?.isOnScroller(atWindowPoint: event.locationInWindow) == true { return .arrow }
         if isOnGuide(convert(event.locationInWindow, from: nil), flags: event.modifierFlags) { return .resizeLeftRight }
+        if columnSelectionMode || event.modifierFlags.intersection([.command, .option, .control, .shift]) == .option {
+            return bounds.contains(convert(event.locationInWindow, from: nil)) ? .crosshair : nil
+        }
         return swatch(at: convert(event.locationInWindow, from: nil)) != nil ? .pointingHand : nil
     }
 
@@ -736,6 +882,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawColumnCarets(in: dirtyRect)
         drawRemoteCursors(in: dirtyRect)
         for literal in swatches {
             guard let rect = swatchRect(for: literal), rect.intersects(dirtyRect) else { continue }
@@ -787,6 +934,14 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
             return
         }
         if isOnGuide(point, flags: event.modifierFlags) { return dragGuide(from: event) }
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if event.clickCount == 1, modifiers == .option || columnSelectionMode && modifiers.isEmpty {
+            return dragColumns(from: event)
+        }
+        if event.clickCount == 1, modifiers == [.control, .shift] {
+            window?.makeFirstResponder(self)
+            return toggleCaret(at: characterIndexForInsertion(at: point))
+        }
         if event.modifierFlags.contains(.command), event.clickCount == 1, let onDefinition {
             let index = characterIndexForInsertion(at: point)
             setSelectedRange(NSRange(location: index, length: 0))
@@ -979,6 +1134,10 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         }
         if keys.commentBlock.matches(event), comments != nil, isEditable {
             toggleBlockComment()
+            return true
+        }
+        if keys.columnSelection.matches(event) {
+            columnSelectionMode.toggle()
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -1259,6 +1418,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         // ⌥⇧↑ and ⌥⇧↓ move the lines, like IntelliJ.
         if keys.moveLineUp.matches(event), isEditable { return moveLines(up: true) }
         if keys.moveLineDown.matches(event), isEditable { return moveLines(up: false) }
+        if keys.addCaretAbove.matches(event) { return addCaret(up: true) }
+        if keys.addCaretBelow.matches(event) { return addCaret(up: false) }
         if keys.completions.matches(event), let onComplete {
             return onComplete()
         }
@@ -1664,6 +1825,7 @@ struct CodeEditor: NSViewRepresentable {
             guard allowsRenameEdit(range, text) else { return false }
             let event = NSApp.currentEvent
             let typing = event?.type == .keyDown && event?.modifierFlags.contains(.command) == false
+                && (textView as? TypstTextView)?.isColumnMode != true
             lastTyped = typing && !isApplyingColor && completion?.isEditing != true && (text?.utf16.count ?? 2) <= 1 ? text : nil
             return true
         }
