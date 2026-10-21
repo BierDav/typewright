@@ -601,6 +601,36 @@ Text $a = 1$ more."#;
     }
 
     #[test]
+    #[ignore = "requires a local solveng package (SOLVENG_ROOT)"]
+    fn worksheet_results_keep_operator_names_and_simplify_arguments() {
+        let package = std::env::var("SOLVENG_ROOT").expect("SOLVENG_ROOT");
+        let main = r#"#import "/lib.typ": *
+#show: worksheet.with(errors: "panic")
+#let Λ = math.op("tri")
+#let plain(c) = if c.has("text") and type(c.text) == str { c.text } else if c.has("children") { c.children.map(plain).join() } else { "" }
+#show math.op: it => { assert.ne(plain(it.text).trim(), "tri"); it }
+$g(t) := Lambda(2t)$
+$g_1(t) := g(t-1/2) -> simplify$
+"#;
+        let root = CString::new(package).unwrap();
+        let path = CString::new("operator-worksheet-check.typ").unwrap();
+        unsafe {
+            let world = tw_world_new(root.as_ptr());
+            tw_world_set_main(world, path.as_ptr());
+            tw_world_set_overlay(world, path.as_ptr(), main.as_ptr(), main.len());
+            let (svg, diagnostics) = (*world).compile(TWFormat::Svg);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let svg = String::from_utf8(svg.expect("worksheet output")).unwrap();
+            let text: String = svg.split("<text ").skip(1)
+                .filter_map(|text| text.split_once('>')?.1.split_once("</text>").map(|(text, _)| text))
+                .collect();
+            assert!(text.ends_with("→Λ(2𝑡−1)"), "{text}");
+            assert!(!text.contains("tri"), "{text}");
+            tw_world_free(world);
+        }
+    }
+
+    #[test]
     fn operator_aliases_do_not_make_other_names_available() {
         let main = "#let dreieick = math.op(\"tri\")\n#graph($ tri(x) $)".replace("#graph", "#box");
         let root = CString::new(std::env::temp_dir().to_str().unwrap()).unwrap();
