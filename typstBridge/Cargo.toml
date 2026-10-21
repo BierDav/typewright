@@ -21,7 +21,7 @@ comrak = { version = "0.56", default-features = false, features = ["shortcodes",
 pulldown-latex = "0.8"
 syntect = { version = "5.3", default-features = false, features = ["html", "default-themes", "default-syntaxes", "regex-fancy"] }
 # solveng's editor support, from its repository.
-solveng-ide = { git = "https://github.com/BierDav/solveng", rev = "a60ecad19d743bff2d44d67ada45173384d994a8", version = "=1.0.0" }
+solveng-ide = { git = "https://github.com/BierDav/solveng", rev = "b4f00c29f3fb7c389300dc58d6050a3cac9710a1", version = "=1.0.0" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 typst-kit = { version = "=0.15.1", features = ["embedded-fonts", "scan-fonts", "system-packages", "system-downloader", "datetime"] }

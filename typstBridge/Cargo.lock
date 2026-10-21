@@ -2381,6 +2381,7 @@ checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 [[package]]
 name = "solveng-ide"
 version = "1.0.0"
+source = "git+https://github.com/BierDav/solveng?rev=b4f00c29f3fb7c389300dc58d6050a3cac9710a1#b4f00c29f3fb7c389300dc58d6050a3cac9710a1"
 dependencies = [
  "regex",
  "serde",
@@ -2392,6 +2393,7 @@ dependencies = [
 [[package]]
 name = "solveng-names"
 version = "1.0.0"
+source = "git+https://github.com/BierDav/solveng?rev=b4f00c29f3fb7c389300dc58d6050a3cac9710a1#b4f00c29f3fb7c389300dc58d6050a3cac9710a1"
 dependencies = [
  "unicode-general-category",
  "unicode-normalization",
