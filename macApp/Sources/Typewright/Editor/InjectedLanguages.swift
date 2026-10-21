@@ -64,15 +64,21 @@ enum InjectedLanguages {
                 storage.addAttributes([.foregroundColor: Highlighter.paramColor, .font: bold], range: r)
                 continue
             }
-            // Stroked as well, since monospaced fonts stop at bold.
             if tokens[i + 2] == evaluate, start + count <= length {
                 let r = NSRange(location: location + start, length: count)
-                storage.addAttributes([.foregroundColor: Highlighter.keywordColor, .font: bold, .strokeWidth: -6.0], range: r)
+                storage.addAttributes([.foregroundColor: Highlighter.keywordColor,
+                                       .font: Highlighter.operatorFont(size: font.pointSize), .ligature: 2], range: r)
                 continue
             }
             guard let kind = Kind(rawValue: tokens[i + 2]), start + count <= length else { continue }
             let r = NSRange(location: location + start, length: count)
             storage.addAttribute(.foregroundColor, value: color(kind), range: r)
+            if kind == .operator {
+                let text = (storage.string as NSString).substring(with: r)
+                if text == ":=" || text == "->" {
+                    storage.addAttributes([.font: Highlighter.operatorFont(size: font.pointSize), .ligature: 2], range: r)
+                }
+            }
             if kind == .comment { storage.addAttribute(.font, value: italic, range: r) }
         }
     }

@@ -469,7 +469,7 @@ fn conceal_math(node: &LinkedNode, src: &str, equation: (u32, u32), utf16: &[u32
     };
     match node.kind() {
         SyntaxKind::Str => {
-            if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+            if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') && !text.contains(['\n', '\r']) {
                 push(range.start, range.start + 1, 0);
                 push(range.end - 1, range.end, 0);
             }
@@ -592,5 +592,19 @@ mod conceal_tests {
         assert_eq!(shown("$a -> b != c, arrow.r.double, alpha sqrt(x)$"), "$a → b ≠ c, ⇒, α sqrt(x)$");
         assert_eq!(shown(r#"$#"x" + "y"$"#), r#"$#"x" + y$"#);
         assert_eq!(shown(r"1\. Rechenübung \# \u{2014} $a \$ b$ #raw(`\.`) \"), r"1. Rechenübung # — $a $ b$ #raw(`\.`) \");
+    }
+
+    #[test]
+    fn conceals_empty_strings_after_symbols() {
+        let source = "$ Sigma\"\"r := 1 + 3/3x+y^2 $\n$ Σ\"\"r -> $";
+        assert_eq!(shown(source), "$ Σr ≔ 1 + 3/3x+y^2 $\n$ Σr → $");
+    }
+
+    #[test]
+    fn leaves_broken_multiline_math_strings_visible() {
+        let source = "$ Σ\"\"r \"-> $\n  $ Σ\"\"r -> $\n  $ Σ\"\"r -> $";
+        let shown = shown(source);
+        assert!(shown.contains("\"-> $\n"), "{shown}");
+        assert!(shown.contains("$ Σ\"\"r -> $"), "{shown}");
     }
 }

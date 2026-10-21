@@ -1,4 +1,4 @@
-// Renders the app icon set and logo. Usage: swift scripts/make-icon.swift
+// Renders the app icon set and logo. Usage: swift scripts/make-icon-macApp.swift
 import AppKit
 
 func render(_ size: CGFloat) -> NSBitmapImageRep {

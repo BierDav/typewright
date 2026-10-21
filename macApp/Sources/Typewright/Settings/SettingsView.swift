@@ -163,7 +163,9 @@ private struct CompilerRow: View {
 }
 
 struct EditorSettings: View {
+    @AppStorage("editorFontName") private var fontName = ""
     @AppStorage("editorFontSize") private var fontSize = 14.0
+    @State private var fontFamilies: [String] = []
     @AppStorage("glidingCursor") private var glidingCursor = true
     @AppStorage("wrapGuide") private var wrapGuide = false
     @AppStorage("wrapColumn") private var wrapColumn = 80
@@ -174,9 +176,16 @@ struct EditorSettings: View {
     var body: some View {
         Form {
             Section("Font") {
+                Picker("Family", selection: $fontName) {
+                    Text("System Monospaced").tag("")
+                    Divider()
+                    ForEach(fontFamilies, id: \.self) { family in
+                        Text(family).tag(family)
+                    }
+                }
                 Stepper("Size: \(Int(fontSize)) pt", value: $fontSize, in: 9...32)
                 Text("#let greeting = \"Hello, Typst\"")
-                    .font(.system(size: fontSize, design: .monospaced))
+                    .font(Font(EditorFont.font(name: fontName, size: fontSize)))
             }
             Section("Cursor") {
                 Toggle("Gliding cursor", isOn: $glidingCursor)
@@ -212,6 +221,7 @@ struct EditorSettings: View {
                         LanguageServerSection()
         }
         .formStyle(.grouped)
+        .onAppear { fontFamilies = EditorFont.families }
     }
 }
 

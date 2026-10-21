@@ -42,8 +42,12 @@ final class Opener {
         return true
     }
 
-    func newWindow() {
-        show(MainWindowController(space: nil))
+    @discardableResult
+    func newWindow(from source: WindowState? = nil) -> MainWindowController {
+        let source = source ?? keyState ?? controllers.first(where: { $0.window?.isMainWindow == true })?.state
+        let controller = MainWindowController(space: source?.workspace?.root ?? source?.space, copying: source)
+        show(controller)
+        return controller
     }
 
     /// Brings up a window without a space, reusing an existing one.
@@ -51,7 +55,7 @@ final class Opener {
         if let empty = controllers.first(where: { $0.state.space == nil }) {
             empty.showWindow(nil)
         } else {
-            newWindow()
+            show(MainWindowController(space: nil))
         }
     }
 

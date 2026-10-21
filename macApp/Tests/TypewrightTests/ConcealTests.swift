@@ -47,11 +47,62 @@ final class ConcealTests: XCTestCase {
         tv.string = "$Delta\"\"Gamma\"\"Omega + a\"\"b$"
         tv.setSelectedRange(NSRange(location: 21, length: 0))
         tv.concealsMath = true
-        // An empty string next to nothing concealed stays as typed.
-        XCTAssertEqual(shown(tv), "$??? + a\"\"b$")
+        XCTAssertEqual(shown(tv), "$??? + ab$")
         tv.setSelectedRange(NSRange(location: 10, length: 0))
         tv.updateRevealedEquation()
-        XCTAssertEqual(shown(tv), "$Delta\"\"Gamma\"\"Omega + a\"\"b$", "all five reveal together")
+        XCTAssertEqual(shown(tv), "$Delta\"\"Gamma\"\"Omega + ab$", "all five reveal together")
+    }
+
+    func testEmptyStringsGlueLiteralGreekLetters() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$ Sigma\"\"r $ and $ Σ\"\"r $"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        XCTAssertEqual(shown(tv), "$ ?r $ and $ Σr $")
+        tv.setSelectedRange(NSRange(location: 20, length: 0))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(shown(tv), "$ ?r $ and $ Σ\"\"r $")
+    }
+
+    func testOperatorsUseBoldLigaturesWithoutFolds() {
+        let text = "$ x := 1 -> $"
+        XCTAssertTrue(Highlighter.conceals(in: text).isEmpty)
+        let storage = NSTextStorage(string: text)
+        Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        for index in [4, 9] {
+            let font = storage.attribute(.font, at: index, effectiveRange: nil) as! NSFont
+            XCTAssertEqual(font.fontName, "JetBrainsMono-Bold")
+            XCTAssertEqual(storage.attribute(.ligature, at: index, effectiveRange: nil) as? Int, 2)
+        }
+        func glyphs(ligature: Int) -> [CGGlyph] {
+            let arrow = NSAttributedString(string: "->", attributes: [
+                .font: Highlighter.operatorFont(size: 13, ligatures: ligature != 0), .ligature: ligature,
+            ])
+            let runs = CTLineGetGlyphRuns(CTLineCreateWithAttributedString(arrow)) as! [CTRun]
+            return runs.flatMap { run in
+                var glyphs = [CGGlyph](repeating: 0, count: CTRunGetGlyphCount(run))
+                CTRunGetGlyphs(run, CFRange(location: 0, length: 0), &glyphs)
+                return glyphs
+            }
+        }
+        XCTAssertNotEqual(glyphs(ligature: 2), glyphs(ligature: 0), "the arrow uses the font's ligature")
+    }
+
+    func testOperatorLigaturesRevealAtTheCaretWithoutFolds() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.string = "$x -> y$"
+        let storage = tv.textStorage!
+        Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        tv.setSelectedRange(NSRange(location: 4, length: 0))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont,
+                       Highlighter.operatorFont(size: 13, ligatures: false))
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont,
+                       Highlighter.operatorFont(size: 13))
+        XCTAssertTrue(tv.conceals.isEmpty)
     }
 
     func testEscapesShowTheirCharacter() {

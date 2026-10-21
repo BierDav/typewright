@@ -29,7 +29,7 @@ Install Rust (`cargo`), then open `macApp/Typewright.xcodeproj` in Xcode and run
 For the web app, also install [Bun](https://bun.sh) and Homebrew's `llvm`, then:
 
 ```sh
-scripts/build-web-wasm.sh
+scripts/build-webApp-wasm.sh
 cd webApp && bun install && bun run dev
 ```
 

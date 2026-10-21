@@ -291,7 +291,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"$SRCROOT/../scripts/build-core.sh\"\n";
+			shellScript = "\"$SRCROOT/../scripts/build-sharedCore.sh\"\n";
 		};
 		7B3C1E2A9F4D5A6B8C0D1E2F /* Build Iroh Bridge */ = {
 			isa = PBXShellScriptBuildPhase;

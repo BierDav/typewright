@@ -8,7 +8,7 @@ on:
       - sharedCore/**
       - irohBridge/**
       - typstBridge/**
-      - scripts/build-web-wasm.sh
+      - scripts/build-webApp-wasm.sh
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -52,7 +52,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP"/binaryen-*.tar.gz -C "$RUNNER_TEMP/binaryen" --strip-components 1
           echo "$RUNNER_TEMP/binaryen/bin" >> "$GITHUB_PATH"
       - name: Build Rust core and bridges for wasm
-        run: scripts/build-web-wasm.sh
+        run: scripts/build-webApp-wasm.sh
 
       - uses: oven-sh/setup-bun@v2
       - name: Install dependencies

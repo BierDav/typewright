@@ -116,7 +116,7 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored private var packageObserver: (any NSObjectProtocol)?
     @ObservationIgnored private var syncObservers: [any NSObjectProtocol] = []
 
-    init(url: URL) {
+    init(url: URL, session: WorkspaceSession? = nil) {
         let url = url.standardizedFileURL
         root = Self.root(of: url)
         let isDir = root == url
@@ -124,8 +124,9 @@ final class Workspace: EditorLanguage {
         live = LiveEditing(root: root)
         renderMode = UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf
 
-        let saved = SpaceStore.state(for: root)
+        let saved = session?.state ?? SpaceStore.state(for: root)
         let state = saved ?? SpaceState()
+        buffers = session?.buffers ?? [:]
         split = state.split
         reloadTree()
         let base = root
@@ -496,7 +497,7 @@ final class Workspace: EditorLanguage {
         }
     }
 
-    func persist() {
+    func session() -> WorkspaceSession {
         capturePreviewState()
         captureFileState()
         var state = SpaceState()
@@ -507,7 +508,14 @@ final class Workspace: EditorLanguage {
         for (url, s) in previewStates { if let key = relative(url) { state.previews[key] = s } }
         for (url, s) in positions { if let key = relative(url) { state.positions[key] = s } }
         state.expanded = expanded.compactMap(relative).sorted()
-        SpaceStore.save(state, for: root)
+        if let file = previewFile.flatMap(relative), !previewIsMarkdown {
+            state.positions[file, default: DocumentPosition()].mode = renderMode
+        }
+        return WorkspaceSession(state: state, buffers: buffers)
+    }
+
+    func persist() {
+        SpaceStore.save(session().state, for: root)
     }
 
     /// Picks up edits made by other apps for files without pending changes.

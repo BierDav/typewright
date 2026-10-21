@@ -201,6 +201,7 @@ private struct SpacesPane: View {
     @State private var renaming: URL?
     /// Shows each row's ⌘ number while ⌘ is held.
     @State private var commandDown = false
+    @State private var scrolled = false
     @State private var flagsMonitor: Any?
     private let sync = SyncService.shared
 
@@ -255,6 +256,29 @@ private struct SpacesPane: View {
     }
 
     private var list: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Spaces")
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .padding(.horizontal, 18)
+            .frame(height: 34)
+            .padding(.bottom, 2)
+            .overlay(alignment: .bottom) { Divider().opacity(scrolled ? 1 : 0) }
+            scrollList
+            HStack {
+                if canClose { SpacesButton(active: true) { state.setSpacesOpen(false) } }
+                Spacer()
+            }
+            .frame(height: 28)
+            .padding(10)
+        }
+        .contentShape(Rectangle())
+        .gesture(WindowDragGesture())
+    }
+
+    private var scrollList: some View {
         ScrollView {
             LazyVStack(spacing: 2) {
                 ForEach(Array(spaces.enumerated()), id: \.element) { index, url in
@@ -324,26 +348,10 @@ private struct SpacesPane: View {
                 onExit: { externalDrop = nil },
                 onDrop: addDropped))
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Spaces")
-                Spacer(minLength: 0)
-            }
-            .font(.system(size: 13, weight: .semibold))
-            .padding(.horizontal, 18)
-            .frame(height: 34)
-            .padding(.bottom, 2)
+        .clipped()
+        .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y > 0.5 } action: { _, scrolled in
+            self.scrolled = scrolled
         }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                if canClose { SpacesButton(active: true) { state.setSpacesOpen(false) } }
-                Spacer()
-            }
-            .frame(height: 28)
-            .padding(10)
-        }
-        .contentShape(Rectangle())
-        .gesture(WindowDragGesture())
     }
 
     /// Starts on the open space, or the first one without.

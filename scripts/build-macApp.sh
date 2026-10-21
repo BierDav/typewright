@@ -4,7 +4,7 @@
 # TYPEWRIGHT_PROVISIONING_PROFILE (a .provisionprofile path) are set, ad-hoc otherwise (no passkeys, no sync).
 # Notarized when TYPEWRIGHT_NOTARY_APPLE_ID, TYPEWRIGHT_NOTARY_PASSWORD and TYPEWRIGHT_NOTARY_TEAM are set too,
 # or locally with a `notarytool store-credentials` profile named in TYPEWRIGHT_NOTARY_PROFILE.
-# Usage: build-app.sh <version> [build-number]
+# Usage: build-macApp.sh <version> [build-number]
 set -euo pipefail
 version=$1
 build=${2:-1}

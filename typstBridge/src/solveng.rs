@@ -8,6 +8,8 @@ use serde::Deserialize;
 use serde_json::json;
 use solveng_ide::{Context, ContextFile, Integration, Report};
 
+mod hover;
+
 /// The editor's context: the files around the document (paths relative to the root), the last compile's report,
 /// the document's path and whether it's the compiled file.
 #[derive(Deserialize, Default)]
@@ -117,7 +119,7 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
                         .collect::<Vec<_>>()
                 ),
                 "complete" => json!(solveng_ide::complete(document, &c, offset)),
-                "hover" => json!(solveng_ide::hover(document, &c, offset)),
+                "hover" => json!(hover::hover(document, &c, offset)),
                 "conversions" => json!(solveng_ide::conversions(document, &c, offset)),
                 "diagnostics" => json!(solveng_ide::diagnostics(document, &c)),
                 "definition" => json!(solveng_ide::definition(document, &c, offset)),
@@ -137,6 +139,82 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
 mod tests {
     use super::call;
     use serde_json::Value;
+
+    #[test]
+    fn bundles_solveng_one() {
+        assert_eq!(call("version", "", "", 0), "\"1.0.0\"");
+    }
+
+    #[test]
+    fn documents_glued_names() {
+        let doc = "#show: worksheet\n$ Sigma\"\"r := 1 + x + y^2 $\n$ Σ\"\"r -> $";
+        let at = doc[..doc.rfind('Σ').unwrap()].encode_utf16().count() as u32;
+        let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
+        assert_eq!(hover["start"], at);
+        assert_eq!(hover["end"], at + 4);
+        let markdown = hover["markdown"].as_str().unwrap();
+        assert!(markdown.contains("Σr = 1 + x + y^2"), "{markdown}");
+        assert!(markdown.contains("### Depends on\n\n- `x` (undefined)\n- `y` (undefined)"), "{markdown}");
+        for offset in at + 1..at + 4 {
+            let other: Value = serde_json::from_str(&call("hover", doc, "", offset)).unwrap();
+            assert_eq!(other, hover);
+        }
+    }
+
+    #[test]
+    fn documents_transitive_dependencies_without_parameters_or_units() {
+        let doc = "#show: worksheet\n$a := 2 A$\n$b := a + 3 A$\n$f(x: A) := b + x$\n$f(1 A) =$";
+        let at = doc.rfind("f(").unwrap() as u32;
+        let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
+        let markdown = hover["markdown"].as_str().unwrap();
+        let dependencies = markdown.split("### Depends on\n\n").nth(1).unwrap();
+        assert_eq!(dependencies, "- `b`\n- `a`");
+    }
+
+    #[test]
+    fn documents_code_and_call_string_dependencies() {
+        for doc in [
+            "#show: worksheet\n```solveng\na := 2\nb := a + a\nf(x) := b + x\nf(1) =\n```",
+            "#worksheet(\"a := 2\", \"b := a + a\", \"f(x) := b + x\", \"f(1) =\")",
+        ] {
+            let at = doc.rfind("f(").unwrap() as u32;
+            let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
+            let markdown = hover["markdown"].as_str().unwrap();
+            assert!(markdown.ends_with("### Depends on\n\n- `b`\n- `a`"), "{markdown}");
+        }
+    }
+
+    #[test]
+    fn dependencies_follow_the_visible_definition() {
+        let doc = "#show: worksheet\n$x := 1$\n$y := 2$\n$a := x$\n$a =$\n$a := y$";
+        let at = doc.find("a =").unwrap() as u32;
+        let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
+        let markdown = hover["markdown"].as_str().unwrap();
+        assert!(markdown.ends_with("### Depends on\n\n- `x`"), "{markdown}");
+    }
+
+    #[test]
+    fn documents_dependencies_from_included_files() {
+        let main = "#show: worksheet\n$a := 2$\n#include \"part.typ\"\n$b =$";
+        let element = |path: &str, source: &str, text: &str| {
+            let start = source.find(text).unwrap();
+            serde_json::json!({"path": path, "start": start, "end": start + text.len(), "text": text,
+                "kind": "math", "active": true, "integration": "math"})
+        };
+        let report = serde_json::json!({"blocks": 1, "elements": [
+            element("main.typ", main, "$a := 2$"), element("main.typ", main, "$b =$"),
+            element("part.typ", "$b := a + 1$", "$b := a + 1$")
+        ]}).to_string();
+        let context = serde_json::json!({
+            "files": [{"path": "main.typ", "text": main}, {"path": "part.typ", "text": "$b := a + 1$"}],
+            "path": "main.typ", "main": true, "mainPath": "main.typ",
+            "report": report,
+        }).to_string();
+        let at = main.rfind("b =").unwrap() as u32;
+        let hover: Value = serde_json::from_str(&call("hover", main, &context, at)).unwrap();
+        let markdown = hover["markdown"].as_str().unwrap();
+        assert!(markdown.ends_with("### Depends on\n\n- `a`"), "{markdown}");
+    }
 
     #[test]
     fn reads_the_editor_context() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prints the Homebrew cask. Usage: cask.sh <name> <version> <sha256> [conflict]
+# Prints the Homebrew cask. Usage: cask-macApp.sh <name> <version> <sha256> [conflict]
 set -euo pipefail
 name=$1 version=$2 sha=$3 conflict=${4:-}
 cat <<RUBY

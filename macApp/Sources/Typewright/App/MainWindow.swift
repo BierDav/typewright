@@ -22,6 +22,7 @@ final class WindowState {
     var pendingReveal: SourceLocation?
     /// A file to select once the window opened its space, keeping its saved caret.
     var pendingFile: URL?
+    var pendingSession: WorkspaceSession?
     var sidebarVisible = true {
         didSet { if sidebarVisible { floatingSidebar = false } }
     }
@@ -73,10 +74,12 @@ final class WindowState {
     /// How far the open selector reaches past the sidebar, pushing the space aside.
     static let spacesExtra: CGFloat = 150
 
-    init(space: URL?) {
+    init(space: URL?, copying source: WindowState? = nil) {
         self.space = space
+        pendingSession = source?.workspace?.session()
+        sidebarVisible = source?.sidebarVisible ?? true
         let saved = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
-        initialSidebarWidth = saved >= Self.minSidebarWidth ? saved : 220
+        initialSidebarWidth = source?.panelFrame.width ?? (saved >= Self.minSidebarWidth ? saved : 220)
         sidebarWidth = initialSidebarWidth
     }
 
@@ -103,8 +106,8 @@ final class WindowState {
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let state: WindowState
 
-    init(space: URL?) {
-        state = WindowState(space: space)
+    init(space: URL?, copying source: WindowState? = nil) {
+        state = WindowState(space: space, copying: source)
         let host = NSHostingController(rootView: MainWindow(state: state))
         host.sceneBridgingOptions = .all
         let window = NSWindow(contentViewController: host)
@@ -171,7 +174,8 @@ struct MainWindow: View {
                                    subtitle: workspace?.name ?? ""))
         .onChange(of: state.space, initial: true) { _, url in
             let previous = workspace
-            let next = url.map { Workspace(url: $0) }
+            let next = url.map { Workspace(url: $0, session: state.pendingSession) }
+            state.pendingSession = nil
             if let next { SpaceList.add(next.root) }
             if let next, let pending = state.pendingReveal, pending.url.path.hasPrefix(next.root.path + "/") {
                 next.open(pending)

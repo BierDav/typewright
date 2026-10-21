@@ -68,7 +68,7 @@ jobs:
             echo "::error::Missing NOTARY_APPLE_ID, NOTARY_PASSWORD or NOTARY_TEAM_ID secrets; Gatekeeper blocks unnotarized casks."
             exit 1
           fi
-          echo "sha=$(scripts/build-app.sh '${{ steps.version.outputs.version }}' '${{ github.run_number }}' | tail -1)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(scripts/build-macApp.sh '${{ steps.version.outputs.version }}' '${{ github.run_number }}' | tail -1)" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub release
         env:
@@ -92,10 +92,10 @@ jobs:
           git clone git@github.com:BierDav/homebrew-tap.git tap
           mkdir -p tap/Casks
           if [ "${{ inputs.channel }}" = "stable" ]; then
-            scripts/cask.sh typewright "$VERSION" "$SHA" typewright@beta > tap/Casks/typewright.rb
+            scripts/cask-macApp.sh typewright "$VERSION" "$SHA" typewright@beta > tap/Casks/typewright.rb
           fi
           # The beta cask always tracks the newest build of any channel.
-          scripts/cask.sh typewright@beta "$VERSION" "$SHA" typewright > tap/Casks/typewright@beta.rb
+          scripts/cask-macApp.sh typewright@beta "$VERSION" "$SHA" typewright > tap/Casks/typewright@beta.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -150,7 +150,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     /// Sorted by location; found again while each edit is processed, before anything is laid out with stale positions.
     private(set) var conceals: [Highlighter.Conceal] = [] {
         didSet {
-            let (kept, pieces) = Self.pieces(of: conceals)
+            let (kept, pieces) = Self.pieces(of: conceals, text: string as NSString)
             // Setting it here doesn't run didSet again.
             if kept.count != conceals.count { conceals = kept }
             self.pieces = pieces
@@ -158,15 +158,14 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     /// What reveals as one: a symbol, a string with both its quotes, or such pieces glued by empty strings
-    /// (`Delta""Gamma`). `boxes` are the parts that stay visible.
+    /// (`Delta""Gamma`).
     private struct Piece {
         let range: NSRange
-        let boxes: [NSRange]
     }
     private var pieces: [Piece] = []
 
     /// The pieces of `conceals`, and the conceals without empty strings that glue nothing, which show as typed.
-    private static func pieces(of conceals: [Highlighter.Conceal]) -> ([Highlighter.Conceal], [Piece]) {
+    private static func pieces(of conceals: [Highlighter.Conceal], text: NSString) -> ([Highlighter.Conceal], [Piece]) {
         // Single pieces first, each with its conceals.
         var singles: [(range: NSRange, box: NSRange?, conceals: ArraySlice<Highlighter.Conceal>)] = []
         var i = 0
@@ -194,11 +193,26 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
             while end + 1 < singles.count, NSMaxRange(singles[end].range) == singles[end + 1].range.location,
                   empty(end) || empty(end + 1) { end += 1 }
             let run = singles[j...end]
-            let boxes = run.compactMap(\.box)
-            if (j...end).contains(where: { !empty($0) }) {
+            var boxes = run.compactMap(\.box)
+            var start = run.first!.range.location
+            var finish = NSMaxRange(run.last!.range)
+            if empty(j), start > 0 {
+                let left = text.rangeOfComposedCharacterSequence(at: start - 1)
+                if text.substring(with: left).unicodeScalars.allSatisfy({ CharacterSet.letters.contains($0) }) {
+                    start = left.location
+                    boxes.insert(left, at: 0)
+                }
+            }
+            if empty(end), finish < text.length {
+                let right = text.rangeOfComposedCharacterSequence(at: finish)
+                if text.substring(with: right).unicodeScalars.allSatisfy({ CharacterSet.letters.contains($0) }) {
+                    finish = NSMaxRange(right)
+                    boxes.append(right)
+                }
+            }
+            if !boxes.isEmpty || (j...end).contains(where: { !empty($0) }) {
                 kept += run.flatMap(\.conceals)
-                let start = run.first!.range.location
-                pieces.append(Piece(range: NSRange(location: start, length: NSMaxRange(run.last!.range) - start), boxes: boxes))
+                pieces.append(Piece(range: NSRange(location: start, length: finish - start)))
             }
             j = end + 1
         }
@@ -240,6 +254,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     private var revealedPiece: NSRange?
 
     func updateRevealedEquation() {
+        updateOperatorLigatures()
         let selection = selectedRange()
         let piece = pieces.first {
             $0.range.location <= selection.location && NSMaxRange(selection) <= NSMaxRange($0.range)
@@ -249,6 +264,22 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         revealedPiece = piece
         if let old { invalidateGlyphs(in: old) }
         if let piece { invalidateGlyphs(in: piece) }
+    }
+
+    private func updateOperatorLigatures() {
+        guard let storage = textStorage else { return }
+        let text = storage.string as NSString
+        let selection = selectedRange()
+        var changes: [(NSRange, NSFont)] = []
+        storage.enumerateAttribute(.font, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard let font = value as? NSFont, font.fontName == "JetBrainsMono-Bold" else { return }
+            let original = text.substring(with: range)
+            guard original == ":=" || original == "->" else { return }
+            let touching = selection.location <= NSMaxRange(range) && NSMaxRange(selection) >= range.location
+            let desired = Highlighter.operatorFont(size: font.pointSize, ligatures: !touching)
+            if !font.isEqual(desired) { changes.append((range, desired)) }
+        }
+        for (range, font) in changes { storage.addAttribute(.font, value: font, range: range) }
     }
 
     /// Only what differs is laid out again: the lists match at the start, and at the end once shifted by the edit.
@@ -293,23 +324,6 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
             }
         }
         return nil
-    }
-
-    /// A quiet outline around each piece shown differently from its source, like IntelliJ's folded code; not filled,
-    /// so it can't be taken for the selection.
-    private func drawConcealBoxes(in rect: NSRect, boxes: ([NSRange]) -> [NSRect]) {
-        guard concealsMath, !conceals.isEmpty, let lm = layoutManager, let container = textContainer else { return }
-        let visible = lm.characterRange(forGlyphRange: lm.glyphRange(
-            forBoundingRect: rect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y), in: container), actualGlyphRange: nil)
-        NSColor.tertiaryLabelColor.setStroke()
-        for piece in pieces where !piece.boxes.isEmpty && piece.range != revealedPiece
-            && NSIntersectionRange(piece.range, visible).length > 0 {
-            for box in boxes(piece.boxes) where box.intersects(rect) {
-                let path = NSBezierPath(roundedRect: box.insetBy(dx: -0.5, dy: 1.5), xRadius: 3, yRadius: 3)
-                path.lineWidth = 1
-                path.stroke()
-            }
-        }
     }
 
     func layoutManager(_ layoutManager: NSLayoutManager, shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
@@ -643,7 +657,6 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         let visible = layoutManager.flatMap { lm in textContainer.map { lm.characterRange(
             forGlyphRange: lm.glyphRange(forBoundingRect: rect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y), in: $0),
             actualGlyphRange: nil) } } ?? NSRange(location: 0, length: length)
-        drawConcealBoxes(in: rect, boxes: boxes)
         let shown = findMatches.filter { NSIntersectionRange($0, visible).length > 0 || NSLocationInRange($0.location, visible) }
         for box in boxes(shown) where box.intersects(rect) {
             NSColor.systemYellow.withAlphaComponent(0.28).setFill()
@@ -1061,6 +1074,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 }
 
 struct CodeEditor: NSViewRepresentable {
+    @AppStorage("editorFontName") private var fontName = ""
     let documentID: Int
     let text: String
     let fontSize: CGFloat
@@ -1215,7 +1229,7 @@ struct CodeEditor: NSViewRepresentable {
             live?.showCursors = { [weak tv] in tv?.remoteCursors = $0 }
         }
 
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let font = EditorFont.font(name: fontName, size: fontSize)
         if c.documentID != documentID || c.font != font {
             let isNewDocument = c.documentID != documentID
             // Zooming keeps the line at the top in place.
@@ -1501,6 +1515,7 @@ struct CodeEditor: NSViewRepresentable {
                                       range: NSRange(location: 0, length: storage.length))
             }
             (textView as? TypstTextView)?.swatches = swatches
+            (textView as? TypstTextView)?.updateRevealedEquation()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {

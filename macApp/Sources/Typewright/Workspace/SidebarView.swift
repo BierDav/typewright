@@ -7,6 +7,7 @@ struct SidebarView: View {
     let onShowSpaces: () -> Void
     let onRenameSpace: (String) -> Void
     @State private var renaming: URL?
+    @State private var scrolled = false
     /// The row being dragged and the pointer in the tree's coordinates.
     @State private var drag: (url: URL, location: CGPoint)?
     @State private var expandTask: Task<Void, Never>?
@@ -36,38 +37,40 @@ struct SidebarView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            GeometryReader { geo in
-                ScrollView {
-                    fileList
-                        .frame(maxWidth: .infinity, minHeight: geo.size.height, alignment: .top)
-                        // Empty space moves the window; rows and buttons keep their own gestures.
-                        .contentShape(Rectangle())
-                        .gesture(WindowDragGesture())
-                }
-                // The list fills the view exactly, so the slide to and from the selector would flash scrollers.
-                .scrollIndicators(CGFloat(rows.count) * Self.rowPitch + 8 > geo.size.height ? .automatic : .never)
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
                 SpaceHeader(name: workspace.name, isDropTarget: dropTarget?.path == workspace.root.path,
                             canReveal: workspace.selectedFile.map(isInTree) ?? false,
                             onReveal: { revealSelected(proxy) },
                             onRename: onRenameSpace, onShowSpaces: onShowSpaces, menuItems: spaceMenuItems)
                     .padding(.horizontal, 8)
                     .padding(.bottom, 2)
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                SpacesButton(active: false, action: onShowSpaces)
-                Spacer()
-                ZenMenuButton(systemName: "plus", size: 28, rotatesWhenOpen: true, idleFill: false) {
-                    createItems(in: nil)
+                    .overlay(alignment: .bottom) { Divider().opacity(scrolled ? 1 : 0) }
+                GeometryReader { geo in
+                    ScrollView {
+                        fileList
+                            .frame(maxWidth: .infinity, minHeight: geo.size.height, alignment: .top)
+                            .contentShape(Rectangle())
+                            .gesture(WindowDragGesture())
+                    }
+                    .clipped()
+                    .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y > 0.5 } action: { _, scrolled in
+                        self.scrolled = scrolled
+                    }
+                    // Avoid flashing scrollers while the selector slides.
+                    .scrollIndicators(CGFloat(rows.count) * Self.rowPitch + 8 > geo.size.height ? .automatic : .never)
                 }
-                .help("New file or folder")
+                HStack {
+                    SpacesButton(active: false, action: onShowSpaces)
+                    Spacer()
+                    ZenMenuButton(systemName: "plus", size: 28, rotatesWhenOpen: true, idleFill: false) {
+                        createItems(in: nil)
+                    }
+                    .help("New file or folder")
+                }
+                .padding(10)
+                .contentShape(Rectangle())
+                .gesture(WindowDragGesture())
             }
-            .padding(10)
-            .contentShape(Rectangle())
-            .gesture(WindowDragGesture())
         }
     }
 

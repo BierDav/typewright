@@ -5,6 +5,16 @@ import TypstBridge
 
 /// Typst syntax colouring from typst's own parser, in IntelliJ's palette.
 enum Highlighter {
+    static func operatorFont(size: CGFloat, ligatures: Bool = true) -> NSFont {
+        EditorFont.register()
+        let font = NSFont(name: "JetBrainsMono-Bold", size: size) ?? .monospacedSystemFont(ofSize: size, weight: .bold)
+        let descriptor = font.fontDescriptor.addingAttributes([.featureSettings: [[
+            NSFontDescriptor.FeatureKey.typeIdentifier: kContextualAlternatesType,
+            .selectorIdentifier: ligatures ? kContextualAlternatesOnSelector : kContextualAlternatesOffSelector,
+        ]]])
+        return NSFont(descriptor: descriptor, size: size) ?? font
+    }
+
     /// Mirrors `HlTag` in the bridge.
     enum Tag: UInt32 {
         case plain, comment, punctuation, escape, strong, emph, link, raw, label, ref, heading, listMarker, listTerm
@@ -88,14 +98,20 @@ enum Highlighter {
                     replacement: unichar(clamping: values[i + 2]),
                     equation: NSRange(location: Int(values[i + 3]), length: Int(values[i + 4] - values[i + 3])))
         }
-        guard text.contains(SolvengSupport.tag) || !context.isEmpty || text.contains("worksheet") else { return math }
+        let source = text as NSString
+        let isFold = { (conceal: Conceal) in
+            let original = source.substring(with: conceal.range)
+            return original != ":=" && original != "->"
+        }
+        let folds = math.filter(isFold)
+        guard text.contains(SolvengSupport.tag) || !context.isEmpty || text.contains("worksheet") else { return folds }
         let code = SolvengSupport.conceals(text, context: context)
         let solveng = stride(from: 0, to: code.count - 4, by: 5).map { i in
             let v = { code[i + $0] }
             return Conceal(range: NSRange(location: v(0), length: v(1)), replacement: unichar(clamping: v(2)),
                            equation: NSRange(location: v(3), length: v(4) - v(3)))
         }
-        return solveng.isEmpty ? math : (math + solveng).sorted { $0.range.location < $1.range.location }
+        return (folds + solveng.filter(isFold)).sorted { $0.range.location < $1.range.location }
     }
 
     /// Highlighted text for SwiftUI, e.g. code samples in the docs popup.
@@ -147,6 +163,12 @@ enum Highlighter {
             }
             if run.tag == .link { attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue }
             if !attrs.isEmpty { storage.addAttributes(attrs, range: r) }
+            if run.math {
+                let operatorText = ns.substring(with: r)
+                if operatorText == ":=" || operatorText == "->" {
+                    storage.addAttributes([.font: operatorFont(size: font.pointSize), .ligature: 2], range: r)
+                }
+            }
             if run.tag == .raw, depth < InjectedLanguages.maxDepth { injectRaw(in: storage, run: r, font: font, depth: depth) }
         }
         // solveng colours what it calculates: its code blocks, math as `integration` says, and its calls' strings.

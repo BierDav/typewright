@@ -72,6 +72,11 @@ struct SpaceState: Codable {
     }
 }
 
+struct WorkspaceSession {
+    var state: SpaceState
+    var buffers: [URL: String]
+}
+
 /// Keeps every space's UI state in Application Support so it survives relaunches.
 @MainActor
 enum SpaceStore {

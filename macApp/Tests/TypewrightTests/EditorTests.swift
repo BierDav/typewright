@@ -267,17 +267,18 @@ final class EditorTests: XCTestCase {
     func testSolvengResultsAreBold() {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         // The = and -> that show a result stand out as in Mathcad; = in a definition or a step doesn't.
-        let storage = NSTextStorage(string: "#show: worksheet\n$t := Q_0/I = h$ $V := 2 A = 2000 mA$ $x^2 = 4 -> solve(x)$\n")
+        let storage = NSTextStorage(string: "#show: worksheet\n$t := Q_0/I = 1 h$ $V := 2 A = 2000 mA$ $x^2 = 4 -> solve(x)$\n")
         Highlighter.apply(to: storage, font: font)
         let s = storage.string as NSString
-        func stroke(_ needle: String, from: String) -> Double {
+        func isBold(_ needle: String, from: String) -> Bool {
             let at = s.range(of: from).location + (from as NSString).range(of: needle).location
-            return (storage.attribute(.strokeWidth, at: at, effectiveRange: nil) as? NSNumber)?.doubleValue ?? 0
+            let font = storage.attribute(.font, at: at, effectiveRange: nil) as? NSFont
+            return font?.fontDescriptor.symbolicTraits.contains(.bold) == true
         }
-        XCTAssertLessThan(stroke("= h", from: "= h$"), 0)
-        XCTAssertLessThan(stroke("->", from: "-> solve"), 0)
-        XCTAssertEqual(stroke("=", from: "= 2000"), 0)
-        XCTAssertEqual(stroke("=", from: ":= Q_0"), 0)
+        XCTAssertTrue(isBold("= 1 h", from: "= 1 h$"))
+        XCTAssertTrue(isBold("->", from: "-> solve"))
+        XCTAssertFalse(isBold("=", from: "= 2000"))
+        XCTAssertTrue(isBold(":=", from: ":= Q_0"))
         XCTAssertEqual(storage.attribute(.foregroundColor, at: s.range(of: "solve(").location, effectiveRange: nil) as? NSColor,
                        Highlighter.keywordColor)
     }
@@ -310,7 +311,7 @@ final class EditorTests: XCTestCase {
         let text = "```solveng\nDelta_T := 2 k\"\"Omega -> mA\nDeltaT := 1\n```\n$Omega$"
         let shown = Highlighter.conceals(in: text)
         let s = text as NSString
-        XCTAssertEqual(shown.map { s.substring(with: $0.range) }, ["Delta", "\"", "\"", "Omega", "->", "Omega"])
-        XCTAssertEqual(shown.map { Character(UnicodeScalar($0.replacement)!) }, ["Δ", "\0", "\0", "Ω", "→", "Ω"])
+        XCTAssertEqual(shown.map { s.substring(with: $0.range) }, ["Delta", "\"", "\"", "Omega", "Omega"])
+        XCTAssertEqual(shown.map { Character(UnicodeScalar($0.replacement)!) }, ["Δ", "\0", "\0", "Ω", "Ω"])
     }
 }
