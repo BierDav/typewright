@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import XCTest
 @testable import Typewright
 
@@ -132,6 +133,120 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(run(at: "bold")?.bold, true)
         XCTAssertEqual(run(at: "x^")?.math, true)
         XCTAssertNil(run(at: "See"))
+    }
+
+    func testLayoutsRebindShortcuts() {
+        XCTAssertEqual(BuiltinLayout.standard.shortcuts.commentLine.display, "⌘/")
+        XCTAssertEqual(BuiltinLayout.standard.shortcuts.commentBlock.display, "⌥⌘/")
+        XCTAssertEqual(BuiltinLayout.standard.shortcuts.replace.display, "⌥⌘F")
+        XCTAssertEqual(BuiltinLayout.standard.shortcuts.back.display, "⌃⌘←")
+        let intellij = BuiltinLayout.intellij.shortcuts
+        XCTAssertEqual(intellij.commentLine.display, "⌘7")
+        XCTAssertEqual(intellij.commentBlock.display, "⇧⌘7")
+        XCTAssertEqual(intellij.replace.display, "⌘R")
+        XCTAssertEqual(intellij.palette.display, "⇧⌘A")
+        XCTAssertEqual(intellij.moveFile.display, "F6")
+        XCTAssertEqual(intellij.back.display, "⌥⌘←")
+        XCTAssertEqual(intellij.togglePreview.display, "⌘-")
+        XCTAssertEqual(intellij.previewCurrentFile.display, "⇧⌘-")
+    }
+
+    func testShortcutsMatchPhysically() throws {
+        // On a German keyboard the minus key types ß; the layout still has to find it.
+        let minus = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil,
+            characters: "ß", charactersIgnoringModifiers: "ß", isARepeat: false, keyCode: UInt16(kVK_ANSI_Minus)))
+        XCTAssertTrue(BuiltinLayout.intellij.shortcuts.togglePreview.matches(minus))
+        let comment = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: 0, context: nil,
+            characters: "*", charactersIgnoringModifiers: "*", isARepeat: false, keyCode: UInt16(kVK_ANSI_7)))
+        XCTAssertTrue(BuiltinLayout.intellij.shortcuts.commentBlock.matches(comment))
+        XCTAssertFalse(BuiltinLayout.standard.shortcuts.commentBlock.matches(comment))
+    }
+
+    func testIntellijPaletteOpensWithBothKeys() throws {
+        let palette = BuiltinLayout.intellij.shortcuts.palette
+        XCTAssertEqual(palette.display, "⇧⌘A")
+        XCTAssertEqual(palette.allDisplay, "⇧⌘A / ⌘K")
+        let commandK = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil,
+            characters: "k", charactersIgnoringModifiers: "k", isARepeat: false, keyCode: UInt16(kVK_ANSI_K)))
+        XCTAssertTrue(palette.matches(commandK))
+        let commandShiftA = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: 0, context: nil,
+            characters: "A", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: UInt16(kVK_ANSI_A)))
+        XCTAssertTrue(palette.matches(commandShiftA))
+    }
+
+    func testForksPatchOnlyChangedShortcuts() {
+        let fork = KeyLayout(id: "fork", name: "My Keys", base: .intellij,
+                             overrides: [.commentLine: Shortcut(key: .character("9"), modifiers: .command)])
+        let base = BuiltinLayout.intellij.shortcuts
+        XCTAssertEqual(fork.shortcuts.commentLine.display, "⌘9")
+        // Everything else, alternates included, keeps following the built-in layout.
+        XCTAssertEqual(fork.shortcuts.commentBlock, base.commentBlock)
+        XCTAssertEqual(fork.shortcuts.palette, base.palette)
+        XCTAssertEqual(fork.shortcuts.palette.allDisplay, "⇧⌘A / ⌘K")
+        XCTAssertEqual(fork.overrides.count, 1)
+        XCTAssertEqual(fork.summary, "A fork of IntelliJ IDEA with 1 changed shortcut.")
+        let unchanged = KeyLayout(id: "same", name: "Same", base: .intellij, overrides: [:])
+        XCTAssertEqual(unchanged.shortcuts, base)
+    }
+
+    func testShortcutsRoundTripThroughJSON() throws {
+        let shortcut = Shortcut(key: .function(6), modifiers: [.command, .shift])
+        let data = try JSONEncoder().encode(shortcut)
+        XCTAssertEqual(try JSONDecoder().decode(Shortcut.self, from: data), shortcut)
+        let minus = Shortcut(key: .character("-"), modifiers: .command)
+        XCTAssertEqual(try JSONDecoder().decode(Shortcut.self, from: JSONEncoder().encode(minus)), minus)
+    }
+
+    func testTogglesLineComments() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.comments = .typst
+        tv.string = "a\n  b\n"
+        tv.setSelectedRange(NSRange(location: 0, length: 6))
+        tv.toggleLineComment()
+        XCTAssertEqual(tv.string, "// a\n  // b\n")
+        tv.toggleLineComment()
+        XCTAssertEqual(tv.string, "a\n  b\n")
+
+        // Blank lines stay as they are, the caret keeps its line.
+        tv.string = "a\n\nb"
+        tv.setSelectedRange(NSRange(location: 3, length: 1))
+        tv.toggleLineComment()
+        XCTAssertEqual(tv.string, "a\n\n// b")
+        tv.toggleLineComment()
+        XCTAssertEqual(tv.string, "a\n\nb")
+
+        // Markdown has no line comments, so the HTML ones wrap each line.
+        tv.comments = .markdown
+        tv.string = "text\n"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.toggleLineComment()
+        XCTAssertEqual(tv.string, "<!-- text -->\n")
+        tv.toggleLineComment()
+        XCTAssertEqual(tv.string, "text\n")
+    }
+
+    func testTogglesBlockComment() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.comments = .typst
+        tv.string = "a\nbc\nd"
+        tv.setSelectedRange(NSRange(location: 2, length: 2))
+        tv.toggleBlockComment()
+        XCTAssertEqual(tv.string, "a\n/*bc*/\nd")
+        tv.toggleBlockComment()
+        XCTAssertEqual(tv.string, "a\nbc\nd")
+
+        // A caret wraps its line's text between the indentation and the break.
+        tv.string = "a\n  bc\nd"
+        tv.setSelectedRange(NSRange(location: 4, length: 0))
+        tv.toggleBlockComment()
+        XCTAssertEqual(tv.string, "a\n  /*bc*/\nd")
+        XCTAssertEqual(tv.selectedRange().location, 6)
+        tv.toggleBlockComment()
+        XCTAssertEqual(tv.string, "a\n  bc\nd")
     }
 
     func testDuplicatesAndDeletesLines() {

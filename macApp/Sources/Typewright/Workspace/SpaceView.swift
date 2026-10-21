@@ -197,6 +197,13 @@ struct SpaceView: View {
         return diagnostics.isEmpty ? .green : .yellow
     }
 
+    /// How the comment shortcuts treat the shown file's language.
+    private var commentSyntax: CommentSyntax? {
+        if workspace.selectedKind == .typst { return .typst }
+        if workspace.selectedFile.map(MarkdownRenderer.isMarkdown) == true { return .markdown }
+        return nil
+    }
+
     private var editor: some View {
         VStack(spacing: 0) {
             if let file = workspace.selectedFile {
@@ -212,6 +219,7 @@ struct SpaceView: View {
                     find: workspace.selectedKind?.isEditable == true ? workspace.find : nil,
                     highlights: workspace.selectedKind == .typst,
                     markdown: workspace.selectedFile.map(MarkdownRenderer.isMarkdown) ?? false,
+                    comments: commentSyntax,
                     diagnostics: fileDiagnostics,
                     reveal: workspace.reveal,
                     state: workspace.editorState(for: file),

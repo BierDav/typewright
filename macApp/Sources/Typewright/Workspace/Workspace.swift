@@ -36,6 +36,8 @@ final class Workspace: EditorLanguage {
     private(set) var revision = 0
     /// The file compiled for the preview; nil hides the preview.
     private(set) var previewFile: URL?
+    /// The file the preview last showed, brought back when it's shown again.
+    private(set) var lastPreviewFile: URL?
     var split: Double { didSet { schedulePersist() } }
     /// Folders open in the sidebar; everything else starts collapsed.
     var expanded: Set<URL> = [] { didSet { schedulePersist() } }
@@ -147,6 +149,7 @@ final class Workspace: EditorLanguage {
         } else {
             previewFile = resolve(state.preview)
         }
+        lastPreviewFile = resolve(state.lastPreview) ?? previewFile
         followPreviewMode()
         if fontFolders != fontDirs { updateFonts() }
         restorePreviews(for: previewFile)
@@ -376,10 +379,27 @@ final class Workspace: EditorLanguage {
         setPreview(previewFile == url ? nil : url)
     }
 
+    /// ⌘- hides the preview, and showing it again brings back the file it last showed.
+    func togglePreviewVisibility() {
+        guard previewFile == nil else { return setPreview(nil) }
+        let remembered = [lastPreviewFile, selectedFile, defaultMain()]
+            .compactMap { $0 }
+            .first { isInSpace($0) && Self.isPreviewable($0) && FileManager.default.fileExists(atPath: $0.path) }
+        guard let remembered else { return NSSound.beep() }
+        setPreview(remembered)
+    }
+
+    /// ⇧⌘- switches the preview to the selected file.
+    func previewSelectedFile() {
+        guard let file = selectedFile, Self.isPreviewable(file) else { return NSSound.beep() }
+        setPreview(file)
+    }
+
     func setPreview(_ url: URL?) {
         guard url != previewFile else { return }
         capturePreviewState()
         previewFile = url
+        if let url { lastPreviewFile = url }
         followPreviewMode()
         if fontFolders != fontDirs { updateFonts() }
         document = nil
@@ -503,6 +523,7 @@ final class Workspace: EditorLanguage {
         var state = SpaceState()
         state.selected = selectedFile.flatMap(relative)
         state.preview = previewFile.flatMap(relative)
+        state.lastPreview = lastPreviewFile.flatMap(relative)
         state.split = split
         for (url, s) in editorStates { if let key = relative(url) { state.editors[key] = s } }
         for (url, s) in previewStates { if let key = relative(url) { state.previews[key] = s } }
@@ -634,6 +655,7 @@ final class Workspace: EditorLanguage {
         expanded = expanded.filter { !gone($0) }
         reloadTree()
         if let file = previewFile, gone(file) { setPreview(nil) }
+        lastPreviewFile = lastPreviewFile.flatMap { gone($0) ? nil : $0 }
         if let file = selectedFile, gone(file) {
             selectedFile = nil
             selectedKind = nil
@@ -670,6 +692,9 @@ final class Workspace: EditorLanguage {
         if let file = previewFile, moved(file) != file {
             previewFile = moved(file)
             scheduleCompile(delay: 0)
+        }
+        if let file = lastPreviewFile, moved(file) != file {
+            lastPreviewFile = moved(file)
         }
         reloadTree()
         // Paths in the space's files follow the move.

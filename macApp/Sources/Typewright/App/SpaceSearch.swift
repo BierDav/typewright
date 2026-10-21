@@ -107,6 +107,9 @@ struct SpaceSearchView: View {
     @FocusState private var focus: Field?
     @AppStorage("editorFontSize") private var fontSize = 14.0
     @AppStorage("glidingCursor") private var glidingCursor = true
+    // Rebuilds the hidden shortcut buttons when the layout changes.
+    @AppStorage(KeyLayout.defaultsKey) private var layoutID = BuiltinLayout.standard.rawValue
+    @ObservedObject private var layouts = KeyLayoutStore.shared
 
     private enum Field { case search, replace }
 
@@ -157,12 +160,12 @@ struct SpaceSearchView: View {
         .frame(width: Self.width)
         .onEscapeWhenUnfocused(onClose)
         .background {
-            // ⌥⌘F shows the replace field while the search has focus.
+            // The replace shortcut shows the replace field while the search has focus.
             Button("") {
                 withAnimation(.smooth(duration: 0.2)) { showsReplace = true }
                 focus = .replace
             }
-            .keyboardShortcut("f", modifiers: [.command, .option])
+            .keyboardShortcut(KeyLayout.current.shortcuts.replace)
             .opacity(0)
             .allowsHitTesting(false)
         }

@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::json;
-use solveng_ide::{Context, ContextFile, Integration, Report};
+use solveng_ide::{Context, ContextFile, Report};
 
 mod hover;
 
@@ -62,11 +62,8 @@ fn context(raw: &str) -> Context {
             } else {
                 (Report::parse(&e.file_report), true, e.path.clone())
             };
-            let mut c = Context::new(&text).with_files(files).with_report(&report, &e.path, main);
-            // Without a compile saying otherwise nothing is calculated, as outside a `worksheet`.
-            if report.blocks == 0 || c.integration.is_none() {
-                c.integration = Some(Integration::NONE);
-            }
+            // Only the compiler's report can enable calculations in the editor.
+            let c = Context::new(&solveng_ide::with_compiled(&text, 0)).with_files(files).with_report(&report, &e.path, main);
             if main_path.is_empty() { c } else { c.with_main(&main_path) }
         }
         Err(_) => Context::new(raw),

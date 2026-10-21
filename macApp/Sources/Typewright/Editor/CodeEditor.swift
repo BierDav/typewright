@@ -38,6 +38,23 @@ extension EditorLanguage {
     func documentation(of item: CompletionItem) async -> String? { item.documentation }
 }
 
+/// How the editor's comment shortcuts comment the shown file.
+struct CommentSyntax: Equatable {
+    /// What a commented line starts with, like `// `.
+    var linePrefix = "// "
+    /// What it ends with, for Markdown's HTML comments instead of line comments.
+    var lineSuffix = ""
+    var blockPrefix = "/*"
+    var blockSuffix = "*/"
+
+    /// The markers alone, for taking comments away again.
+    var lineMarker: String { linePrefix.trimmingCharacters(in: .whitespaces) }
+    var lineSuffixMarker: String { lineSuffix.trimmingCharacters(in: .whitespaces) }
+
+    static let typst = CommentSyntax()
+    static let markdown = CommentSyntax(linePrefix: "<!-- ", lineSuffix: " -->", blockPrefix: "<!--", blockSuffix: "-->")
+}
+
 final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     /// Color literals that get a clickable swatch in the gap kerned in before them.
     var swatches: [ColorLiteral] = [] {
@@ -61,6 +78,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     /// Opens find, with the replace field when true.
     var onFind: ((Bool) -> Void)?
     var onFindStep: ((Int) -> Void)?
+    /// How the shown file is commented; nil leaves ⌘7 and ⇧⌘7 unused.
+    var comments: CommentSyntax?
     /// The scroll bar's diagnostic ticks, which want the arrow over the text's edge.
     weak var markers: DiagnosticMarkers?
     // MARK: Auto-closing
@@ -900,48 +919,66 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         // Z
         if event.keyCode == 6, flags == .command, onUndo?() == true { return true }
         if event.keyCode == 6, flags == [.command, .shift], onRedo?() == true { return true }
-        // ⌘F finds, ⌥⌘F also replaces; ⇧⌘F is left to the space search.
-        if event.keyCode == 3, let onFind, flags == .command || flags == [.command, .option] {
-            onFind(flags.contains(.option))
+        let keys = KeyLayout.current.shortcuts
+        if keys.find.matches(event), let onFind {
+            onFind(false)
             return true
         }
-        if event.keyCode == 5, let onFindStep, flags == .command || flags == [.command, .shift] {
-            onFindStep(flags.contains(.shift) ? -1 : 1)
+        if keys.replace.matches(event), let onFind {
+            onFind(true)
             return true
         }
-        if flags == .command, event.keyCode == 11, let onDefinition {
+        if keys.findNext.matches(event), let onFindStep {
+            onFindStep(1)
+            return true
+        }
+        if keys.findPrevious.matches(event), let onFindStep {
+            onFindStep(-1)
+            return true
+        }
+        if keys.definition.matches(event), let onDefinition {
             onDefinition(selectedRange().location)
             return true
         }
-        if flags == [.command, .option], event.keyCode == 37, let onFormat {
+        if keys.format.matches(event), let onFormat {
             onFormat()
             return true
         }
-        if flags == .shift, event.keyCode == 97, let onRename {
+        if keys.rename.matches(event), let onRename {
             onRename()
             return true
         }
-        // ⌥⌘V extracts a variable, ⌥⌘N inlines one.
-        if flags == [.command, .option], event.keyCode == 9, let onExtractVariable {
+        if keys.extractVariable.matches(event), let onExtractVariable {
             onExtractVariable()
             return true
         }
-        if flags == [.command, .option], event.keyCode == 45, let onInlineVariable {
+        if keys.inlineVariable.matches(event), let onInlineVariable {
             onInlineVariable()
             return true
         }
-        // ⌥⌘M extracts a function, ⌥⇧⌘M asks where it goes.
-        if event.keyCode == 46, flags == [.command, .option] || flags == [.command, .option, .shift], let onExtractFunction {
-            onExtractFunction(flags.contains(.shift))
+        if keys.extractFunction.matches(event), let onExtractFunction {
+            onExtractFunction(false)
+            return true
+        }
+        if keys.extractFunctionToScope.matches(event), let onExtractFunction {
+            onExtractFunction(true)
             return true
         }
         // ⌘D duplicates, ⌘⌫ deletes the line, like IntelliJ.
-        if flags == .command, event.keyCode == 2, isEditable {
+        if keys.duplicateLine.matches(event), isEditable {
             duplicateLine()
             return true
         }
-        if flags == .command, event.keyCode == 51, isEditable {
+        if keys.deleteLine.matches(event), isEditable {
             deleteLine()
+            return true
+        }
+        if keys.commentLine.matches(event), comments != nil, isEditable {
+            toggleLineComment()
+            return true
+        }
+        if keys.commentBlock.matches(event), comments != nil, isEditable {
+            toggleBlockComment()
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -1014,6 +1051,190 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         replace(range, with: "", select: NSRange(location: start + min(column, next.length), length: 0), action: "Delete Line")
     }
 
+    // MARK: Comments
+
+    /// Comments the lines the selection touches, or takes the markers away again; ⌘7 in the IntelliJ layout.
+    func toggleLineComment() {
+        guard let comments, isEditable else { return NSSound.beep() }
+        let s = string as NSString
+        let selection = selectedRange()
+        let block = s.lineRange(for: Self.touched(selection, in: s))
+        let marker = comments.lineMarker
+        let suffix = comments.lineSuffixMarker
+
+        struct Line {
+            let start: Int
+            let end: Int
+            let blank: Bool
+            let commented: Bool
+        }
+        let lines: [Line] = Self.lineRanges(in: block, of: s).map { line in
+            let end = Self.bodyEnd(of: line, in: s)
+            var start = line.location
+            while start < end, s.character(at: start) == 32 || s.character(at: start) == 9 { start += 1 }
+            let text = s.substring(with: NSRange(location: start, length: end - start))
+            let blank = text.trimmingCharacters(in: .whitespaces).isEmpty
+            let commented = !blank && text.hasPrefix(marker)
+                && (suffix.isEmpty || text.trimmingCharacters(in: .whitespaces).hasSuffix(suffix))
+            return Line(start: start, end: end, blank: blank, commented: commented)
+        }
+        let uncomment = lines.contains { !$0.blank } && lines.allSatisfy { $0.blank || $0.commented }
+
+        var edits: [CommentEdit] = []
+        for line in lines where !line.blank {
+            if uncomment {
+                let markerLength = (marker as NSString).length
+                let space = line.start + markerLength < s.length && s.character(at: line.start + markerLength) == 32 ? 1 : 0
+                edits.append(CommentEdit(at: line.start, remove: markerLength + space, insert: ""))
+                if !suffix.isEmpty {
+                    let length = (suffix as NSString).length
+                    let space = line.end - length > line.start && s.character(at: line.end - length - 1) == 32 ? 1 : 0
+                    edits.append(CommentEdit(at: line.end - length - space, remove: length + space, insert: ""))
+                }
+            } else {
+                edits.append(CommentEdit(at: line.start, remove: 0, insert: comments.linePrefix))
+                if !suffix.isEmpty {
+                    edits.append(CommentEdit(at: line.end, remove: 0, insert: comments.lineSuffix))
+                }
+            }
+        }
+        // An empty file or a line of only spaces gets an empty comment at the caret.
+        guard !edits.isEmpty else {
+            let at = selection.location
+            return replace(NSRange(location: at, length: 0), with: comments.linePrefix + comments.lineSuffix,
+                           select: NSRange(location: at + (comments.linePrefix as NSString).length, length: 0),
+                           action: "Comment Lines")
+        }
+        applyCommentEdits(edits, in: block, action: uncomment ? "Uncomment Lines" : "Comment Lines")
+    }
+
+    /// Wraps the selection, or the caret's line, in block markers; ⇧⌘7 in the IntelliJ layout.
+    func toggleBlockComment() {
+        guard let comments, isEditable else { return NSSound.beep() }
+        let s = string as NSString
+        let selection = selectedRange()
+        let prefix = comments.blockPrefix
+        let suffix = comments.blockSuffix
+        let prefixLength = (prefix as NSString).length
+        let suffixLength = (suffix as NSString).length
+
+        if selection.length > 0 {
+            let text = s.substring(with: selection) as NSString
+            var start = 0, end = text.length
+            while start < end, Self.isSpace(text.character(at: start)) { start += 1 }
+            while end > start, Self.isSpace(text.character(at: end - 1)) { end -= 1 }
+            let core = text.substring(with: NSRange(location: start, length: end - start)) as NSString
+            if core.length >= prefixLength + suffixLength, core.hasPrefix(prefix), core.hasSuffix(suffix) {
+                let inner = core.substring(with: NSRange(location: prefixLength, length: core.length - prefixLength - suffixLength))
+                let replacement = text.substring(to: start) + inner + text.substring(from: end)
+                replace(selection, with: replacement, select: NSRange(location: selection.location + start, length: (inner as NSString).length),
+                        action: "Uncomment Block")
+            } else if selection.location >= prefixLength, NSMaxRange(selection) + suffixLength <= s.length,
+                      s.substring(with: NSRange(location: selection.location - prefixLength, length: prefixLength)) == prefix,
+                      s.substring(with: NSRange(location: NSMaxRange(selection), length: suffixLength)) == suffix {
+                // The markers around the selection are the ones commenting it.
+                let block = NSRange(location: selection.location - prefixLength,
+                                    length: prefixLength + selection.length + suffixLength)
+                replace(block, with: text as String,
+                        select: NSRange(location: block.location, length: selection.length), action: "Uncomment Block")
+            } else {
+                replace(selection, with: prefix + (text as String) + suffix,
+                        select: NSRange(location: selection.location + prefixLength, length: selection.length), action: "Comment Block")
+            }
+            return
+        }
+
+        // The caret's line, between its indentation and its line break.
+        let line = s.lineRange(for: NSRange(location: min(selection.location, s.length), length: 0))
+        let end = Self.bodyEnd(of: line, in: s)
+        var start = line.location
+        while start < end, s.character(at: start) == 32 || s.character(at: start) == 9 { start += 1 }
+        guard start < end else {
+            return replace(NSRange(location: start, length: 0), with: prefix + suffix,
+                           select: NSRange(location: start + prefixLength, length: 0), action: "Comment Block")
+        }
+        let body = s.substring(with: NSRange(location: start, length: end - start)) as NSString
+        let block = NSRange(location: start, length: end - start)
+        if body.length >= prefixLength + suffixLength, body.hasPrefix(prefix), body.hasSuffix(suffix) {
+            applyCommentEdits([CommentEdit(at: start, remove: prefixLength, insert: ""),
+                               CommentEdit(at: end - suffixLength, remove: suffixLength, insert: "")],
+                              in: block, action: "Uncomment Block")
+        } else {
+            applyCommentEdits([CommentEdit(at: start, remove: 0, insert: prefix),
+                               CommentEdit(at: end, remove: 0, insert: suffix)],
+                              in: block, action: "Comment Block")
+        }
+    }
+
+    private struct CommentEdit {
+        let at: Int
+        let remove: Int
+        let insert: String
+    }
+
+    /// Applies the edits of a commented block and keeps the selection on the same text.
+    private func applyCommentEdits(_ edits: [CommentEdit], in block: NSRange, action: String) {
+        let s = string as NSString
+        var text = s.substring(with: block) as NSString
+        for edit in edits.sorted(by: { $0.at > $1.at }) {
+            let range = NSRange(location: edit.at - block.location, length: edit.remove)
+            text = text.replacingCharacters(in: range, with: edit.insert) as NSString
+        }
+        guard text as String != s.substring(with: block) else { return }
+        let selection = selectedRange()
+        func moved(_ offset: Int) -> Int {
+            // Edits are at absolute offsets of the old text, so the shift adds up separately.
+            var delta = 0
+            for edit in edits.sorted(by: { $0.at < $1.at }) {
+                let end = edit.at + edit.remove
+                let inserted = (edit.insert as NSString).length
+                if edit.remove == 0 {
+                    if offset >= edit.at { delta += inserted }
+                } else if offset >= end {
+                    delta += inserted - edit.remove
+                } else if offset > edit.at {
+                    return edit.at + inserted + delta
+                }
+            }
+            return offset + delta
+        }
+        let start = moved(selection.location)
+        let end = moved(NSMaxRange(selection))
+        replace(block, with: text as String, select: NSRange(location: start, length: max(0, end - start)), action: action)
+    }
+
+    /// A selection ending at a line start leaves that line alone.
+    private static func touched(_ selection: NSRange, in s: NSString) -> NSRange {
+        guard selection.length > 0, NSMaxRange(selection) <= s.length else { return selection }
+        let last = s.character(at: NSMaxRange(selection) - 1)
+        return last == 10 || last == 13 ? NSRange(location: selection.location, length: selection.length - 1) : selection
+    }
+
+    /// The full lines of a block, including their breaks; one empty line when the block is empty.
+    private static func lineRanges(in block: NSRange, of s: NSString) -> [NSRange] {
+        var lines: [NSRange] = []
+        var at = block.location
+        while at < NSMaxRange(block) {
+            let line = s.lineRange(for: NSRange(location: at, length: 0))
+            guard line.length > 0 else { break }
+            lines.append(line)
+            at = NSMaxRange(line)
+        }
+        return lines.isEmpty ? [NSRange(location: min(block.location, s.length), length: 0)] : lines
+    }
+
+    /// Where a line's text ends, without its line break.
+    private static func bodyEnd(of line: NSRange, in s: NSString) -> Int {
+        var end = NSMaxRange(line)
+        if end > line.location, s.character(at: end - 1) == 10 { end -= 1 }
+        if end > line.location, s.character(at: end - 1) == 13 { end -= 1 }
+        return end
+    }
+
+    private static func isSpace(_ c: unichar) -> Bool {
+        c == 32 || c == 9 || c == 10 || c == 13
+    }
+
     private func replace(_ range: NSRange, with text: String, select: NSRange, action: String) {
         breakUndoCoalescing()
         guard shouldChangeText(in: range, replacementString: text) else { return }
@@ -1026,25 +1247,19 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func keyDown(with event: NSEvent) {
         onDismissHover?()
-        if event.keyCode == 122, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty, let onShowDocs {
-            return onShowDocs()
-        }
+        let keys = KeyLayout.current.shortcuts
+        // F1 shows the docs, at the caret when no completion is open.
+        if keys.documentation.matches(event), let onShowDocs { return onShowDocs() }
         if let vim, vim.handle(event) { return }
         // ⌥↩ shows the fixes for the problem at the caret.
-        if event.keyCode == 36 || event.keyCode == 76,
-           event.modifierFlags.intersection([.shift, .command, .option, .control]) == .option, let onQuickFix {
+        if keys.contextActions.matches(event), let onQuickFix {
             return onQuickFix(selectedRange().location)
         }
-        if event.modifierFlags.intersection([.command, .option, .control, .shift]) == .shift, event.keyCode == 97, let onRename {
-            return onRename()
-        }
+        if keys.rename.matches(event), let onRename { return onRename() }
         // ⌥⇧↑ and ⌥⇧↓ move the lines, like IntelliJ.
-        if event.modifierFlags.intersection([.command, .option, .control, .shift]) == [.option, .shift],
-           event.keyCode == 126 || event.keyCode == 125, isEditable {
-            return moveLines(up: event.keyCode == 126)
-        }
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control, event.charactersIgnoringModifiers == " ",
-           let onComplete {
+        if keys.moveLineUp.matches(event), isEditable { return moveLines(up: true) }
+        if keys.moveLineDown.matches(event), isEditable { return moveLines(up: false) }
+        if keys.completions.matches(event), let onComplete {
             return onComplete()
         }
         super.keyDown(with: event)
@@ -1090,6 +1305,8 @@ struct CodeEditor: NSViewRepresentable {
     let highlights: Bool
     /// Colours Markdown; `highlights` is for Typst.
     var markdown = false
+    /// How ⌘7 and ⇧⌘7 comment the shown file; nil leaves them unused.
+    var comments: CommentSyntax?
     let diagnostics: [Diagnostic]
     let reveal: RevealRequest?
     /// Restored when a new document is shown.
@@ -1187,6 +1404,7 @@ struct CodeEditor: NSViewRepresentable {
         c.occurrenceProvider = language.map { l in { await l.occurrences(at: $0) } }
         guard let tv = c.textView as? TypstTextView else { return }
         tv.onJump = onJump
+        tv.comments = comments
         tv.glidingCaret = glidingCursor
         tv.concealsMath = concealsMath && highlights
         tv.autoPairs = !autoClose ? [:] : highlights ? ["(": ")", "[": "]", "{": "}", "\"": "\"", "$": "$", "`": "`"]

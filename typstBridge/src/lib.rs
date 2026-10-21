@@ -109,6 +109,7 @@ struct SolvengElement {
     kind: String,
     active: bool,
     integration: String,
+    evaluate: bool,
 }
 
 #[derive(Serialize)]
@@ -172,7 +173,15 @@ pub(crate) fn solveng_report(world: &dyn World, introspector: &dyn typst::intros
             text: code.to_string(),
             kind,
             active: matches!(d.get("active"), Ok(Value::Bool(true))),
-            integration: text(d, "integration"),
+            integration: match d.get("evaluate") {
+                Ok(Value::Bool(false)) => "none".into(),
+                Ok(Value::Bool(true)) => "math".into(),
+                _ => text(d, "integration"),
+            },
+            evaluate: match d.get("evaluate") {
+                Ok(Value::Bool(evaluate)) => *evaluate,
+                _ => text(d, "integration") != "none",
+            },
         });
     }
     serde_json::to_string(&report).unwrap_or_else(|_| "{}".into())

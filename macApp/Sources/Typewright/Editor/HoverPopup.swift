@@ -280,7 +280,9 @@ struct HoverContent: View {
                                         Label(fix.title, systemImage: fix.icon).foregroundStyle(.secondary)
                                     }
                                 }
-                                Text("⌥↩ shows these at the caret").font(.caption).foregroundStyle(.tertiary)
+                                Text("\(KeyLayout.current.shortcuts.contextActions.display) shows these at the caret")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
                             }
                         }
                     }

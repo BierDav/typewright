@@ -12,6 +12,8 @@ struct TypewrightApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var menuLayout = KeyLayout.current
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Appearance.apply(UserDefaults.standard.string(forKey: "appearance") ?? "")
         BuiltinCompiler.warmUp()
@@ -19,8 +21,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await LanguageServerManager.shared.setUp() }
         SyncService.shared.restart()
         Opener.shared.restoreSession()
-        Opener.shared.installSpaceShortcuts()
+        Opener.shared.installShortcuts()
         Opener.shared.installNavigationButtons()
+        // SwiftUI builds its menus once; keep their key equivalents following the layout.
+        menuLayout = KeyLayout.current
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateMenusIfNeeded() }
+        }
+    }
+
+    private func updateMenusIfNeeded() {
+        guard KeyLayout.current != menuLayout else { return }
+        menuLayout = KeyLayout.current
+        KeyLayout.updateMenus()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -42,16 +55,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 struct AppCommands: Commands {
+    private var keys: Shortcuts { KeyLayout.current.shortcuts }
+
     var body: some Commands {
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") { SettingsWindowController.shared.show() }
-                .keyboardShortcut(",")
+                .keyboardShortcut(keys.settings)
         }
         CommandGroup(replacing: .newItem) {
             Button("New Window") { Opener.shared.newWindow() }
-                .keyboardShortcut("n")
+                .keyboardShortcut(keys.newWindow)
             Button("Link Folder as Space…") { Opener.shared.openPanel() }
-                .keyboardShortcut("o")
+                .keyboardShortcut(keys.openSpace)
             Menu("Spaces") {
                 ForEach(SpaceList.all, id: \.self) { url in
                     Button(url.lastPathComponent) { Opener.shared.open(url) }
@@ -60,27 +75,31 @@ struct AppCommands: Commands {
         }
         CommandGroup(after: .saveItem) {
             Button("Move File…") { Opener.shared.showPalette(page: "file.move") }
-                .keyboardShortcut("i", modifiers: [.command, .option])
+                .keyboardShortcut(keys.moveFile)
             Button("Close Space") { Opener.shared.closeSpace() }
-                .keyboardShortcut("w", modifiers: [.command, .control])
+                .keyboardShortcut(keys.closeSpace)
         }
         CommandGroup(after: .textEditing) {
             Button("Find in Space…") { Opener.shared.showSearch() }
-                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .keyboardShortcut(keys.findInSpace)
         }
         CommandMenu("Navigate") {
             Button("Back") { Opener.shared.goBack() }
-                .keyboardShortcut(.leftArrow, modifiers: [.command, .control])
+                .keyboardShortcut(keys.back)
             Button("Forward") { Opener.shared.goForward() }
-                .keyboardShortcut(.rightArrow, modifiers: [.command, .control])
+                .keyboardShortcut(keys.forward)
         }
         CommandGroup(after: .toolbar) {
             Button("Command Palette…") { Opener.shared.showPalette() }
-                .keyboardShortcut("k")
+                .keyboardShortcut(keys.palette)
             Button("Show Spaces") { Opener.shared.toggleSpaces() }
-                .keyboardShortcut("s", modifiers: [.command, .option])
+                .keyboardShortcut(keys.showSpaces)
             Button("Toggle Sidebar") { Opener.shared.toggleSidebar() }
-                .keyboardShortcut("s")
+                .keyboardShortcut(keys.sidebar)
+            Button("Show/Hide Preview") { Opener.shared.togglePreview() }
+                .keyboardShortcut(keys.togglePreview)
+            Button("Preview Current File") { Opener.shared.previewCurrentFile() }
+                .keyboardShortcut(keys.previewCurrentFile)
         }
     }
 }

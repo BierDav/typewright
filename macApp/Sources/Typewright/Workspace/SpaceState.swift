@@ -51,6 +51,8 @@ struct DocumentPosition: Codable, Equatable {
 struct SpaceState: Codable {
     var selected: String?
     var preview: String?
+    /// The file the preview last showed, kept while the preview is hidden.
+    var lastPreview: String?
     var split = 0.5
     var editors: [String: EditorState] = [:]
     var previews: [String: PreviewState] = [:]
@@ -64,6 +66,7 @@ struct SpaceState: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         selected = try c.decodeIfPresent(String.self, forKey: .selected)
         preview = try c.decodeIfPresent(String.self, forKey: .preview)
+        lastPreview = try c.decodeIfPresent(String.self, forKey: .lastPreview)
         split = try c.decodeIfPresent(Double.self, forKey: .split) ?? 0.5
         editors = try c.decodeIfPresent([String: EditorState].self, forKey: .editors) ?? [:]
         previews = try c.decodeIfPresent([String: PreviewState].self, forKey: .previews) ?? [:]

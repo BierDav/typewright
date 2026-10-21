@@ -63,14 +63,48 @@ final class Opener {
         keyState?.space = nil
     }
 
-    /// ⌘1–9 switch the window to the space at that place in the list, in any window showing spaces.
-    func installSpaceShortcuts() {
+    /// The layout's window shortcuts, also covering built-in alternates like IntelliJ's ⌘K.
+    func installShortcuts() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let handled = MainActor.assumeIsolated {
-                guard event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command,
-                      let digit = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(digit),
-                      let state = self.controllers.first(where: { $0.window === event.window })?.state,
+                guard !KeyLayout.isRecordingShortcut, NSApp.modalWindow == nil else { return false }
+                let keys = KeyLayout.current.shortcuts
+                // These work without a space too.
+                if keys.settings.matches(event) {
+                    SettingsWindowController.shared.show()
+                    return true
+                }
+                if keys.newWindow.matches(event) {
+                    self.newWindow()
+                    return true
+                }
+                if keys.openSpace.matches(event) {
+                    self.openPanel()
+                    return true
+                }
+                guard let state = self.controllers.first(where: { $0.window === event.window })?.state,
                       state.overlay == nil else { return false }
+                if keys.palette.matches(event) { self.showPalette(); return true }
+                if keys.showSpaces.matches(event) { self.toggleSpaces(); return true }
+                if keys.sidebar.matches(event) { self.toggleSidebar(); return true }
+                if keys.findInSpace.matches(event) { self.showSearch(); return true }
+                if keys.moveFile.matches(event) { self.showPalette(page: "file.move"); return true }
+                if keys.closeSpace.matches(event) { self.closeSpace(); return true }
+                if keys.back.matches(event), let workspace = state.workspace { workspace.goBack(); return true }
+                if keys.forward.matches(event), let workspace = state.workspace { workspace.goForward(); return true }
+                if keys.togglePreview.matches(event), let workspace = state.workspace {
+                    workspace.togglePreviewVisibility()
+                    return true
+                }
+                if keys.previewCurrentFile.matches(event), let workspace = state.workspace {
+                    workspace.previewSelectedFile()
+                    return true
+                }
+                guard event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command,
+                      let digit = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(digit) else { return false }
+                // A layout can bind a digit in the editor, like ⌘7 commenting a line; the editor goes first.
+                if let editor = event.window?.firstResponder as? TypstTextView,
+                   editor.performKeyEquivalent(with: event) { return true }
                 self.switchToSpace(at: digit - 1, in: state)
                 return true
             }
@@ -95,6 +129,10 @@ final class Opener {
     func goBack() { keyState?.workspace?.goBack() }
 
     func goForward() { keyState?.workspace?.goForward() }
+
+    func togglePreview() { keyState?.workspace?.togglePreviewVisibility() }
+
+    func previewCurrentFile() { keyState?.workspace?.previewSelectedFile() }
 
     /// Slides to the space at `index` in the list, in the direction of its place relative to the current one.
     func switchToSpace(at index: Int, in state: WindowState) {

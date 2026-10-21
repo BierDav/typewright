@@ -387,11 +387,12 @@ struct CommandPalette: View {
     private var context: Context { Context(space: workspace?.root, overview: inOverview) }
 
     private var rootItems: [PaletteItem] {
+        let keys = KeyLayout.current.shortcuts
         var items: [PaletteItem] = []
         if let ws = workspace {
             if inOverview {
                 items.append(PaletteItem(id: "overview.back", title: "Back to \(ws.name)", icon: "arrow.uturn.backward",
-                                         shortcut: "⌥⌘S", section: "Spaces", action: .run { state.setSpacesOpen(false) }))
+                                         shortcut: keys.showSpaces.display, section: "Spaces", action: .run { state.setSpacesOpen(false) }))
             } else {
                 items += spaceItems(ws)
             }
@@ -411,19 +412,20 @@ struct CommandPalette: View {
         items += fontItems
         items += settingsItems
         items += [
-            PaletteItem(id: "spaces.open", title: "Link Folder as Space…", icon: "folder.badge.plus", shortcut: "⌘O", section: "Spaces",
-                        action: .run { Opener.shared.openPanel(in: state) }),
+            PaletteItem(id: "spaces.open", title: "Link Folder as Space…", icon: "folder.badge.plus", shortcut: keys.openSpace.display,
+                        section: "Spaces", action: .run { Opener.shared.openPanel(in: state) }),
             PaletteItem(id: "spaces.search", title: "Search All Spaces", icon: "magnifyingglass", section: "Spaces",
                         action: .run { DispatchQueue.main.async { state.overlay = .search(allSpaces: true) } }),
-            PaletteItem(id: "app.settings", title: "Settings…", icon: "gearshape", shortcut: "⌘,", section: "App",
+            PaletteItem(id: "app.settings", title: "Settings…", icon: "gearshape", shortcut: keys.settings.display, section: "App",
                         action: .run { SettingsWindowController.shared.show() }),
-            PaletteItem(id: "app.window", title: "New Window", icon: "macwindow.badge.plus", shortcut: "⌘N", section: "App",
+            PaletteItem(id: "app.window", title: "New Window", icon: "macwindow.badge.plus", shortcut: keys.newWindow.display, section: "App",
                         action: .run { Opener.shared.newWindow() }),
         ]
         return items
     }
 
     private func spaceItems(_ ws: Workspace) -> [PaletteItem] {
+        let keys = KeyLayout.current.shortcuts
         var items: [PaletteItem] = []
         let file = ws.selectedFile.flatMap { ws.isInSpace($0) ? $0 : nil }
         let here = file?.deletingLastPathComponent().standardizedFileURL ?? ws.root
@@ -441,21 +443,22 @@ struct CommandPalette: View {
         if let file {
             let name = file.lastPathComponent
             if ws.selectedKind?.isEditable == true {
-                items.append(PaletteItem(id: "find", title: "Find in \(name)", icon: "magnifyingglass", shortcut: "⌘F",
+                items.append(PaletteItem(id: "find", title: "Find in \(name)", icon: "magnifyingglass", shortcut: keys.find.display,
                                          section: "File", action: .run { ws.find.show(replace: false) }))
                 items.append(PaletteItem(id: "replace", title: "Find and Replace in \(name)", icon: "arrow.left.arrow.right",
-                                         shortcut: "⌥⌘F", section: "File", action: .run { ws.find.show(replace: true) }))
+                                         shortcut: keys.replace.display, section: "File", action: .run { ws.find.show(replace: true) }))
             }
             if ws.selectedKind == .typst, LanguageServerManager.shared.binary != nil {
-                items.append(PaletteItem(id: "format", title: "Format \(name)", icon: "text.alignleft", shortcut: "⌥⌘L",
+                items.append(PaletteItem(id: "format", title: "Format \(name)", icon: "text.alignleft", shortcut: keys.format.display,
                                          section: "File", keywords: ["format code", "prettify", "typstyle", "reformat"],
                                          action: .run { ws.formatSelected() }))
             }
             if Workspace.isPreviewable(file) {
                 let previewed = ws.previewFile == file
                 items.append(PaletteItem(id: "preview", title: previewed ? "Hide Preview" : "Preview \(name)",
-                                         icon: previewed ? "eye.slash" : "eye", section: "File",
-                                         action: .run { ws.togglePreview(file) }))
+                                         icon: previewed ? "eye.slash" : "eye",
+                                         shortcut: previewed ? nil : keys.previewCurrentFile.display,
+                                         section: "File", action: .run { ws.togglePreview(file) }))
             }
             if ws.selectedKind == .typst, let tv = ws.find.textView {
                 items += refactorItems(tv)
@@ -469,7 +472,7 @@ struct CommandPalette: View {
                                                                kind: .input(initial: name) { new in
                                          withAnimation(.smooth(duration: 0.25)) { ws.rename(file, to: new) }
                                      }))))
-            items.append(PaletteItem(id: "file.move", title: "Move \(name) to…", icon: "folder.badge.gearshape", shortcut: "⌥⌘I", section: "File",
+            items.append(PaletteItem(id: "file.move", title: "Move \(name) to…", icon: "folder.badge.gearshape", shortcut: keys.moveFile.display, section: "File",
                                      action: .page(PalettePage(title: "Move \(name)", placeholder: "Choose a folder…",
                                                                kind: .list { moveTargets(file, ws) }))))
             items.append(PaletteItem(id: "file.trash", title: "Move \(name) to Trash", icon: "trash", section: "File",
@@ -484,8 +487,12 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "file.rel", title: "Copy Relative Path of \(name)", icon: "doc.on.doc", section: "File",
                                      action: .run { copyPath(ws.relativePath(of: file)) }))
         }
-        items.append(PaletteItem(id: "space.search", title: "Find in \(ws.name)", icon: "text.magnifyingglass", shortcut: "⇧⌘F",
+        items.append(PaletteItem(id: "space.search", title: "Find in \(ws.name)", icon: "text.magnifyingglass", shortcut: keys.findInSpace.display,
                                  section: "Space", action: .run { DispatchQueue.main.async { state.overlay = .search(allSpaces: false) } }))
+        items.append(PaletteItem(id: "preview.toggle", title: ws.previewFile == nil ? "Show Preview" : "Hide Preview",
+                                 icon: ws.previewFile == nil ? "eye" : "eye.slash", shortcut: keys.togglePreview.display,
+                                 section: "Space", keywords: ["preview pane", "toggle preview"],
+                                 action: .run { ws.togglePreviewVisibility() }))
         for mode in RenderMode.allCases where mode != ws.renderMode {
             items.append(PaletteItem(id: "render.\(mode.rawValue)", title: "Render Preview as \(mode.rawValue.uppercased())",
                                      icon: "doc.richtext", section: "Space", action: .run { ws.renderMode = mode }))
@@ -506,11 +513,11 @@ struct CommandPalette: View {
                                      action: .run { DispatchQueue.main.async { Invites.copyLink(for: ws.root) } }))
         }
         items.append(PaletteItem(id: "space.sidebar", title: state.sidebarVisible ? "Hide Sidebar" : "Show Sidebar",
-                                 icon: "sidebar.left", shortcut: "⌘S", section: "Space",
+                                 icon: "sidebar.left", shortcut: keys.sidebar.display, section: "Space",
                                  action: .run { withAnimation(.smooth(duration: 0.3)) { state.sidebarVisible.toggle() } }))
-        items.append(PaletteItem(id: "space.spaces", title: "Show Spaces", icon: "square.stack", shortcut: "⌥⌘S", section: "Space",
+        items.append(PaletteItem(id: "space.spaces", title: "Show Spaces", icon: "square.stack", shortcut: keys.showSpaces.display, section: "Space",
                                  action: .run { state.setSpacesOpen(true) }))
-        items.append(PaletteItem(id: "space.close", title: "Close \(ws.name)", icon: "xmark", shortcut: "⌃⌘W", section: "Space",
+        items.append(PaletteItem(id: "space.close", title: "Close \(ws.name)", icon: "xmark", shortcut: keys.closeSpace.display, section: "Space",
                                  action: .run { state.space = nil }))
         // Typing searches every file name in the space.
         items += Workspace.flatten(ws.tree).filter { $0.children == nil }.map { node in
@@ -526,8 +533,9 @@ struct CommandPalette: View {
     /// Refactorings at the caret; they run in the editor once the palette is gone.
     private func refactorItems(_ tv: TypstTextView) -> [PaletteItem] {
         var items: [PaletteItem] = []
+        let keys = KeyLayout.current.shortcuts
         if let docs = tv.onShowDocs, let word = Self.identifier(in: tv.string, at: tv.selectedRange().location) {
-            items.append(PaletteItem(id: "code.docs", title: "Show Documentation for \(word)", icon: "book", shortcut: "F1",
+            items.append(PaletteItem(id: "code.docs", title: "Show Documentation for \(word)", icon: "book", shortcut: keys.documentation.display,
                                      section: "Code", keywords: ["quick documentation", "help", "hover", "docs"],
                                      action: .run(docs)))
         }
@@ -535,31 +543,40 @@ struct CommandPalette: View {
         if let symbol, let rename = tv.onRename {
             let what = symbol.kind == "function" ? "Function" : "Variable"
             items.append(PaletteItem(id: "refactor.rename", title: "Rename \(what) \(symbol.name)…", icon: "pencil.line",
-                                     shortcut: "⇧F6", section: "Refactor", keywords: ["rename symbol", "refactor"],
+                                     shortcut: keys.rename.display, section: "Refactor", keywords: ["rename symbol", "refactor"],
                                      action: .run(rename)))
         }
         if let extract = tv.onExtractVariable {
             items.append(PaletteItem(id: "refactor.variable", title: "Extract Variable…", icon: "arrow.up.right.square",
-                                     shortcut: "⌥⌘V", section: "Refactor", keywords: ["introduce variable", "refactor"],
+                                     shortcut: keys.extractVariable.display, section: "Refactor", keywords: ["introduce variable", "refactor"],
                                      action: .run(extract)))
         }
         if let function = tv.onExtractFunction {
             items.append(PaletteItem(id: "refactor.function", title: "Extract Function…", icon: "function",
-                                     shortcut: "⌥⌘M", section: "Refactor", keywords: ["extract method", "refactor"],
+                                     shortcut: keys.extractFunction.display, section: "Refactor", keywords: ["extract method", "refactor"],
                                      action: .run { function(false) }))
             items.append(PaletteItem(id: "refactor.function.scope", title: "Extract Function to Scope…", icon: "function",
-                                     shortcut: "⌥⇧⌘M", section: "Refactor", keywords: ["extract method", "refactor"],
+                                     shortcut: keys.extractFunctionToScope.display, section: "Refactor", keywords: ["extract method", "refactor"],
                                      action: .run { function(true) }))
         }
         let caret = tv.selectedRange().location
         if tv.hasQuickFixes?(caret) == true, let fixes = tv.onQuickFix {
-            items.append(PaletteItem(id: "code.actions", title: "Show Context Actions…", icon: "lightbulb", shortcut: "⌥↩",
+            items.append(PaletteItem(id: "code.actions", title: "Show Context Actions…", icon: "lightbulb", shortcut: keys.contextActions.display,
                                      section: "Code", keywords: ["quick fix", "convert", "solveng", "def", "solve", "math"],
                                      action: .run { fixes(caret) }))
         }
         if symbol?.kind == "variable", let symbol, let inline = tv.onInlineVariable {
             items.append(PaletteItem(id: "refactor.inline", title: "Inline Variable \(symbol.name)", icon: "arrow.down.left.square",
-                                     shortcut: "⌥⌘N", section: "Refactor", keywords: ["refactor"], action: .run(inline)))
+                                     shortcut: keys.inlineVariable.display, section: "Refactor", keywords: ["refactor"], action: .run(inline)))
+        }
+        if tv.comments != nil {
+            items.append(PaletteItem(id: "code.comment", title: "Comment Line", icon: "text.bubble", shortcut: keys.commentLine.display,
+                                     section: "Code", keywords: ["uncomment", "toggle comment", "line comment"],
+                                     action: .run { tv.toggleLineComment() }))
+            items.append(PaletteItem(id: "code.comment.block", title: "Comment Block", icon: "text.bubble.fill",
+                                     shortcut: keys.commentBlock.display, section: "Code",
+                                     keywords: ["uncomment", "toggle comment", "block comment"],
+                                     action: .run { tv.toggleBlockComment() }))
         }
         return items
     }
@@ -664,8 +681,16 @@ struct CommandPalette: View {
                                      icon: "doc.plaintext", section: "Settings", keywords: ["preview", "paginate", "setting"],
                                      action: .run { html.pages.toggle() }))
         }
+        let layout = KeyLayout.current
+        for other in KeyLayout.all where other.id != layout.id {
+            items.append(PaletteItem(id: "settings.layout.\(other.id)", title: "Use \(other.name) Keyboard Layout",
+                                     icon: "keyboard", section: "Settings",
+                                     keywords: ["keyboard shortcuts", "key bindings", "keymap", "intellij", "setting"],
+                                     action: .run { defaults.set(other.id, forKey: KeyLayout.defaultsKey) }))
+        }
         let tabs = [("General", "gearshape", 0, ["compiler", "typst version", "theme"]),
-                    ("Editor", "textformat", 1, ["font size", "cursor", "wrapping", "vim", "tinymist"]),
+                    ("Editor", "textformat", 1, ["font size", "cursor", "wrapping", "vim", "tinymist",
+                                                "keyboard shortcuts", "key bindings", "intellij"]),
                     ("Package", "shippingbox", 3, ["packages", "preview packages", "cache"]),
                     ("Device", "arrow.triangle.2.circlepath", 4, ["sync", "devices", "passkey", "account"])]
         items += tabs.map { name, icon, tab, keywords in

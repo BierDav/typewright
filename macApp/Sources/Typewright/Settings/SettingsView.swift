@@ -172,6 +172,13 @@ struct EditorSettings: View {
     @AppStorage("vimMode") private var vimMode = false
     @AppStorage("concealMath") private var concealMath = true
     @AppStorage("autoClose") private var autoClose = true
+    @AppStorage(KeyLayout.defaultsKey) private var layoutID = BuiltinLayout.standard.rawValue
+    @ObservedObject private var layouts = KeyLayoutStore.shared
+    @State private var showsLayoutEditor = false
+
+    private var currentLayout: KeyLayout {
+        layouts.all.first { $0.id == layoutID } ?? KeyLayout(builtIn: .standard)
+    }
 
     var body: some View {
         Form {
@@ -186,6 +193,18 @@ struct EditorSettings: View {
                 Stepper("Size: \(Int(fontSize)) pt", value: $fontSize, in: 9...32)
                 Text("#let greeting = \"Hello, Typst\"")
                     .font(Font(EditorFont.font(name: fontName, size: fontSize)))
+            }
+            Section {
+                Picker("Layout", selection: $layoutID) {
+                    ForEach(layouts.all) { layout in
+                        Text(layout.name).tag(layout.id)
+                    }
+                }
+                Button("Edit Layout…") { showsLayoutEditor = true }
+            } header: {
+                Text("Keyboard")
+            } footer: {
+                Text(currentLayout.summary).foregroundStyle(.secondary)
             }
             Section("Cursor") {
                 Toggle("Gliding cursor", isOn: $glidingCursor)
@@ -222,6 +241,9 @@ struct EditorSettings: View {
         }
         .formStyle(.grouped)
         .onAppear { fontFamilies = EditorFont.families }
+        .sheet(isPresented: $showsLayoutEditor) {
+            LayoutEditorView(selectedID: $layoutID)
+        }
     }
 }
 

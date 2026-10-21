@@ -156,6 +156,9 @@ final class FindModel {
 struct FindBar: View {
     @Bindable var find: FindModel
     @FocusState private var focus: Field?
+    // Rebuilds the hidden shortcut buttons when the layout changes.
+    @AppStorage(KeyLayout.defaultsKey) private var layoutID = BuiltinLayout.standard.rawValue
+    @ObservedObject private var layouts = KeyLayoutStore.shared
 
     private enum Field { case search, replace }
 
@@ -225,11 +228,11 @@ struct FindBar: View {
         .background {
             // Shortcuts that work while the bar has focus.
             Group {
-                Button("") { find.next() }.keyboardShortcut("g")
-                Button("") { find.previous() }.keyboardShortcut("g", modifiers: [.command, .shift])
+                Button("") { find.next() }.keyboardShortcut(KeyLayout.current.shortcuts.findNext)
+                Button("") { find.previous() }.keyboardShortcut(KeyLayout.current.shortcuts.findPrevious)
                 Button("") { withAnimation(.smooth(duration: 0.2)) { find.showsReplace = true }; focus = .replace }
-                    .keyboardShortcut("f", modifiers: [.command, .option])
-                Button("") { focusSearch() }.keyboardShortcut("f")
+                    .keyboardShortcut(KeyLayout.current.shortcuts.replace)
+                Button("") { focusSearch() }.keyboardShortcut(KeyLayout.current.shortcuts.find)
             }
             .opacity(0)
             .allowsHitTesting(false)
