@@ -26,7 +26,7 @@ final class QuickFixTests: XCTestCase {
         XCTAssertNotNil(fixes.last?.run)
     }
 
-    func testUndeclaredOperatorsOfferAMathOpDefinition() throws {
+    func testUndeclaredNamesInMathOfferQuoting() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -40,10 +40,10 @@ final class QuickFixTests: XCTestCase {
         workspace.find.textView = editor
         let diagnostic = Diagnostic(path: "main.typ", line: 1, column: 10, severity: .error, message: "unknown variable: tri")
         let fixes = workspace.quickFixes(for: diagnostic)
-        XCTAssertTrue(fixes.contains { $0.id == "solveng.operator" })
-        XCTAssertFalse(fixes.contains { $0.id == "solveng.quote" })
-        fixes.first { $0.id == "solveng.operator" }?.run?()
-        XCTAssertEqual(editor.string, "#let tri = math.op(\"tri\")\n" + document)
+        XCTAssertTrue(fixes.contains { $0.id == "solveng.quote" })
+        XCTAssertFalse(fixes.contains { $0.id == "solveng.operator" })
+        fixes.first { $0.id == "solveng.quote" }?.run?()
+        XCTAssertEqual(editor.string, "#graph($ \"tri\"(x) $)")
     }
 
 }

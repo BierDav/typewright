@@ -80,7 +80,6 @@ fn context(raw: &str) -> Context {
 /// null), `rename:<new name>` (edits), `function` (a package function's docs by name, or null) and `version`.
 pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> String {
     let value = match op {
-        "operatorDeclaration" => json!(solveng_ide::operator_declaration(document)),
         "tokens" => json!(solveng_ide::tokens(document).iter().flat_map(|t| [t.start, t.length, t.kind as u32]).collect::<Vec<_>>()),
         "pretty" => {
             // the context is the document's own units, comma separated

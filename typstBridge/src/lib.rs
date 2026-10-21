@@ -7,7 +7,6 @@ use std::sync::{Arc, LazyLock};
 mod markdown;
 mod refactor;
 mod solveng;
-mod operators;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod ffi;
@@ -31,8 +30,7 @@ use typst_svg::SvgOptions;
 
 pub(crate) static LIBRARY: LazyLock<LazyHash<Library>> =
     LazyLock::new(|| {
-        let mut library = Library::builder().with_features([Feature::Html].into_iter().collect()).build();
-        library.global.scope_mut().define_func_with_data(&operators::OPERATOR);
+        let library = Library::builder().with_features([Feature::Html].into_iter().collect()).build();
         LazyHash::new(library)
     });
 
@@ -60,7 +58,6 @@ pub(crate) fn decode(id: FileId, bytes: FileResult<Bytes>, stale: Option<Source>
     let data = bytes.as_slice();
     let text = std::str::from_utf8(data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data))
         .map_err(|_| typst::diag::FileError::InvalidUtf8)?;
-    if let Some(source) = operators::source(id, text) { return Ok(source); }
     Ok(match stale {
         Some(mut source) if matches!(source.root().span().get(), typst::syntax::SpanKind::Number { .. }) => {
             source.replace(text);

@@ -88,6 +88,43 @@ final class ColumnSelectionTests: XCTestCase {
         XCTAssertEqual(found.primary, 1)
     }
 
+    func testDraggingFromPastTheLineEndPutsCaretsAtLineEnds() {
+        let tv = editor("ab\nabcdefgh\na\nabc")
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        let lm = tv.layoutManager!
+        func point(_ index: Int, dx: CGFloat = 0) -> NSPoint {
+            let box = lm.boundingRect(forGlyphRange: NSRange(location: index, length: 1), in: tv.textContainer!)
+            return NSPoint(x: box.minX + tv.textContainerOrigin.x + dx, y: box.midY + tv.textContainerOrigin.y)
+        }
+        let start = NSPoint(x: point(1).x + 200, y: point(1).y)
+        let end = NSPoint(x: start.x, y: point(14).y)
+        let found = tv.columnCarets(from: start, to: end)
+        XCTAssertEqual(found.carets.map(\.range), [NSRange(location: 2, length: 0), NSRange(location: 11, length: 0),
+                                                   NSRange(location: 13, length: 0), NSRange(location: 17, length: 0)])
+        let inside = tv.columnCarets(from: point(5), to: NSPoint(x: point(5).x, y: point(14).y))
+        XCTAssertEqual(inside.carets.map(\.range), [NSRange(location: 5, length: 0), NSRange(location: 16, length: 0)],
+                       "a column inside the text still skips short lines")
+    }
+
+    func testHomeAndEndMoveEveryCaret() {
+        let tv = editor("ab\ncd")
+        tv.setColumns([.init(1), .init(4)], primary: 1)
+        func key(_ code: Int, _ flags: NSEvent.ModifierFlags = []) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags.union(.function), timestamp: 0, windowNumber: 0,
+                             context: nil, characters: String(UnicodeScalar(code)!), charactersIgnoringModifiers: String(UnicodeScalar(code)!),
+                             isARepeat: false, keyCode: 0)!
+        }
+        tv.keyDown(with: key(NSEndFunctionKey))
+        XCTAssertEqual(carets(tv).map(\.location), [2, 5])
+        tv.keyDown(with: key(NSHomeFunctionKey, .shift))
+        XCTAssertEqual(carets(tv), [NSRange(location: 0, length: 2), NSRange(location: 3, length: 2)])
+        tv.keyDown(with: key(NSEndFunctionKey, .command))
+        XCTAssertFalse(tv.isColumnMode)
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 5, length: 0))
+        tv.keyDown(with: key(NSHomeFunctionKey))
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 3, length: 0))
+    }
+
     func testColumnsDrawTheirOwnBackground() {
         let tv = editor("ab\ncd")
         tv.setColumns([.init(anchor: 0, head: 1), .init(anchor: 3, head: 4)], primary: 1)

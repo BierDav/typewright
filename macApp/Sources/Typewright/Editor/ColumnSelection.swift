@@ -2,7 +2,7 @@ import AppKit
 
 /// Several carets or selections edited at once: ⌥-drag selects a column, ⌃⇧-click adds a caret, ⌃⇧↑ and ⌃⇧↓ add
 /// one on the line above or below, like Xcode. In column selection mode (⇧⌘8, like IntelliJ) a plain drag selects a
-/// column and ⇧↑ and ⇧↓ add lines to it.
+/// column and ⇧↑ and ⇧↓ add lines to it. A column started past the end of its line puts carets at the end of shorter lines.
 extension TypstTextView {
     /// A selection that grows from `anchor` towards `head`, where its caret is.
     struct ColumnCaret: Equatable {
@@ -70,7 +70,7 @@ extension TypstTextView {
         lm.ensureLayout(for: container)
         let glyphs = lm.glyphRange(forBoundingRect: NSRect(x: 0, y: top, width: container.size.width, height: max(bottom - top, 1)),
                                    in: container)
-        var carets: [ColumnCaret] = []
+        var lines: [(caret: ColumnCaret, end: Int, isStart: Bool)] = []
         lm.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, glyphRange, _ in
             guard rect.maxY > top, rect.minY <= bottom else { return }
             let chars = lm.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
@@ -104,11 +104,12 @@ extension TypstTextView {
                 }
                 return closest.map { self.insertionIndexForConceals(indexes[$0]) } ?? lineEnd
             }
-            // Lines not reaching the column's start don't get a caret.
-            let anchor = index(start.x)
-            guard anchor != lineEnd else { return }
-            carets.append(ColumnCaret(anchor: anchor, head: index(end.x)))
+            let isStart = start.y - origin.y >= rect.minY && start.y - origin.y < rect.maxY
+            lines.append((ColumnCaret(anchor: index(start.x), head: index(end.x)), lineEnd, isStart))
         }
+        // Starting past the end of its line puts carets at the end of shorter lines; otherwise those get none.
+        let pastEnd = lines.contains { $0.isStart && $0.caret.anchor == $0.end }
+        let carets = lines.filter { pastEnd || $0.caret.anchor != $0.end }.map(\.caret)
         return (carets, end.y >= start.y ? carets.count - 1 : 0)
     }
 

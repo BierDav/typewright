@@ -1,6 +1,6 @@
 import AppKit
 import Observation
-import PDFKit
+@preconcurrency import PDFKit
 
 /// Lets floating controls over the PDF override PDFView's text cursor.
 final class ArrowAwarePDFView: PDFView {
@@ -227,6 +227,7 @@ final class PreviewController {
             return sync()
         }
         let anchor = view.convert(center, to: page)
+        let pageIndex = view.document?.index(for: page) ?? 0
         let began = CACurrentMediaTime()
         pendingScale = target
         zoomTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
@@ -236,7 +237,8 @@ final class PreviewController {
                 let eased = 1 - pow(1 - t, 3)
                 // Geometric steps feel equally fast at every zoom level.
                 self.view.scaleFactor = start * pow(target / start, eased)
-                self.keep(anchor, on: page, at: center)
+                // Look the page up again so the sendable timer closure holds no PDFPage.
+                if let page = self.view.document?.page(at: pageIndex) { self.keep(anchor, on: page, at: center) }
                 guard t >= 1 else { return }
                 timer.invalidate()
                 self.zoomTimer = nil

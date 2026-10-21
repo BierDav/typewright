@@ -20,7 +20,7 @@ final class PreviewTextSize {
     }
 
     /// In `didChange`'s user info: whether the previews ease to the new size.
-    static let animatedKey = "animated"
+    nonisolated static let animatedKey = "animated"
     @ObservationIgnored private var animatesChange = true
 
     /// Pinching and scrolling already move smoothly; easing them on top lags behind.

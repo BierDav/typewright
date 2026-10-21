@@ -10,6 +10,8 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Update solveng to its latest main
+        run: scripts/update-solveng.sh
       - name: Test Rust core
         run: cargo test --manifest-path sharedCore/Cargo.toml --target-dir .build/cargo
       - name: Build and test

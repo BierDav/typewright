@@ -25,6 +25,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Update solveng to its latest main
+        run: scripts/update-solveng.sh
       - name: Calculate version
         id: version
         run: echo "version=$(scripts/next-version.sh '${{ inputs.channel }}' '${{ inputs.major }}')" >> "$GITHUB_OUTPUT"

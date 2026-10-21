@@ -40,7 +40,7 @@ final class PopupsTests: XCTestCase {
     func testRegistrationDoesNotRetainToolsAndCanBeReplaced() {
         let window = NSWindow()
         var tool: Tool? = Tool()
-        weak var weakTool = tool
+        weak let weakTool = tool
         Popups.onDismiss(tool!, in: window) { $0.dismissals += 10 }
         Popups.onDismiss(tool!, in: window) { $0.dismissals += 1 }
         Popups.dismiss(in: window)

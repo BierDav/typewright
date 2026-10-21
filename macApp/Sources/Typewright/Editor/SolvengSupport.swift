@@ -182,7 +182,5 @@ enum SolvengSupport {
     }
 
     /// Local files a document imports or includes, as written.
-    static func operatorDeclaration(_ name: String) -> String? { decode(call("operatorDeclaration", name)) }
-
     static func references(_ document: String) -> [String] { decode(call("references", document)) ?? [] }
 }

@@ -1214,12 +1214,6 @@ final class Workspace: EditorLanguage {
         let range = NSRange(location: line.location + max(diagnostic.column - 1, 0), length: (name as NSString).length)
         guard NSMaxRange(range) <= s.length, s.substring(with: range) == name,
               s.substring(to: range.location).filter({ $0 == "$" }).count % 2 == 1 else { return [] }
-        if let declaration = SolvengSupport.operatorDeclaration(name) {
-            return [QuickFix(id: "solveng.operator", title: "Define “\(name)” with math.op", icon: "function") {
-                guard tv.string == s as String else { return }
-                tv.insertText(declaration + "\n", replacementRange: NSRange(location: 0, length: 0))
-            }]
-        }
         return [QuickFix(id: "solveng.quote", title: "Quote “\(name)” as a solveng name or unit", icon: "quote.opening") {
             guard tv.string == s as String else { return }
             tv.insertText("\"\(name)\"", replacementRange: range)

@@ -62,18 +62,4 @@ final class SolvengContextTests: XCTestCase {
         XCTAssertFalse(context.contains("Text $P := U$"), "not the chapter itself, despite the loop")
     }
 
-    func testOperatorReferencesUseTheTypstBindingAndKeepItsOperation() throws {
-        for spelling in ["ΛΩ", "Lambda\"\"Omega", "LambdaΩ", "ΛOmega"] {
-            let document = "#let ΛΩ = math.op(\"tri\")\n#graph($ \(spelling)(x) $)"
-            let source = document as NSString
-            let at = source.range(of: spelling + "(x)").location
-            let definition = try XCTUnwrap(SolvengSupport.definition(document, context: "", offset: at))
-            XCTAssertEqual(definition.start, source.range(of: "ΛΩ").location)
-            let edits = SolvengSupport.rename(document, context: "", offset: at, to: "dreieick")
-            XCTAssertEqual(edits.count, 2)
-            let rewritten = TextEdit.apply(edits.map { TextEdit(range: NSRange(location: $0.start, length: $0.end - $0.start), newText: $0.text) }, to: document)
-            XCTAssertEqual(rewritten, "#let dreieick = math.op(\"tri\")\n#graph($ dreieick(x) $)")
-        }
-    }
-
 }

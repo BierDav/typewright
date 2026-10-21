@@ -16,6 +16,8 @@ export default defineConfig({
   resolve: {
     alias: [{ find: "~", replacement: fileURLToPath(new URL("./src", import.meta.url)) }],
   },
+  // The editor chunk sits just above the default 500 kB advisory; gzip keeps it around 175 kB.
+  build: { chunkSizeWarningLimit: 550 },
   worker: { format: "es" },
   server: { fs: { allow: [".."] } },
 });

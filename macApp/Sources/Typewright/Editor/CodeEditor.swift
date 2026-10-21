@@ -1549,12 +1549,35 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         // ⌥⇧↑ and ⌥⇧↓ move the lines, like IntelliJ.
         if keys.moveLineUp.matches(event), isEditable { return moveLines(up: true) }
         if keys.moveLineDown.matches(event), isEditable { return moveLines(up: false) }
+        if let command = Self.lineKeyCommand(for: event) { return doCommand(by: command) }
         if keys.addCaretAbove.matches(event) { return addCaret(up: true) }
         if keys.addCaretBelow.matches(event) { return addCaret(up: false) }
         if keys.completions.matches(event), let onComplete {
             return onComplete()
         }
         super.keyDown(with: event)
+    }
+
+    /// Home (Pos1) and End go to the line's edges and Page Up and Down move the caret, like other editors; ⌘ or ⌃ for the document's.
+    static func lineKeyCommand(for event: NSEvent) -> Selector? {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let extend = modifiers.contains(.shift)
+        let document = modifiers.contains(.command) || modifiers.contains(.control)
+        guard !modifiers.contains(.option) else { return nil }
+        switch event.specialKey {
+        case .home?:
+            return document ? (extend ? #selector(moveToBeginningOfDocumentAndModifySelection(_:)) : #selector(moveToBeginningOfDocument(_:)))
+                : (extend ? #selector(moveToLeftEndOfLineAndModifySelection(_:)) : #selector(moveToLeftEndOfLine(_:)))
+        case .end?:
+            return document ? (extend ? #selector(moveToEndOfDocumentAndModifySelection(_:)) : #selector(moveToEndOfDocument(_:)))
+                : (extend ? #selector(moveToRightEndOfLineAndModifySelection(_:)) : #selector(moveToRightEndOfLine(_:)))
+        case .pageUp? where !document:
+            return extend ? #selector(pageUpAndModifySelection(_:)) : #selector(pageUp(_:))
+        case .pageDown? where !document:
+            return extend ? #selector(pageDownAndModifySelection(_:)) : #selector(pageDown(_:))
+        default:
+            return nil
+        }
     }
 
     override func resignFirstResponder() -> Bool {
@@ -2192,7 +2215,7 @@ struct CodeEditor: NSViewRepresentable {
                 if usages.count == 1 { return language.open(usages[0].location) }
                 let menu = NSMenu()
                 for usage in usages {
-                    let item = ClosureMenuItem(title: usage.preview) { [weak language] in language?.open(usage.location) }
+                    let item = ClosureMenuItem(title: usage.preview) { [language] in language.open(usage.location) }
                     item.subtitle = "\(usage.file):\(usage.location.line + 1)"
                     menu.addItem(item)
                 }
