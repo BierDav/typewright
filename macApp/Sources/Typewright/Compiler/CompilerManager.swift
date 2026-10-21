@@ -213,13 +213,13 @@ final class CompilerManager {
                 ReleaseAsset(name: $0.name, url: $0.browser_download_url.absoluteString)
             })
         }
-        return Releases.shared.pick(all: releases, assetName: assetName).compactMap { r in
+        return pickTypstReleases(all: releases, assetName: assetName).compactMap { r in
             URL(string: r.assetUrl).map { TypstRelease(version: r.version, assetURL: $0) }
         }
     }
 
     /// True if `a` is newer than `b`.
     nonisolated static func compare(_ a: String, _ b: String) -> Bool {
-        Versions.shared.isNewer(a: a, b: b)
+        isNewerVersion(a: a, b: b)
     }
 }

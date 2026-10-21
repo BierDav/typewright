@@ -119,6 +119,6 @@ final class TypstWatcher {
 
     /// Parses `compiled successfully in 15.81 ms`.
     static func duration(in status: String) -> TimeInterval? {
-        Diagnostics.shared.compileDuration(status: status)?.doubleValue
+        compileDuration(status: status)
     }
 }

@@ -4,7 +4,7 @@
 import { Annotation, ChangeSet, type Extension, StateEffect, StateField, Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
 import { createSignal } from "solid-js";
-import { TextMerge } from "../core";
+import { merge3 } from "../core";
 import * as syncService from "../sync";
 
 export type RemoteCursor = { device: string; name: string; from: number; to: number };
@@ -123,7 +123,7 @@ export function liveEditing(folder: string, path: string): Extension {
         if (result.adopted) {
           // Another device's session was first; this device's edits since opening merge into it.
           const mine = view.state.doc.toString();
-          const merged = TextMerge.merge3(result.adopted.base, mine, result.adopted.theirs);
+          const merged = merge3(result.adopted.base, mine, result.adopted.theirs);
           this.apply([difference(mine, merged.conflicts === 0 ? merged.text : result.adopted.theirs)]);
           this.sync();
           return;

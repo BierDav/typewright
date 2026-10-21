@@ -163,12 +163,11 @@ enum Highlighter {
     /// Colours the body of a ```` ```lang ```` raw block in its language; solveng code is coloured with the document.
     private static func injectRaw(in storage: NSTextStorage, run: NSRange, font: NSFont, depth: Int) {
         let raw = (storage.string as NSString).substring(with: run)
-        let parts = raw.hasPrefix("```") ? CodeHighlight.shared.rawBlock(raw: raw) : KotlinIntArray(size: 0)
-        guard parts.size == 4 else { return }
-        let tag = (raw as NSString).substring(with: NSRange(location: Int(parts.get(index: 0)),
-                                                            length: Int(parts.get(index: 1) - parts.get(index: 0))))
+        let parts = raw.hasPrefix("```") ? rawBlockParts(raw: raw).map(Int.init) : []
+        guard parts.count == 4 else { return }
+        let tag = (raw as NSString).substring(with: NSRange(location: parts[0], length: parts[1] - parts[0]))
         guard let language = InjectedLanguages.language(tag), language != SolvengSupport.tag else { return }
-        let body = NSRange(location: run.location + Int(parts.get(index: 2)), length: Int(parts.get(index: 3) - parts.get(index: 2)))
+        let body = NSRange(location: run.location + parts[2], length: parts[3] - parts[2])
         InjectedLanguages.apply(language, to: storage, range: body, font: font, depth: depth + 1)
     }
 }

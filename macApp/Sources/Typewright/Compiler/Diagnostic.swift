@@ -18,7 +18,7 @@ struct Diagnostic: Identifiable, Hashable {
 
     /// Parses typst's `--diagnostic-format short` output.
     static func parse(_ output: String) -> [Diagnostic] {
-        Diagnostics.shared.parse(output: output).map { d in
+        parseDiagnostics(output: output).map { d in
             Diagnostic(path: d.path, line: Int(d.line), column: Int(d.column),
                        severity: d.severity == .warning ? .warning : .error, message: d.message)
         }

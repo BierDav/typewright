@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Rust bridges for the browser into webApp/src/wasm/{sync,typst}.
+# Builds the Rust core and bridges for the browser into webApp/src/wasm/{core,sync,typst}.
 # Needs the wasm32-unknown-unknown target, wasm-bindgen-cli matching the crates' wasm-bindgen, and a
 # clang with a WebAssembly backend for ring's C code (Homebrew's llvm on macOS; Apple's clang has none).
 set -euo pipefail
@@ -39,5 +39,6 @@ build() {
   fi
 }
 
+build sharedCore typewright_core core
 build irohBridge iroh_bridge sync
 build typstBridge typst_bridge typst

@@ -3,7 +3,7 @@ import TypewrightCore
 
 /// Colouring for code embedded in Typst raw blocks and Markdown fences, by its language tag.
 enum InjectedLanguages {
-    /// Mirrors `CodeTokenKind` in the Kotlin core.
+    /// Mirrors `highlight::kind` in the Rust core.
     enum Kind: Int32 {
         case keyword, string, comment, number, function, type, variable, annotation, `operator`, unit
     }
@@ -17,7 +17,7 @@ enum InjectedLanguages {
     static let maxDepth = 3
 
     /// The canonical language for a tag, or nil for unsupported ones.
-    static func language(_ tag: String) -> String? { CodeHighlight.shared.language(tag: tag) }
+    static func language(_ tag: String) -> String? { codeLanguage(tag: tag) }
 
     private static func color(_ kind: Kind) -> NSColor {
         switch kind {
@@ -48,7 +48,7 @@ enum InjectedLanguages {
         default:
             storage.addAttributes([.font: font, .foregroundColor: NSColor.textColor], range: range)
             let code = (storage.string as NSString).substring(with: range)
-            color(CodeHighlight.shared.tokens(language: language, code: code), in: storage, at: range.location, length: range.length, font: font)
+            color(codeTokens(language: language, code: code), in: storage, at: range.location, length: range.length, font: font)
         }
     }
 
@@ -71,18 +71,6 @@ enum InjectedLanguages {
                 continue
             }
             guard let kind = Kind(rawValue: tokens[i + 2]), start + count <= length else { continue }
-            let r = NSRange(location: location + start, length: count)
-            storage.addAttribute(.foregroundColor, value: color(kind), range: r)
-            if kind == .comment { storage.addAttribute(.font, value: italic, range: r) }
-        }
-    }
-
-    /// Colours `(start, length, kind)` tokens relative to `location`, within `length`.
-    static func color(_ tokens: KotlinIntArray, in storage: NSTextStorage, at location: Int, length: Int, font: NSFont) {
-        let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
-        for i in stride(from: 0, to: Int(tokens.size) - 2, by: 3) {
-            let start = Int(tokens.get(index: Int32(i))), count = Int(tokens.get(index: Int32(i + 1)))
-            guard let kind = Kind(rawValue: tokens.get(index: Int32(i + 2))), start + count <= length else { continue }
             let r = NSRange(location: location + start, length: count)
             storage.addAttribute(.foregroundColor, value: color(kind), range: r)
             if kind == .comment { storage.addAttribute(.font, value: italic, range: r) }

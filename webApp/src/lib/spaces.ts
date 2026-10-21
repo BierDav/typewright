@@ -1,7 +1,8 @@
 // A space is a folder under `spaces/` in origin storage; the sidebar keeps them in the user's order.
 import { strToU8, unzipSync, zipSync } from "fflate";
 import { createStore } from "solid-js/store";
-import { jsList, ktList, Paths, SpaceOrder } from "./core";
+import * as core from "./core";
+import { spaceOrderAdd, spaceOrderMove, spaceOrderReplace } from "./core";
 import * as fs from "./storage";
 
 export const SPACES = "spaces";
@@ -28,13 +29,13 @@ function saveOrder(order: string[]) {
 export async function refreshSpaces() {
   const folders = (await fs.list(SPACES)).filter((e) => e.kind === "dir").map((e) => fs.basename(e.path));
   let order = storedOrder();
-  for (const name of folders.sort((a, b) => a.localeCompare(b))) order = jsList(SpaceOrder.add(ktList(order), name));
+  for (const name of folders.sort((a, b) => a.localeCompare(b))) order = spaceOrderAdd(order, name);
   saveOrder(order);
   setSpaces({ names: order.filter((n) => folders.includes(n)), loaded: true });
 }
 
 export function moveSpace(name: string, index: number) {
-  const order = jsList(SpaceOrder.move(ktList(storedOrder()), ktList(spaces.names), name, index));
+  const order = spaceOrderMove(storedOrder(), spaces.names, name, index);
   saveOrder(order);
   setSpaces("names", order.filter((n) => spaces.names.includes(n)));
 }
@@ -42,7 +43,7 @@ export function moveSpace(name: string, index: number) {
 /** A free folder name in `parent`: `name`, then `name 2` and so on. */
 export async function uniqueName(parent: string, name: string, ext: string | null = null): Promise<string> {
   const taken = new Set((await fs.list(parent)).map((e) => fs.basename(e.path)));
-  return Paths.uniqueName(name, ext, (candidate) => taken.has(candidate));
+  return core.uniqueName(name, ext, (candidate) => taken.has(candidate));
 }
 
 export function cleanName(name: string): string {
@@ -70,7 +71,7 @@ export async function renameSpace(old: string, name: string): Promise<string | n
   const clean = cleanName(name);
   if (!clean || clean === old || (await fs.exists(spacePath(clean)))) return null;
   await fs.move(spacePath(old), spacePath(clean));
-  saveOrder(jsList(SpaceOrder.replace(ktList(storedOrder()), old, clean)));
+  saveOrder(spaceOrderReplace(storedOrder(), old, clean));
   await refreshSpaces();
   return clean;
 }

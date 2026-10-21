@@ -246,25 +246,24 @@ enum SpaceList {
 
     /// Appends new spaces; known ones keep their place.
     static func add(_ url: URL) {
-        stored = SpaceOrder.shared.add(stored: stored, path: url.resolvingSymlinksInPath().path)
+        stored = spaceOrderAdd(stored: stored, path: url.resolvingSymlinksInPath().path)
     }
 
     /// Moves a space to `index` in `all`; missing folders keep their entries for when they return.
     static func move(_ url: URL, to index: Int) {
-        stored = SpaceOrder.shared.move(stored: stored, visible: all.map(\.path), path: url.path, index: Int32(clamping: index))
+        stored = spaceOrderMove(stored: stored, visible: all.map(\.path), path: url.path, index: Int32(clamping: index))
     }
 
     /// Swaps a renamed space in place, keeping its position.
     static func replace(_ old: URL, with new: URL) {
-        stored = SpaceOrder.shared.replace(stored: stored, old: old.resolvingSymlinksInPath().path,
-                                           new: new.resolvingSymlinksInPath().path)
+        stored = spaceOrderReplace(stored: stored, old: old.resolvingSymlinksInPath().path,
+                                    new: new.resolvingSymlinksInPath().path)
     }
 
     /// Drops every entry that leads to the space, like a file inside it or a symlinked spelling of its path.
     static func remove(_ url: URL) {
-        stored = SpaceOrder.shared.remove(stored: stored, root: Workspace.root(of: url).resolvingSymlinksInPath().path) {
-            Workspace.root(of: URL(fileURLWithPath: $0)).resolvingSymlinksInPath().path
-        }
+        let root = Workspace.root(of: url).resolvingSymlinksInPath().path
+        stored = stored.filter { Workspace.root(of: URL(fileURLWithPath: $0)).resolvingSymlinksInPath().path != root }
     }
 
     /// Current git branch of the space, if any.
@@ -274,7 +273,7 @@ enum SpaceList {
         var dir = isDir.boolValue ? url : url.deletingLastPathComponent()
         for _ in 0..<6 {
             let head = dir.appendingPathComponent(".git/HEAD")
-            if let s = try? String(contentsOf: head, encoding: .utf8) { return Paths.shared.gitBranch(head: s) }
+            if let s = try? String(contentsOf: head, encoding: .utf8) { return gitBranch(head: s) }
             dir.deleteLastPathComponent()
         }
         return nil

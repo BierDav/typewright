@@ -27,7 +27,7 @@ final class WindowTests: XCTestCase {
     }
 
     func testOneMinimalEditBetweenTexts() {
-        let edit = TypewrightCore.TextEdits.shared.difference(old: "let a = 1", new: "let ab = 1")
+        let edit = textDifference(old: "let a = 1", new: "let ab = 1")
         XCTAssertEqual(edit.range.location, 5)
         XCTAssertEqual(edit.range.length, 0)
         XCTAssertEqual(edit.newText, "b")

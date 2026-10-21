@@ -2,7 +2,7 @@
 import { batch, createRoot, createSignal, type Accessor } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { compiler, Format, type CompileOutput, type DiagnosticJSON } from "./compiler";
-import { Paths } from "./core";
+import { spaceRelativePath } from "./core";
 import { Solveng } from "./editor/solveng";
 import { sharedFontFiles } from "./fonts";
 import { isFont, isMarkdown, isPreviewable, kindOf, kindWithContents, type Kind } from "./kinds";
@@ -702,7 +702,7 @@ export class Workspace {
   }
 
   relative(path: string): string | null {
-    return Paths.relative(path, this.root) ?? null;
+    return spaceRelativePath(path, this.root) ?? null;
   }
 
   mutate(fn: (state: typeof this.state) => void) {

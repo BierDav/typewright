@@ -1,0 +1,4 @@
+[bindings.swift]
+module_name = "TypewrightCore"
+ffi_module_name = "TypewrightCoreFFI"
+ffi_module_filename = "TypewrightCoreFFI"

@@ -41,7 +41,7 @@ struct LiveResult: Decodable {
 }
 
 /// Syncs the spaces the user picked across all devices of their account, and with the people they
-/// invited: `irohBridge` moves the data, `SpaceSync` from the Kotlin core decides what to do, and
+/// invited: `irohBridge` moves the data, `SpaceSync` from the Rust core decides what to do, and
 /// this applies it to the folders.
 @MainActor @Observable
 final class SyncService {
@@ -72,7 +72,7 @@ final class SyncService {
     var lfsThresholdMB: Double {
         didSet {
             defaults.set(lfsThresholdMB, forKey: Self.thresholdKey)
-            engines.values.forEach { $0.lfsThreshold = lfsThresholdBytes }
+            engines.values.forEach { $0.setLfsThreshold(bytes: lfsThresholdBytes) }
         }
     }
 
@@ -106,7 +106,7 @@ final class SyncService {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let saved = defaults.double(forKey: Self.thresholdKey)
-        lfsThresholdMB = saved > 0 ? saved : SyncPolicy.shared.DEFAULT_LFS_THRESHOLD / 1_048_576
+        lfsThresholdMB = saved > 0 ? saved : defaultLfsThreshold() / 1_048_576
         let stored = defaults.dictionary(forKey: Self.spacesKey) as? [String: String] ?? [:]
         spaces = stored.mapValues { URL(fileURLWithPath: $0) }
     }
@@ -255,7 +255,7 @@ final class SyncService {
         // This Mac first: it's online right now, so the first join doesn't wait for the space's record.
         let hints = [deviceID].compactMap { $0 } + devices.filter { $0 != deviceID }
         let invite = SpaceInvite(id: id, name: root.lastPathComponent, secret: String(cString: raw), hints: hints)
-        return SpaceInvites.shared.link(invite: invite)
+        return TypewrightCore.inviteLink(invite: invite)
     }
 
     /// Downloads a space from an invite into a new folder inside `parent`; the account lists it for this user's other devices.
@@ -271,9 +271,7 @@ final class SyncService {
     }
 
     private func makeFolder(_ name: String, in parent: URL) -> URL? {
-        let name = Paths.shared.uniqueName(name: name, ext: nil) {
-            KotlinBoolean(bool: FileManager.default.fileExists(atPath: parent.appendingPathComponent($0).path))
-        }
+        let name = uniqueName(name: name, ext: nil, exists: ExistsIn(parent))
         let root = parent.appendingPathComponent(name, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -430,9 +428,7 @@ final class SyncService {
             scheduleSave()
             return
         }
-        let actions = engine.remote(entry: entry, local: local, ignore: ignore) { candidate in
-            KotlinBoolean(bool: FileManager.default.fileExists(atPath: root.appendingPathComponent(candidate).path))
-        }
+        let actions = engine.remote(entry: entry, local: local, ignore: ignore, exists: ExistsIn(root))
         for action in actions { await perform(action, space: id) }
         if !actions.isEmpty { scheduleSave() }
     }
@@ -464,48 +460,45 @@ final class SyncService {
 
     private func perform(_ action: SyncAction, space id: String) async {
         guard let node, let root = spaces[id], let engine = engines[id] else { return }
-        let url = root.appendingPathComponent(action.path)
+        let url = root.appendingPathComponent(action.path())
         switch action {
-        case is SyncAction.Publish:
-            tws_publish(node, id, action.path, url.path)
-        case is SyncAction.Unpublish:
-            tws_unpublish(node, id, action.path)
-        case let write as SyncAction.Write:
-            let ok = await place(write.hash, size: write.size, at: url)
-            engine.wrote(path: write.path, hash: write.hash, ok: ok)
+        case .publish(let path):
+            tws_publish(node, id, path, url.path)
+        case .unpublish(let path):
+            tws_unpublish(node, id, path)
+        case .write(let path, let hash, let size):
+            let ok = await place(hash, size: size, at: url)
+            engine.wrote(path: path, hash: hash, ok: ok)
             changed(root)
-        case is SyncAction.Trash:
+        case .trash:
             try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
             changed(root)
-        case let merge as SyncAction.Merge:
-            await performMerge(merge, root: root, space: id, engine: engine)
-        case let copy as SyncAction.ConflictCopy:
-            _ = await place(copy.hash, size: copy.size, at: root.appendingPathComponent(copy.copyPath))
+        case .merge(let path, let baseHash, let remoteHash):
+            await performMerge(path: path, baseHash: baseHash, remoteHash: remoteHash, root: root, space: id, engine: engine)
+        case .conflictCopy(_, let copyPath, let hash, let size):
+            _ = await place(hash, size: size, at: root.appendingPathComponent(copyPath))
             changed(root)
-        default:
-            break
         }
     }
 
     /// Three-way merge of a small text file both sides edited; leftovers become a conflict copy.
-    private func performMerge(_ merge: SyncAction.Merge, root: URL, space id: String, engine: SpaceSync) async {
-        let url = root.appendingPathComponent(merge.path)
-        let base = await text(of: merge.baseHash)
-        let remote = await text(of: merge.remoteHash)
+    private func performMerge(path: String, baseHash: String, remoteHash: String, root: URL, space id: String,
+                              engine: SpaceSync) async {
+        let url = root.appendingPathComponent(path)
+        let base = await text(of: baseHash)
+        let remote = await text(of: remoteHash)
         let local = try? String(contentsOf: url, encoding: .utf8)
         if let base, let remote, let local {
-            let result = TextMerge.shared.merge3(base: base, local: local, remote: remote)
+            let result = merge3(base: base, local: local, remote: remote)
             if result.conflicts == 0, (try? result.text.write(to: url, atomically: true, encoding: .utf8)) != nil {
-                engine.merged(path: merge.path, remoteHash: merge.remoteHash)
+                engine.merged(path: path, remoteHash: remoteHash)
                 changed(root)
                 scheduleScan(id)
                 return
             }
         }
         let size = Double(remote?.utf8.count ?? 0)
-        let fallback = engine.mergeFailed(path: merge.path, remoteHash: merge.remoteHash, size: size) { candidate in
-            KotlinBoolean(bool: FileManager.default.fileExists(atPath: root.appendingPathComponent(candidate).path))
-        }
+        let fallback = engine.mergeFailed(path: path, remoteHash: remoteHash, size: size, exists: ExistsIn(root))
         for action in fallback { await perform(action, space: id) }
     }
 

@@ -1,5 +1,5 @@
 // Syncs the spaces the user picked across their devices and with the people they invited, like the
-// Mac app's `SyncService`: `irohBridge` (built for wasm) moves the data, `SpaceSync` from the Kotlin
+// Mac app's `SyncService`: `irohBridge` (built for wasm) moves the data, `SpaceSync` from the Rust
 // core decides what to do, and this applies it to the space folders in origin storage.
 //
 // Only one tab per browser runs the node (a Web Lock decides); others still edit the same folders,
@@ -8,7 +8,8 @@ import { batch } from "solid-js";
 import { createStore } from "solid-js/store";
 import init, { generateDeviceKey, hashBytes, SyncNode } from "~/wasm/sync/sync.js";
 import syncWasm from "~/wasm/sync/sync_bg.wasm?url";
-import { IgnoreRules, LocalFile, RemoteEntry, SpaceInvite, SpaceInvites, SpaceSync, SyncAction, SyncPolicy, TextMerge, jsList, ktList } from "./core";
+import * as core from "./core";
+import { IgnoreRules, type LocalFile, merge3, type RemoteEntry, type SpaceInvite, SpaceSync, type SyncAction } from "./core";
 import { identity } from "./identity";
 import { isEditable, kindWithContents } from "./kinds";
 import { settings } from "./settings";
@@ -281,16 +282,16 @@ export function inviteLink(folder: string): string | null {
   const secret = node.invite(id, folder);
   // This device first: it's online right now, so the first join doesn't wait for the space's record.
   const hints = [sync.deviceId!, ...sync.devices.filter((d) => d !== sync.deviceId)];
-  return SpaceInvites.link(new SpaceInvite(id, folder, secret, ktList(hints))) ?? null;
+  return core.inviteLink({ id, name: folder, secret, hints }) ?? null;
 }
 
 /** The web app's address for an invite link, which joins in the browser. */
 export function webInviteLink(link: string): string {
-  return SpaceInvites.webLink(link, `${location.origin}${import.meta.env.BASE_URL}`) ?? link;
+  return core.webInviteLink(link, `${location.origin}${import.meta.env.BASE_URL}`) ?? link;
 }
 
 export function parseInvite(link: string): SpaceInvite | null {
-  return SpaceInvites.parse(link) ?? null;
+  return core.parseInvite(link) ?? null;
 }
 
 /** Downloads a space from an invite into a new space folder; the account lists it for the other devices. */
@@ -299,7 +300,7 @@ export async function joinInvite(invite: SpaceInvite): Promise<string | null> {
   if (sync.spaces[invite.id]) return sync.spaces[invite.id];
   const folder = await createSpace(invite.name, false);
   remember(invite.id, folder);
-  node.joinSpace(invite.id, invite.name, invite.secret, jsList(invite.hints));
+  node.joinSpace(invite.id, invite.name, invite.secret, invite.hints);
   open(invite.id, folder, false);
   return folder;
 }
@@ -357,7 +358,7 @@ function scheduleScan(id: string, delay = 500) {
 async function describe(abs: string, path: string, file: File): Promise<LocalFile | null> {
   const cached = hashes.get(abs);
   if (cached && cached.size === file.size && cached.modified === file.lastModified) {
-    return new LocalFile(path, cached.hash, file.size, cached.isText);
+    return { path, hash: cached.hash, size: file.size, isText: cached.isText };
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
   const hash = hashBytes(bytes);
@@ -369,7 +370,7 @@ async function describe(abs: string, path: string, file: File): Promise<LocalFil
     seeded.add(hash);
     void node.seed(bytes).catch(() => seeded.delete(hash));
   }
-  return new LocalFile(path, hash, file.size, isText);
+  return { path, hash, size: file.size, isText };
 }
 
 /** Walks a space like git would: `.gitignore` rules apply and ignored folders aren't entered. */
@@ -407,7 +408,7 @@ async function scan(id: string) {
   ignores.set(id, result.ignore);
   known.set(id, result.paths);
   scanned.add(id);
-  const actions = jsList(engine.scan(ktList(result.files), result.ignore));
+  const actions = engine.scan(result.files, result.ignore);
   for (const action of actions) await perform(action, id);
   if (actions.length) scheduleSave();
 }
@@ -470,12 +471,12 @@ function handle(text: string) {
       break;
     case "entries":
       if (!event.space) return;
-      for (const e of event.entries ?? []) enqueue(event.space, new RemoteEntry(e.path, e.hash, e.size, e.deleted));
+      for (const e of event.entries ?? []) enqueue(event.space, { path: e.path, hash: e.hash, size: e.size, deleted: e.deleted });
       scheduleSnapshot();
       break;
     case "remote":
       if (!event.space || !event.path || !event.hash) return;
-      enqueue(event.space, new RemoteEntry(event.path, event.hash, event.size ?? 0, event.deleted ?? false));
+      enqueue(event.space, { path: event.path, hash: event.hash, size: event.size ?? 0, deleted: event.deleted ?? false });
       scheduleSnapshot();
       break;
     case "published":
@@ -515,7 +516,7 @@ async function applyRemote(entry: RemoteEntry, id: string) {
     return;
   }
   const paths = known.get(id) ?? new Set();
-  const actions = jsList(engine.remote(entry, local, ignore, (candidate) => paths.has(candidate)));
+  const actions = engine.remote(entry, local, ignore, (candidate) => paths.has(candidate));
   for (const action of actions) await perform(action, id);
   if (actions.length) scheduleSave();
 }
@@ -552,33 +553,40 @@ async function perform(action: SyncAction, id: string) {
   const engine = engines.get(id);
   if (!node || !folder || !engine) return;
   const target = spacePath(folder, action.path);
-  if (action instanceof SyncAction.Publish) {
-    const bytes = await fs.readFile(target);
-    // Gone since the scan; the next one unpublishes it.
-    if (bytes) node.publish(id, action.path, bytes);
-  } else if (action instanceof SyncAction.Unpublish) {
-    node.unpublish(id, action.path);
-  } else if (action instanceof SyncAction.Write) {
-    const ok = await place(action.hash, action.size, target);
-    engine.wrote(action.path, action.hash, ok);
-  } else if (action instanceof SyncAction.Trash) {
-    await moveToTrash(folder, action.path);
-  } else if (action instanceof SyncAction.Merge) {
-    await performMerge(action, id, folder, engine);
-  } else if (action instanceof SyncAction.ConflictCopy) {
-    await place(action.hash, action.size, spacePath(folder, action.copyPath));
-    known.get(id)?.add(action.copyPath);
+  switch (action.kind) {
+    case "publish": {
+      const bytes = await fs.readFile(target);
+      // Gone since the scan; the next one unpublishes it.
+      if (bytes) node.publish(id, action.path, bytes);
+      break;
+    }
+    case "unpublish":
+      node.unpublish(id, action.path);
+      break;
+    case "write":
+      engine.wrote(action.path, action.hash, await place(action.hash, action.size, target));
+      break;
+    case "trash":
+      await moveToTrash(folder, action.path);
+      break;
+    case "merge":
+      await performMerge(action, id, folder, engine);
+      break;
+    case "conflictCopy":
+      await place(action.hash, action.size, spacePath(folder, action.copyPath));
+      known.get(id)?.add(action.copyPath);
+      break;
   }
 }
 
 /** Three-way merge of a small text file both sides edited; leftovers become a conflict copy. */
-async function performMerge(merge: InstanceType<typeof SyncAction.Merge>, id: string, folder: string, engine: SpaceSync) {
+async function performMerge(merge: Extract<SyncAction, { kind: "merge" }>, id: string, folder: string, engine: SpaceSync) {
   const target = spacePath(folder, merge.path);
   const base = await text(merge.baseHash);
   const remote = await text(merge.remoteHash);
   const local = await fs.readText(target);
   if (base !== null && remote !== null && local !== null) {
-    const result = TextMerge.merge3(base, local, remote);
+    const result = merge3(base, local, remote);
     if (result.conflicts === 0) {
       await fs.writeFile(target, result.text);
       engine.merged(merge.path, merge.remoteHash);
@@ -588,7 +596,7 @@ async function performMerge(merge: InstanceType<typeof SyncAction.Merge>, id: st
   }
   const size = remote === null ? 0 : new TextEncoder().encode(remote).length;
   const paths = known.get(id) ?? new Set();
-  const fallback = jsList(engine.mergeFailed(merge.path, merge.remoteHash, size, (candidate) => paths.has(candidate)));
+  const fallback = engine.mergeFailed(merge.path, merge.remoteHash, size, (candidate) => paths.has(candidate));
   for (const action of fallback) await perform(action, id);
 }
 
@@ -629,4 +637,3 @@ function saveState() {
   for (const [id, engine] of engines) void fs.writeFile(stateFile(id), engine.save(), true);
 }
 
-export { SyncPolicy };

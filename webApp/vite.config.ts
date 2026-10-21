@@ -5,7 +5,6 @@ import { defineConfig } from "vite";
 
 // GitHub Pages serves the app below the repository's path, e.g. `/typewright/`.
 const base = process.env.TYPEWRIGHT_WEB_BASE ?? "/";
-const core = "../sharedKotlin/build/dist/js/productionLibrary";
 
 export default defineConfig({
   base,
@@ -15,14 +14,8 @@ export default defineConfig({
     nitro({ preset: "github-pages", baseURL: base, prerender: { routes: ["/"], crawlLinks: false } }),
   ],
   resolve: {
-    alias: [
-      { find: "~", replacement: fileURLToPath(new URL("./src", import.meta.url)) },
-      // The Kotlin core, built by `sharedKotlin/gradlew -p sharedKotlin jsBrowserProductionLibraryDistribution`.
-      { find: /^typewright-core$/, replacement: fileURLToPath(new URL(`${core}/typewright-core.mjs`, import.meta.url)) },
-      { find: /^kotlin-stdlib$/, replacement: fileURLToPath(new URL(`${core}/kotlin-kotlin-stdlib.mjs`, import.meta.url)) },
-    ],
+    alias: [{ find: "~", replacement: fileURLToPath(new URL("./src", import.meta.url)) }],
   },
   worker: { format: "es" },
-  optimizeDeps: { exclude: ["typewright-core", "kotlin-stdlib"] },
   server: { fs: { allow: [".."] } },
 });

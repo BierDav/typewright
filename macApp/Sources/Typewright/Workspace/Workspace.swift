@@ -668,7 +668,7 @@ final class Workspace: EditorLanguage {
         for (file, edits) in references {
             let file = moved(file)
             guard let text = bufferText(file) else { continue }
-            updateBuffer(file, text: TypewrightCore.TextEdits.shared.apply(edits: edits, text: text))
+            updateBuffer(file, text: applyTextEdits(edits: edits, text: text))
         }
         if !references.isEmpty { flushSaves() }
         schedulePersist()
@@ -682,9 +682,7 @@ final class Workspace: EditorLanguage {
         var found: [(file: URL, text: String, reference: PathReference)] = []
         for node in Self.flatten(tree) where node.isTypst {
             guard let path = relative(node.url), let text = bufferText(node.url) else { continue }
-            let references = PathReferences.shared.moved(text: text, file: path, from: from, to: to) { [root] path in
-                KotlinBoolean(bool: FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path))
-            }
+            let references = movedPathReferences(text: text, file: path, from: from, to: to, exists: ExistsIn(root))
             found += references.map { (node.url, text, $0) }
         }
         let unsure = found.indices.filter { !found[$0].reference.certain }
@@ -735,9 +733,7 @@ final class Workspace: EditorLanguage {
     }
 
     private static func unique(in dir: URL, name: String, ext: String?) -> URL {
-        let file = Paths.shared.uniqueName(name: name, ext: ext) {
-            KotlinBoolean(bool: FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path))
-        }
+        let file = uniqueName(name: name, ext: ext, exists: ExistsIn(dir))
         return dir.appendingPathComponent(file).standardizedFileURL
     }
 
@@ -834,7 +830,7 @@ final class Workspace: EditorLanguage {
         guard buffers[url] ?? (url == selectedFile ? text : nil) != new else { return }
         if url == selectedFile, selectedKind?.isEditable == true {
             let old = text
-            let edit = TypewrightCore.TextEdits.shared.difference(old: old, new: new)
+            let edit = textDifference(old: old, new: new)
             let change = LiveResult.Edit(location: Int(edit.range.location), length: Int(edit.range.length), text: edit.newText)
             // Through the editor, so this window keeps its caret, scroll and undo.
             if live.applyEdits?([change]) == true { return }
@@ -1060,13 +1056,13 @@ final class Workspace: EditorLanguage {
 
     /// tinymist only knows `@preview`; local namespaces and downloaded packages come from the package folders.
     private func packageCompletions(at offset: Int) -> [CompletionItem] {
-        let start = Int(PackageSpecs.shared.specStart(text: text, offset: Int32(offset)))
+        let start = Int(packageSpecStart(text: text, offset: Int32(offset)))
         guard start >= 0 else { return [] }
         let library = PackageLibrary.shared
         let specs = library.namespaces.flatMap(\.packages).map(\.spec) + library.downloaded.map(\.spec)
         let typed = (text as NSString).substring(with: NSRange(location: start, length: offset - start))
         let range = NSRange(location: start, length: offset - start)
-        return PackageSpecs.shared.candidates(typed: typed, specs: specs).map { spec in
+        return packageCandidates(typed: typed, specs: specs).map { spec in
             CompletionItem(label: spec, detail: spec.hasPrefix("@preview/") ? "Downloaded" : "Local package", kind: .file,
                            filterText: spec, sortText: spec, newText: spec, isSnippet: false, range: range)
         }
@@ -1330,7 +1326,7 @@ final class Workspace: EditorLanguage {
     }
 
     static func lineText(_ line: Int, in text: NSString) -> String {
-        TextPositions.shared.lineText(line: Int32(clamping: line), text: text as String)
+        TypewrightCore.lineText(line: Int32(clamping: line), text: text as String)
     }
 
     /// Contents of the string literal around `offset` on its line.
@@ -1340,7 +1336,7 @@ final class Workspace: EditorLanguage {
 
     /// Range of the contents of the string literal around `offset` on its line.
     private static func stringLiteralRange(at offset: Int, in text: NSString) -> NSRange? {
-        TextPositions.shared.stringLiteralRange(offset: Int32(clamping: offset), text: text as String)
+        TypewrightCore.stringLiteralRange(offset: Int32(clamping: offset), text: text as String)
             .map { NSRange(location: Int($0.location), length: Int($0.length)) }
     }
 
@@ -1537,7 +1533,7 @@ final class Workspace: EditorLanguage {
     }
 
     private func relative(_ url: URL) -> String? {
-        Paths.shared.relative(path: url.standardizedFileURL.path, root: root.path)
+        spaceRelativePath(path: url.standardizedFileURL.path, root: root.path)
     }
 
     /// Open buffers keyed by path relative to the root; they win over the disk contents.

@@ -1,4 +1,4 @@
-import { FileKind, FileKinds } from "./core";
+import { fileKindForExtension } from "./core";
 import { extension } from "./storage";
 
 export type Kind = "folder" | "typst" | "text" | "pdf" | "font" | "document" | "image" | "binary";
@@ -7,8 +7,8 @@ export type Kind = "folder" | "typst" | "text" | "pdf" | "font" | "document" | "
 export function kindOf(path: string): Kind | null {
   const ext = extension(path);
   if (!ext) return null;
-  const kind = FileKinds.forExtension(ext);
-  return kind ? (kind.id as Kind) : isMarkdown(path) ? "text" : null;
+  const kind = fileKindForExtension(ext) as Kind | undefined;
+  return kind ?? (isMarkdown(path) ? "text" : null);
 }
 
 /** Kind of a file whose contents are known: unknown extensions are text if they decode as text. */
@@ -60,5 +60,3 @@ export const mimeTypes: Record<string, string> = {
 export function mimeType(path: string): string {
   return mimeTypes[extension(path)] ?? "application/octet-stream";
 }
-
-export { FileKind };

@@ -265,7 +265,7 @@ struct CommandPalette: View {
 
     /// Lower is better: prefix, word start, substring, then scattered letters.
     static func score(_ q: String, _ text: String) -> Int? {
-        FuzzyMatch.shared.score(query: q, text: text).map { Int($0.int32Value) }
+        fuzzyScore(query: q, text: text).map(Int.init)
     }
 
     private var list: some View {

@@ -5,7 +5,7 @@ import TypewrightCore
 @MainActor
 enum Invites {
     static func handles(_ url: URL) -> Bool {
-        url.scheme?.lowercased() == SpaceInvites.shared.SCHEME
+        url.scheme?.lowercased() == inviteScheme()
     }
 
     /// Asks first, since the link lets anyone holding it edit the space.
@@ -24,13 +24,13 @@ enum Invites {
             return message("Couldn't create an invite link.", "Syncing has to be running; check the Devices settings.")
         }
         NSPasteboard.general.clearContents()
-        let web = response == .alertSecondButtonReturn ? SpaceInvites.shared.webLink(link: link, webApp: SpaceInvites.shared.WEB_APP) : nil
+        let web = response == .alertSecondButtonReturn ? webInviteLink(link: link) : nil
         NSPasteboard.general.setString(web ?? link, forType: .string)
     }
 
     /// Joins the space a link invites to, after asking where its folder goes.
     static func open(_ url: URL) {
-        guard let invite = SpaceInvites.shared.parse(link: url.absoluteString) else {
+        guard let invite = parseInvite(link: url.absoluteString) else {
             return message("This invite link isn't valid.", "It may have been cut off when it was sent; ask for a new one.")
         }
         guard SyncIdentity.shared.account != nil else {

@@ -24,12 +24,11 @@ Typewright needs macOS 26 or newer. On first launch it downloads the official Ty
 
 ## Build from source
 
-Install Rust (`cargo`) and a JDK 21, then open `macApp/Typewright.xcodeproj` in Xcode and run the `Typewright` scheme.
+Install Rust (`cargo`), then open `macApp/Typewright.xcodeproj` in Xcode and run the `Typewright` scheme.
 
 For the web app, also install [Bun](https://bun.sh) and Homebrew's `llvm`, then:
 
 ```sh
-sharedKotlin/gradlew -p sharedKotlin jsBrowserProductionLibraryDistribution
 scripts/build-web-wasm.sh
 cd webApp && bun install && bun run dev
 ```

@@ -105,7 +105,7 @@ final class LiveEditing {
         if let adopted = result.adopted {
             // Another device's session was first; this device's edits since opening merge into it.
             let mine = currentText()
-            let merged = TextMerge.shared.merge3(base: adopted.base, local: mine, remote: adopted.theirs)
+            let merged = merge3(base: adopted.base, local: mine, remote: adopted.theirs)
             apply([Self.edit(from: mine, to: merged.conflicts == 0 ? merged.text : adopted.theirs)])
             sync()
             return

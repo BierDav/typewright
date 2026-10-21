@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createResource, createSignal, For, type JSX, on, onMount, Show } from "solid-js";
 import { confirm, editorView, openSpace, setOverlay, shortcut, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
-import { FuzzyMatch } from "~/lib/core";
+import { fuzzyScore } from "~/lib/core";
 import { symbolAt } from "~/lib/editor/refactor";
 import { conversions, Solveng } from "~/lib/editor/solveng";
 import * as fonts from "~/lib/fonts";
@@ -39,7 +39,7 @@ function score(query: string, item: Item): number | null {
   const texts = [item.title, ...(item.keywords ?? []), item.subtitle ?? ""].map((t) => t.toLowerCase());
   let best: number | null = null;
   for (const [i, text] of texts.entries()) {
-    const s = FuzzyMatch.score(q, text);
+    const s = fuzzyScore(q, text);
     // Keywords and subtitles count a bit less than the title.
     if (s !== null && s !== undefined) best = Math.min(best ?? Infinity, s + (i === 0 ? 0 : 1));
   }

@@ -1,0 +1,34 @@
+[package]
+name = "typewright-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+required-features = ["bindgen"]
+
+[features]
+# The Swift bindings generator, only needed on the build machine.
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+regex-lite = "0.1"
+base64 = "0.22"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uniffi = "0.32"
+
+# The web app's build (`scripts/build-web-wasm.sh`).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+tsify = { version = "0.5", default-features = false, features = ["js"] }
+
+[profile.release]
+lto = "thin"

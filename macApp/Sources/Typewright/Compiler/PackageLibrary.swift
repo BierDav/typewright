@@ -155,7 +155,7 @@ final class PackageLibrary {
             .filter { !$0.lastPathComponent.hasPrefix(".") }
         return candidates.compactMap { url in
             guard let toml = try? String(contentsOf: url.appending(path: "typst.toml"), encoding: .utf8),
-                  let manifest = PackageRepos.shared.manifest(toml: toml) else { return nil }
+                  let manifest = packageManifest(toml: toml) else { return nil }
             return (manifest.name, manifest.version, url)
         }
     }
@@ -226,7 +226,7 @@ final class PackageLibrary {
     @discardableResult
     func clone(_ input: String, into namespace: String, replacing: Bool = false) async -> Bool {
         linkError = nil
-        guard let url = PackageRepos.shared.cloneURL(input: input) else {
+        guard let url = packageCloneUrl(input: input) else {
             linkError = "“\(input)” isn't a GitHub repository. Enter owner/repo or a link to it."
             return false
         }
@@ -244,7 +244,7 @@ final class PackageLibrary {
         }
         let target: URL
         if let toml = try? String(contentsOf: repo.appending(path: "typst.toml"), encoding: .utf8) {
-            guard let manifest = PackageRepos.shared.manifest(toml: toml) else {
+            guard let manifest = packageManifest(toml: toml) else {
                 linkError = "The repository's typst.toml has no valid package name and version."
                 return false
             }

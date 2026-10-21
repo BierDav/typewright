@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - webApp/**
-      - sharedKotlin/**
+      - sharedCore/**
       - irohBridge/**
       - typstBridge/**
       - scripts/build-web-wasm.sh
@@ -28,20 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Build Kotlin core
-        run: sharedKotlin/gradlew -p sharedKotlin jsBrowserProductionLibraryDistribution
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
+            sharedCore -> ../.build/cargo-wasm
             irohBridge -> ../.build/cargo-wasm
             typstBridge -> ../.build/cargo-wasm
       - name: Find wasm-bindgen version
@@ -58,7 +51,7 @@ jobs:
           mkdir "$RUNNER_TEMP/binaryen"
           tar -xzf "$RUNNER_TEMP"/binaryen-*.tar.gz -C "$RUNNER_TEMP/binaryen" --strip-components 1
           echo "$RUNNER_TEMP/binaryen/bin" >> "$GITHUB_PATH"
-      - name: Build Rust bridges for wasm
+      - name: Build Rust core and bridges for wasm
         run: scripts/build-web-wasm.sh
 
       - uses: oven-sh/setup-bun@v2

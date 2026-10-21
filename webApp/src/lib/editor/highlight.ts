@@ -1,9 +1,9 @@
 // Typst highlighting from typst's own parser (in the worker), with code in raw blocks coloured by the
-// Kotlin core's tokenizers, like the Mac app's `Highlighter` and `InjectedLanguages`.
+// Rust core's tokenizers, like the Mac app's `Highlighter` and `InjectedLanguages`.
 import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { compiler } from "../compiler";
-import { CodeHighlight } from "../core";
+import { codeLanguage, codeTokens, rawBlockParts } from "../core";
 import { Solveng } from "./solveng";
 
 /** Typst's highlighting tags as the bridge numbers them (`HlTag`). */
@@ -32,7 +32,7 @@ const BOLD = 1;
 const ITALIC = 2;
 const MATH = 4;
 
-/** `CodeTokenKind` from the Kotlin core. */
+/** `highlight::kind` from the Rust core. */
 // Then solveng's: parameters, variables that stand out, and the = or -> showing a result, bold as in Mathcad.
 const CODE_CLASS = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit", "tw-param tw-parameter", "tw-keyword tw-evaluate"];
 
@@ -56,8 +56,8 @@ function classes(tag: number, flags: number): string {
 /** The language and body range of a raw block; solveng code is coloured with the whole document. */
 function injection(raw: string): { language: string; from: number; to: number } | null {
   if (!raw.startsWith("```")) return null;
-  const parts = CodeHighlight.rawBlock(raw);
-  const language = parts.length ? CodeHighlight.language(raw.slice(parts[0], parts[1])) : null;
+  const parts = rawBlockParts(raw);
+  const language = parts.length ? codeLanguage(raw.slice(parts[0], parts[1])) : null;
   return language && language !== Solveng.TAG ? { language, from: parts[2], to: parts[3] } : null;
 }
 
@@ -87,7 +87,7 @@ function build(text: string, runs: Uint32Array, solveng: SolvengHighlight): Deco
     const cls = classes(tag, runs[i + 2] >> 8);
     const inject = tag === RAW ? injection(text.slice(from, to)) : null;
     if (inject) {
-      const tokens = CodeHighlight.tokens(inject.language, text.slice(from + inject.from, from + inject.to));
+      const tokens = codeTokens(inject.language, text.slice(from + inject.from, from + inject.to));
       if (tokens.length) {
         // The fence keeps the raw colour; the body gets the language's.
         ranges.push({ from, to: from + inject.from, cls });

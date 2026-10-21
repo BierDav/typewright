@@ -1,19 +1,19 @@
 import Foundation
 import TypewrightCore
 
-/// How a project file is opened; the extension table lives in the Kotlin core.
+/// How a project file is opened; the extension table lives in the Rust core.
 enum FileKind: String {
     /// `document` covers office files Quick Look can show: Word, Excel, PowerPoint, Pages, Numbers, Keynote.
     case folder, typst, text, pdf, font, document, image, binary
 
     init(url: URL) {
-        self = FileKinds.shared.forExtension(ext: url.pathExtension).flatMap { FileKind(rawValue: $0.id) } ?? Self.sniff(url)
+        self = fileKindForExtension(ext: url.pathExtension).flatMap { FileKind(rawValue: $0.id()) } ?? Self.sniff(url)
     }
 
-    private var core: TypewrightCore.FileKind { TypewrightCore.FileKind.entries.first { $0.id == rawValue }! }
+    private var core: TypewrightCore.FileKind { fileKindForId(id: rawValue)! }
 
-    var isEditable: Bool { core.isEditable }
-    var isOpenable: Bool { core.isOpenable }
+    var isEditable: Bool { core.isEditable() }
+    var isOpenable: Bool { core.isOpenable() }
 
     /// Unknown extensions count as text if the first bytes are NUL-free UTF-8.
     private static func sniff(_ url: URL) -> FileKind {

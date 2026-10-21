@@ -1,34 +1,47 @@
 #!/usr/bin/env bash
-# Builds the Kotlin Multiplatform core as a static framework for Xcode's ARCHS.
-# Runs as a build phase; outputs TypewrightCore.framework into BUILT_PRODUCTS_DIR.
+# Builds the Rust core (sharedCore) for Xcode's ARCHS and compiles its UniFFI Swift bindings into the
+# TypewrightCore module. Runs as a build phase; outputs into BUILT_PRODUCTS_DIR: libtypewright_core.a (Rust),
+# libTypewrightCore.a with TypewrightCore.swiftmodule (Swift) and the TypewrightCoreFFI module they share.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 out=${BUILT_PRODUCTS_DIR:-$root/.build/core}
 archs=${ARCHS:-$(uname -m)}
-[ "${CONFIGURATION:-Debug}" = Release ] && kind=Release || kind=Debug
-# Xcode's environment confuses Kotlin/Native's toolchain lookup otherwise.
-unset SDKROOT
+export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-26.0}
+[ "${CONFIGURATION:-Debug}" = Release ] && optimize=-O || optimize=-Onone
 
-tasks=() targets=()
+BUILT_PRODUCTS_DIR=$out ARCHS=$archs "$root/scripts/build-rust-bridge.sh" sharedCore typewright_core
+export SDKROOT=$(env -u SDKROOT xcrun --sdk macosx --show-sdk-path)
+
+tmp="$root/.build/core-tmp"
+rm -rf "$tmp" && mkdir -p "$tmp/TypewrightCore.swiftmodule"
+# The generator reads uniffi.toml through cargo metadata of the current folder.
+(cd "$root/sharedCore" && cargo run --release --quiet --features bindgen --bin uniffi-bindgen \
+  --target-dir "$root/.build/cargo" -- generate --library "$out/libtypewright_core.a" --language swift --out-dir "$tmp/bindings")
+mkdir -p "$tmp/TypewrightCoreFFI"
+cp "$tmp/bindings/TypewrightCoreFFI.h" "$tmp/TypewrightCoreFFI/"
+cat > "$tmp/TypewrightCoreFFI/module.modulemap" <<'EOF'
+module TypewrightCoreFFI {
+    header "TypewrightCoreFFI.h"
+    link "typewright_core"
+    export *
+}
+EOF
+
+objects=()
 for arch in $archs; do
-  case $arch in
-    arm64) target=macosArm64 task=MacosArm64 ;;
-    x86_64) target=macosX64 task=MacosX64 ;;
-    *) echo "unsupported arch $arch" >&2; exit 1 ;;
-  esac
-  tasks+=(":link${kind}Framework$task")
-  targets+=("$target")
+  xcrun swiftc -parse-as-library -wmo -g $optimize -swift-version 5 \
+    -module-name TypewrightCore -module-link-name TypewrightCore \
+    -target "$arch-apple-macos$MACOSX_DEPLOYMENT_TARGET" -sdk "$SDKROOT" -I "$tmp/TypewrightCoreFFI" \
+    -emit-module -emit-module-path "$tmp/TypewrightCore.swiftmodule/$arch-apple-macos.swiftmodule" \
+    -emit-object -o "$tmp/TypewrightCore-$arch.o" "$tmp/bindings/TypewrightCore.swift"
+  objects+=("$tmp/TypewrightCore-$arch.o")
 done
-"$root/sharedKotlin/gradlew" -p "$root/sharedKotlin" --console=plain --quiet "${tasks[@]}"
+lipo -create "${objects[@]}" -output "$tmp/TypewrightCore.o"
+libtool -static -no_warning_for_no_symbols -o "$tmp/libTypewrightCore.a" "$tmp/TypewrightCore.o"
 
-dir=$(echo "$kind" | tr '[:upper:]' '[:lower:]')Framework
-first="$root/sharedKotlin/build/bin/${targets[0]}/$dir/TypewrightCore.framework"
-tmp="$root/.build/core-tmp/TypewrightCore.framework"
-rm -rf "$tmp" && mkdir -p "$(dirname "$tmp")" && cp -R "$first" "$tmp"
-binary=$(cd "$tmp" && realpath TypewrightCore)
-lipo -create $(for t in "${targets[@]}"; do echo "$root/sharedKotlin/build/bin/$t/$dir/TypewrightCore.framework/TypewrightCore"; done) \
-  -output "$binary"
-
-mkdir -p "$out/TypewrightCore.framework"
 # Only touch what changed, so Xcode doesn't recompile and relink every build.
-rsync -a --checksum --delete "$tmp/" "$out/TypewrightCore.framework/"
+mkdir -p "$out/TypewrightCore.swiftmodule" "$out/TypewrightCoreFFI"
+rsync -a --checksum --delete "$tmp/TypewrightCore.swiftmodule/" "$out/TypewrightCore.swiftmodule/"
+rsync -a --checksum --delete "$tmp/TypewrightCoreFFI/" "$out/TypewrightCoreFFI/"
+rsync -a --checksum "$tmp/libTypewrightCore.a" "$out/libTypewrightCore.a"

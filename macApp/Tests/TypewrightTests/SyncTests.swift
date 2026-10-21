@@ -30,7 +30,7 @@ final class SyncTests: XCTestCase {
         XCTAssertEqual(result.files["main.typ"]?.isText, true)
         let pdf = result.files["keep.pdf"]!
         XCTAssertFalse(pdf.isText)
-        XCTAssertEqual(SyncPolicy.shared.mode(isText: pdf.isText, size: pdf.size, lfsThreshold: 1_000_000), .lfs)
+        XCTAssertEqual(syncMode(isText: pdf.isText, size: pdf.size, lfsThreshold: 1_000_000), .lfs)
         XCTAssertTrue(result.ignore.isIgnored(path: "build/new.typ", isDir: false))
     }
 
@@ -155,7 +155,7 @@ final class SyncNetworkTests: XCTestCase {
         func sync() {
             guard let result = service.liveSync(root: root, path: "main.typ", text: text, selection: selection) else { return }
             if let adopted = result.adopted {
-                let merged = TextMerge.shared.merge3(base: adopted.base, local: text, remote: adopted.theirs)
+                let merged = merge3(base: adopted.base, local: text, remote: adopted.theirs)
                 text = merged.conflicts == 0 ? merged.text : adopted.theirs
                 return sync()
             }
@@ -209,7 +209,7 @@ final class SyncNetworkTests: XCTestCase {
         a.share(rootA)
 
         let link = try XCTUnwrap(a.inviteLink(for: rootA))
-        let invite = try XCTUnwrap(SpaceInvites.shared.parse(link: link))
+        let invite = try XCTUnwrap(parseInvite(link: link))
         XCTAssertEqual(invite.name, "Paper")
         XCTAssertTrue(b.elsewhere.isEmpty)
         let parentB = dir.appendingPathComponent("B", isDirectory: true)

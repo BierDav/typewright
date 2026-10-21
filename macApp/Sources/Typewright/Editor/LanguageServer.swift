@@ -106,7 +106,7 @@ struct TextEdit: Equatable {
 
     /// Applies edits that don't overlap; later ones first so earlier ranges stay valid.
     static func apply(_ edits: [TextEdit], to text: String) -> String {
-        TextEdits.shared.apply(edits: edits.map {
+        applyTextEdits(edits: edits.map {
             TypewrightCore.TextEdit(range: TextRange(location: Int32($0.range.location), length: Int32($0.range.length)),
                                     newText: $0.newText)
         }, text: text)
@@ -366,7 +366,7 @@ final class LanguageClient {
 
     /// Docs of the named argument at `offset`, like `unit` in `solve(x, unit: "min")`, which hover doesn't cover.
     func parameterDocs(in url: URL, text: NSString, at offset: Int) async -> (markdown: String, range: NSRange?)? {
-        guard let argument = Arguments.shared.namedArgument(text: text as String, offset: Int32(clamping: offset)),
+        guard let argument = namedArgument(text: text as String, offset: Int32(clamping: offset)),
               let result = await request("textDocument/signatureHelp", Self.position(url, text, offset)) as? [String: Any],
               let signatures = result["signatures"] as? [[String: Any]], !signatures.isEmpty else { return nil }
         let signature = signatures[min(result["activeSignature"] as? Int ?? 0, signatures.count - 1)]
@@ -375,7 +375,7 @@ final class LanguageClient {
         guard let parameter = parameters.first(where: { ($0["label"] as? String)?.trimmingCharacters(in: [":"]) == argument.name })
         else { return nil }
         let docs = parameter["documentation"].flatMap { ($0 as? String) ?? ($0 as? [String: Any])?["value"] as? String } ?? ""
-        let type = Arguments.shared.parameterType(signature: label, name: argument.name).map { ": \($0)" } ?? ""
+        let type = parameterType(signature: label, name: argument.name).map { ": \($0)" } ?? ""
         let range = NSRange(location: Int(argument.range.location), length: Int(argument.range.length))
         return ("```typc\n\(argument.name)\(type)\n```" + (docs.isEmpty ? "" : "\n\n" + docs), range)
     }
@@ -443,12 +443,12 @@ final class LanguageClient {
     }
 
     nonisolated static func lineAndCharacter(of offset: Int, in text: NSString) -> (Int, Int) {
-        let p = TextPositions.shared.position(offset: Int32(clamping: offset), text: text as String)
+        let p = textPosition(offset: Int32(clamping: offset), text: text as String)
         return (Int(p.line), Int(p.character))
     }
 
     nonisolated static func offset(line: Int, character: Int, in text: NSString) -> Int {
-        Int(TextPositions.shared.offset(line: Int32(clamping: line), character: Int32(clamping: character), text: text as String))
+        Int(textOffset(line: Int32(clamping: line), character: Int32(clamping: character), text: text as String))
     }
 
     private nonisolated static func range(_ json: [String: Any], in text: NSString) -> NSRange? {
