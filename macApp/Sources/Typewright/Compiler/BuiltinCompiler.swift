@@ -51,6 +51,28 @@ final class BuiltinCompiler: @unchecked Sendable {
         }
     }
 
+    /// solveng's report on `main` compiled without output, or nil if it fails; for files the preview doesn't compile.
+    func check(main: String, buffers: [String: String]) async -> String? {
+        await withCheckedContinuation { cont in
+            queue.async { [self] in
+                load(main: main, buffers: buffers)
+                let result = tw_world_compile(world, TWFormatCheck)
+                defer { tw_result_free(result) }
+                cont.resume(returning: result.data != nil ? Self.solvengReport(world) : nil)
+            }
+        }
+    }
+
+    private func load(main: String, buffers: [String: String]) {
+        tw_world_set_main(world, main)
+        for path in overlays.subtracting(buffers.keys) { tw_world_remove_overlay(world, path) }
+        for (path, text) in buffers {
+            var text = text
+            text.withUTF8 { tw_world_set_overlay(world, path, $0.baseAddress!, $0.count) }
+        }
+        overlays = Set(buffers.keys)
+    }
+
     /// Wraps the main file for HTML so text carries its font family, which typst's HTML export drops.
     private static let htmlWrapper = ".typewright-html.typ"
     private static let htmlPrelude = """
@@ -83,13 +105,7 @@ final class BuiltinCompiler: @unchecked Sendable {
             buffers[Self.htmlWrapper] = Self.htmlPrelude + "#include \"/\(quoted)\"\n"
             main = Self.htmlWrapper
         }
-        tw_world_set_main(world, main)
-        for path in overlays.subtracting(buffers.keys) { tw_world_remove_overlay(world, path) }
-        for (path, text) in buffers {
-            var text = text
-            text.withUTF8 { tw_world_set_overlay(world, path, $0.baseAddress!, $0.count) }
-        }
-        overlays = Set(buffers.keys)
+        load(main: main, buffers: buffers)
 
         let twFormat: TWFormat = switch format {
         case .pdf: TWFormatPDF
@@ -112,7 +128,8 @@ final class BuiltinCompiler: @unchecked Sendable {
             },
             log: log,
             duration: Date().timeIntervalSince(start),
-            solveng: Self.solvengReport(world)
+            // The world keeps the last report, which may be another main file's.
+            solveng: output != nil ? Self.solvengReport(world) : nil
         )
         return (compiled, output, wrapperFailed)
     }

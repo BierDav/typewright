@@ -12,6 +12,8 @@ typedef enum : uint8_t {
     TWFormatHTML = 1,
     /// Pages as SVG documents separated by NUL bytes.
     TWFormatSVG = 2,
+    /// Lays out without output, for solveng's report.
+    TWFormatCheck = 3,
 } TWFormat;
 
 typedef struct {

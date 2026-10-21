@@ -53,15 +53,16 @@ async function solvengCompletions(ctx: CompletionContext, around: string): Promi
   const result = await Solveng.complete(ctx.state.doc.toString(), around, ctx.pos).catch(() => null);
   if (!result || result.from > ctx.pos) return null;
   const type = (kind: number) =>
-    kind === Solveng.FUNCTION ? "function" : kind === Solveng.UNIT || kind === Solveng.PARAMETER ? "property" : kind === Solveng.CONSTANT || kind === Solveng.VALUE ? "constant" : "variable";
+    kind === Solveng.FUNCTION ? "function" : kind === Solveng.UNIT || kind === Solveng.PARAMETER ? "property" : kind === Solveng.CONSTANT || kind === Solveng.VALUE ? "constant" : kind === Solveng.KEYWORD ? "keyword" : "variable";
   const options = result.items.map((item, i): Completion => ({
-    label: item.label,
+    // Δ_R is found by typing Delta_R.
+    label: item.filter ?? item.label,
     displayLabel: item.label,
     type: type(item.kind),
     detail: item.detail,
     info: item.documentation,
     boost: -i / result.items.length,
-    // Units like Ω are typed as Ohm.
+    // Units like kΩ are found by typing kOmega.
     apply: item.insert.includes("$0") ? snippet(item.insert.replace("$0", "${}")) : item.insert,
   }));
   return { from: result.from, options, validFor: /^[\p{L}\p{N}_°%‰µΩ]*$/u, exclusive: result.exclusive };

@@ -8,6 +8,11 @@ enum InjectedLanguages {
         case keyword, string, comment, number, function, type, variable, annotation, `operator`, unit
     }
 
+    /// solveng's kind for a function's parameter (and what a graph plots against), beyond the shared kinds.
+    static let parameter: Int32 = 10
+    /// solveng's `=` or `->` that shows a result, set very bold as Mathcad does.
+    static let evaluate: Int32 = 11
+
     /// Bounds Markdown in Typst in Markdown …, since each level highlights its body again.
     static let maxDepth = 3
 
@@ -50,8 +55,21 @@ enum InjectedLanguages {
     /// Colours flat `(start, length, kind)` tokens relative to `location`, within `length`.
     static func color(_ tokens: [Int32], in storage: NSTextStorage, at location: Int, length: Int, font: NSFont) {
         let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
         for i in stride(from: 0, to: tokens.count - 2, by: 3) {
             let start = Int(tokens[i]), count = Int(tokens[i + 1])
+            // solveng's parameters: variables that stand out.
+            if tokens[i + 2] == parameter, start + count <= length {
+                let r = NSRange(location: location + start, length: count)
+                storage.addAttributes([.foregroundColor: Highlighter.paramColor, .font: bold], range: r)
+                continue
+            }
+            // Stroked as well, since monospaced fonts stop at bold.
+            if tokens[i + 2] == evaluate, start + count <= length {
+                let r = NSRange(location: location + start, length: count)
+                storage.addAttributes([.foregroundColor: Highlighter.keywordColor, .font: bold, .strokeWidth: -6.0], range: r)
+                continue
+            }
             guard let kind = Kind(rawValue: tokens[i + 2]), start + count <= length else { continue }
             let r = NSRange(location: location + start, length: count)
             storage.addAttribute(.foregroundColor, value: color(kind), range: r)

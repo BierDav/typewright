@@ -76,6 +76,8 @@ export class Workspace {
       solvengDiagnostics: [] as { from: number; to: number; message: string; severity: "error" | "warning" }[],
       /** solveng's report from the last compile, which says what it calculates where. */
       solvengReport: "",
+      /** solveng's report on the shown file compiled on its own, when it isn't the previewed one. */
+      solvengFileReport: null as { path: string; report: string } | null,
       packageErrors: [] as string[],
       failure: null as string | null,
       compiling: false,
@@ -136,6 +138,7 @@ export class Workspace {
     this.persist();
     this.disposers.forEach((d) => d());
     clearTimeout(this.compileTimer);
+    clearTimeout(this.checkTimer);
   }
 
   // MARK: - Files
@@ -212,6 +215,7 @@ export class Workspace {
     }
     batch(() => {
       this.setState({ selected: path, selectedKind: kind, text, solvengDiagnostics: [] });
+      this.scheduleSolvengCheck(0);
       // Opening a file inside collapsed folders shows it in the sidebar.
       const parents = ancestors(path);
       if (parents.some((p) => !this.state.expanded.includes(p))) {
@@ -402,7 +406,7 @@ export class Workspace {
 
   /**
    * The files around the shown one, for solveng: the previewed main file and what it and the shown file import or
-   * include, so a `solve-block`, `integration`, units and definitions set up elsewhere count here too.
+   * include, so a `worksheet`, `integration`, units and definitions set up elsewhere count here too.
    */
   async solvengContext(): Promise<string> {
     const file = this.state.selected;
@@ -410,6 +414,7 @@ export class Workspace {
     const references = (text: string) => Solveng.references(text).catch(() => [] as string[]);
     const own = await references(this.state.text);
     const report = this.state.solvengReport;
+    const fileReport = this.state.solvengFileReport?.path === file ? this.state.solvengFileReport.report : "";
     const key = JSON.stringify([file, this.state.preview, this.solvengRevision, own]);
     if (this.solvengCache?.key === key) return this.solvengCache.text;
     const resolve = (path: string, from: string) => {
@@ -438,9 +443,32 @@ export class Workspace {
       queue.push(...(await references(text)).map((p) => resolve(p, next)));
     }
     // The compiler's report says for sure what solveng calculates here; reading the settings is the fallback.
-    const text = Solveng.context(parts, report, file, file === this.state.preview, this.state.preview ?? "");
+    const text = Solveng.context(parts, report, file, file === this.state.preview, this.state.preview ?? "", fileReport);
     this.solvengCache = { key, text };
     return text;
+  }
+
+  private checkTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Compiles the shown file on its own for solveng's report when it isn't the previewed one; without one nothing is calculated. */
+  private scheduleSolvengCheck(delay: number) {
+    clearTimeout(this.checkTimer);
+    this.checkTimer = setTimeout(() => void this.checkSolveng(), delay);
+  }
+
+  private async checkSolveng() {
+    const file = this.state.selected;
+    if (!file || this.state.selectedKind !== "typst" || file === this.state.preview || this.closed) return;
+    const text = this.state.text;
+    // A file that never mentions solveng has nothing to report.
+    // A failed compile reports nothing and keeps the last report.
+    const report = text.includes("solve") ? (await compiler.compile(file, Format.check).catch(() => null))?.solveng || null : "";
+    if (report == null || file !== this.state.selected || this.closed) return;
+    const last = this.state.solvengFileReport;
+    if (last?.path === file && last.report === report) return;
+    this.solvengRevision++;
+    this.setState("solvengFileReport", { path: file, report });
+    void this.updateSolvengDiagnostics();
   }
 
   /** Finds solveng's problems in the shown file, like unknown units. */
@@ -538,6 +566,7 @@ export class Workspace {
   // MARK: - Compilation
 
   scheduleCompile(delay: number) {
+    this.scheduleSolvengCheck(Math.max(delay, 250));
     clearTimeout(this.compileTimer);
     this.compileTimer = setTimeout(() => void this.compile(), delay);
   }
@@ -586,7 +615,8 @@ export class Workspace {
         duration: result.duration,
         failure: !result.data && diagnostics.length === 0 ? (result.packageErrors[0] ?? "Compilation failed.") : null,
       });
-      if (result.solveng !== this.state.solvengReport) {
+      // A failed compile keeps the last report.
+      if (result.solveng && result.solveng !== this.state.solvengReport) {
         this.solvengRevision++;
         this.setState("solvengReport", result.solveng);
       }

@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SyncService.shared.restart()
         Opener.shared.restoreSession()
         Opener.shared.installSpaceShortcuts()
+        Opener.shared.installNavigationButtons()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -66,6 +67,12 @@ struct AppCommands: Commands {
         CommandGroup(after: .textEditing) {
             Button("Find in Space…") { Opener.shared.showSearch() }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
+        }
+        CommandMenu("Navigate") {
+            Button("Back") { Opener.shared.goBack() }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .control])
+            Button("Forward") { Opener.shared.goForward() }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .control])
         }
         CommandGroup(after: .toolbar) {
             Button("Command Palette…") { Opener.shared.showPalette() }

@@ -38,3 +38,7 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [profile.release]
 lto = "thin"
+
+# Local solveng while developing; replace with a tag bump above before committing.
+[patch."https://github.com/BierDav/solveng"]
+solveng-ide = { path = "../../solveng/editor/ide" }

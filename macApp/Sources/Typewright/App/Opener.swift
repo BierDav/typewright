@@ -74,6 +74,24 @@ final class Opener {
         }
     }
 
+    /// The mouse's back and forward buttons move the caret through the navigation history of the window below them.
+    func installNavigationButtons() {
+        NSEvent.addLocalMonitorForEvents(matching: .otherMouseDown) { event in
+            let handled = MainActor.assumeIsolated {
+                guard event.buttonNumber == 3 || event.buttonNumber == 4,
+                      let state = self.controllers.first(where: { $0.window === event.window })?.state,
+                      state.overlay == nil, let workspace = state.workspace else { return false }
+                if event.buttonNumber == 3 { workspace.goBack() } else { workspace.goForward() }
+                return true
+            }
+            return handled ? nil : event
+        }
+    }
+
+    func goBack() { keyState?.workspace?.goBack() }
+
+    func goForward() { keyState?.workspace?.goForward() }
+
     /// Slides to the space at `index` in the list, in the direction of its place relative to the current one.
     func switchToSpace(at index: Int, in state: WindowState) {
         let spaces = SpaceList.all

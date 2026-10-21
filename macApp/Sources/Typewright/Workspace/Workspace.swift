@@ -39,7 +39,10 @@ final class Workspace: EditorLanguage {
     var split: Double { didSet { schedulePersist() } }
     /// Folders open in the sidebar; everything else starts collapsed.
     var expanded: Set<URL> = [] { didSet { schedulePersist() } }
-    var reveal: RevealRequest?
+    var reveal: RevealRequest? {
+        // Jumps are remembered for going back, except right after a file switch, which already was.
+        didSet { if let reveal, reveal.focus, !justSelected { recordJump() } }
+    }
 
     /// Each file keeps its own format; files never previewed before use the last one picked.
     var renderMode: RenderMode {
@@ -278,6 +281,9 @@ final class Workspace: EditorLanguage {
         guard url != selectedFile else { return }
         let kind = FileKind(url: url)
         guard kind.isOpenable else { return }
+        recordJump()
+        justSelected = true
+        DispatchQueue.main.async { [weak self] in self?.justSelected = false }
         captureFileState()
         flushSaves()
         solvengContextCache = nil
@@ -300,6 +306,57 @@ final class Workspace: EditorLanguage {
         schedulePersist()
         startLive()
         updateSolvengDiagnostics()
+        scheduleSolvengCheck(delay: 0)
+    }
+
+    // MARK: - Navigation history
+
+    struct NavigationPoint: Equatable {
+        let url: URL
+        let location: Int
+    }
+
+    @ObservationIgnored private var backHistory: [NavigationPoint] = []
+    @ObservationIgnored private var forwardHistory: [NavigationPoint] = []
+    @ObservationIgnored private var isNavigating = false
+    @ObservationIgnored private var justSelected = false
+
+    private var caretPoint: NavigationPoint? {
+        guard let file = selectedFile, selectedKind?.isEditable == true else { return nil }
+        return NavigationPoint(url: file, location: selection.location)
+    }
+
+    /// Remembers where the caret was (or `location` in the shown file) before a jump, for `goBack`.
+    func recordJump(from location: Int? = nil) {
+        guard !isNavigating, var point = caretPoint else { return }
+        if let location { point = NavigationPoint(url: point.url, location: location) }
+        guard backHistory.last != point else { return }
+        backHistory.append(point)
+        if backHistory.count > 100 { backHistory.removeFirst() }
+        forwardHistory.removeAll()
+    }
+
+    /// Moves the caret to where it was before the last jump, across files; mouse button 4 and ⌃⌘←.
+    func goBack() { navigate(back: true) }
+
+    func goForward() { navigate(back: false) }
+
+    private func navigate(back: Bool) {
+        while let target = back ? backHistory.popLast() : forwardHistory.popLast() {
+            guard FileManager.default.fileExists(atPath: target.url.path) else { continue }
+            if let current = caretPoint {
+                if back { forwardHistory.append(current) } else { backHistory.append(current) }
+            }
+            isNavigating = true
+            defer { isNavigating = false }
+            select(target.url)
+            guard selectedFile == target.url else { return }
+            let source = text as NSString
+            let (line, column) = Self.lineAndColumn(of: min(target.location, source.length), in: source)
+            reveal = RevealRequest(line: line + 1, column: column + 1)
+            return
+        }
+        NSSound.beep()
     }
 
     /// Live editing covers the shown text file of a synced space; it's (re)started on selection and sync changes.
@@ -698,6 +755,7 @@ final class Workspace: EditorLanguage {
         if case .binary = CompilerManager.shared.active {
             try? newText.write(to: url, atomically: true, encoding: .utf8)
             if previewIsMarkdown { scheduleCompile(delay: 0) }
+            scheduleSolvengCheck(delay: 0.25)
             return
         }
         dirty.insert(url)
@@ -749,6 +807,7 @@ final class Workspace: EditorLanguage {
         if case .binary = CompilerManager.shared.active {
             try? new.write(to: url, atomically: true, encoding: .utf8)
             if previewIsMarkdown { scheduleCompile(delay: 0) }
+            scheduleSolvengCheck(delay: 0.25)
             return
         }
         dirty.insert(url)
@@ -855,23 +914,28 @@ final class Workspace: EditorLanguage {
             case 1: .function
             case 2, 4: .field
             case 3, 5: .constant
+            case 6: .keyword
             default: .variable
             }
             let snippet = item.insert.contains("$0")
-            return CompletionItem(label: item.label, detail: item.detail, kind: kind, filterText: item.insert.replacingOccurrences(of: "$0", with: ""),
+            return CompletionItem(label: item.label, detail: item.detail, kind: kind,
+                                  filterText: item.filter ?? item.insert.replacingOccurrences(of: "$0", with: ""),
                                   sortText: String(format: "%05d", index), newText: item.insert, isSnippet: snippet,
                                   range: range, documentation: item.documentation ?? "`\(item.label)` \(item.detail)")
         }, result.exclusive)
     }
 
     @ObservationIgnored private var solvengContextCache: (key: [String], text: String)?
-    /// solveng's report from the last built-in compile, see `tw_world_solveng`.
+    /// solveng's report from the last built-in compile of the previewed file, see `tw_world_solveng`.
     @ObservationIgnored private var solvengReport = ""
+    /// solveng's report on the shown file compiled on its own, when it isn't the previewed one.
+    @ObservationIgnored private var solvengFileReport: (file: URL, report: String)?
+    @ObservationIgnored private var solvengCheckTask: Task<Void, Never>?
     /// Counts new reports, so the editor restyles with what the compiler saw.
     private(set) var solvengRevision = 0
 
     /// The files around the shown one, for solveng: the previewed main file and what it and the shown file import
-    /// or include, so a `solve-block`, `integration`, units and definitions set up elsewhere count here too.
+    /// or include, so a `worksheet`, `integration`, units and definitions set up elsewhere count here too.
     func solvengContext() -> String {
         guard selectedKind == .typst, let file = selectedFile else { return "" }
         func references(_ text: String) -> [String] {
@@ -898,9 +962,42 @@ final class Workspace: EditorLanguage {
         }
         // The compiler's report says for sure what solveng calculates here; reading the settings is the fallback.
         let text = SolvengSupport.context(files: parts, report: solvengReport, path: relative(file) ?? "", main: file == previewFile,
-                                          mainPath: previewFile.flatMap(relative) ?? "")
+                                          mainPath: previewFile.flatMap(relative) ?? "",
+                                          fileReport: solvengFileReport?.file == file ? solvengFileReport!.report : "")
         solvengContextCache = (key, text)
         return text
+    }
+
+    /// Compiles what the preview doesn't with the built-in compiler, for solveng's reports: the shown file if it isn't
+    /// the previewed one, and the previewed file under an external compiler. Without a report nothing is calculated.
+    private func scheduleSolvengCheck(delay: TimeInterval) {
+        solvengCheckTask?.cancel()
+        solvengCheckTask = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+            guard !Task.isCancelled else { return }
+            await self?.checkSolveng()
+        }
+    }
+
+    private func checkSolveng() async {
+        guard selectedKind == .typst, let file = selectedFile else { return }
+        var changed = false
+        if let main = previewFile, main.pathExtension == "typ", CompilerManager.shared.active != .builtin, let path = relative(main),
+           let report = await builtin.check(main: path, buffers: relativeBuffers()), !Task.isCancelled, report != solvengReport {
+            solvengReport = report
+            changed = true
+        }
+        if file != previewFile, let path = relative(file) {
+            // A file that never mentions solveng has nothing to report.
+            let report = text.contains("solve") ? await builtin.check(main: path, buffers: relativeBuffers()) : ""
+            if let report, !Task.isCancelled, file == selectedFile, solvengFileReport?.file != file || solvengFileReport?.report != report {
+                solvengFileReport = (file, report)
+                changed = true
+            }
+        }
+        guard changed else { return }
+        solvengRevision += 1
+        updateSolvengDiagnostics()
     }
 
     /// Problems solveng finds in the shown file while typing, like unknown units; the compile may report them later.
@@ -1064,7 +1161,25 @@ final class Workspace: EditorLanguage {
     }
 
     func quickFixes(for diagnostic: Diagnostic) -> [QuickFix] {
-        QuickFixes.fixes(for: diagnostic, root: root)
+        QuickFixes.fixes(for: diagnostic, root: root) + quotingFixes(for: diagnostic)
+    }
+
+    /// Typst reads a word of several letters in math as a variable of its own; solveng's names and units are quoted
+    /// there (`"tews"`, `"mA"`).
+    private func quotingFixes(for diagnostic: Diagnostic) -> [QuickFix] {
+        let prefix = "unknown variable: "
+        guard diagnostic.message.hasPrefix(prefix), let file = selectedFile, diagnostic.path == relativePath(of: file),
+              text.contains(SolvengSupport.tag), let tv = find.textView else { return [] }
+        let name = String(diagnostic.message.dropFirst(prefix.count))
+        let s = text as NSString
+        guard let line = CodeEditor.lineRange(diagnostic.line, in: s) else { return [] }
+        let range = NSRange(location: line.location + max(diagnostic.column - 1, 0), length: (name as NSString).length)
+        guard NSMaxRange(range) <= s.length, s.substring(with: range) == name,
+              s.substring(to: range.location).filter({ $0 == "$" }).count % 2 == 1 else { return [] }
+        return [QuickFix(id: "solveng.quote", title: "Quote “\(name)” as a solveng name or unit", icon: "quote.opening") {
+            guard tv.string == s as String else { return }
+            tv.insertText("\"\(name)\"", replacementRange: range)
+        }]
     }
 
     func formattingEdits() async -> [TextEdit] {
@@ -1073,13 +1188,22 @@ final class Workspace: EditorLanguage {
     }
 
     func renameTarget(at offset: Int) async -> (range: NSRange, name: String)? {
-        guard let file = selectedFile, selectedKind == .typst, let client = languageClient() else { return nil }
+        guard let file = selectedFile, selectedKind == .typst else { return nil }
+        if let solveng = SolvengSupport.renameTarget(text, context: solvengContext(), offset: offset) {
+            return (NSRange(location: solveng.start, length: solveng.end - solveng.start), solveng.name)
+        }
+        guard let client = languageClient() else { return nil }
         return await client.renameTarget(in: file, text: text as NSString, at: offset)
     }
 
     /// Renames the symbol everywhere: other files are rewritten here, the shown file's edits are returned for the editor.
     func rename(at offset: Int, to name: String) async -> [TextEdit] {
-        guard let file = selectedFile, selectedKind == .typst, let client = languageClient() else { return [] }
+        guard let file = selectedFile, selectedKind == .typst else { return [] }
+        let context = solvengContext()
+        if SolvengSupport.renameTarget(text, context: context, offset: offset) != nil {
+            return renameSolveng(at: offset, to: name, context: context, in: file)
+        }
+        guard let client = languageClient() else { return [] }
         let source = text as NSString
         let changes = await client.rename(in: file, text: source, at: offset, to: name)
         var shown: [TextEdit] = []
@@ -1092,6 +1216,18 @@ final class Workspace: EditorLanguage {
         }
         if shown.isEmpty { scheduleCompile(delay: 0) }
         return shown
+    }
+
+    /// A solveng name's rename: the files around are rewritten here, the shown file's edits returned.
+    private func renameSolveng(at offset: Int, to name: String, context: String, in file: URL) -> [TextEdit] {
+        let edits = SolvengSupport.rename(text, context: context, offset: offset, to: name)
+        let edit = { (e: SolvengSupport.Edit) in TextEdit(range: NSRange(location: e.start, length: e.end - e.start), newText: e.text) }
+        for (path, group) in Dictionary(grouping: edits.filter { $0.path != nil }, by: { $0.path! }) {
+            let url = root.appendingPathComponent(path).standardizedFileURL
+            guard url != file, isInSpace(url), let old = bufferText(url) else { continue }
+            updateBuffer(url, text: TextEdit.apply(group.map(edit), to: old))
+        }
+        return edits.filter { $0.path == nil }.map(edit)
     }
 
     /// Jumps to the definition at `offset`; on the definition itself it returns the usages to pick from instead.
@@ -1211,6 +1347,7 @@ final class Workspace: EditorLanguage {
     // MARK: - Compilation
 
     func scheduleCompile(delay: TimeInterval) {
+        scheduleSolvengCheck(delay: max(delay, 0.25))
         compileTask?.cancel()
         compileTask = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
@@ -1316,9 +1453,8 @@ final class Workspace: EditorLanguage {
     private func apply(_ result: CompileResult, mode: RenderMode) {
         diagnostics = result.diagnostics
         defer { updateSolvengDiagnostics() }
-        // A failed compile keeps the last report; external compilers have none.
-        let report = result.solveng ?? (result.output != nil ? "" : solvengReport)
-        if report != solvengReport {
+        // A failed compile keeps the last report; external compilers have none, `checkSolveng` fills in.
+        if let report = result.solveng, report != solvengReport {
             solvengReport = report
             solvengRevision += 1
         }
@@ -1372,6 +1508,7 @@ final class Workspace: EditorLanguage {
         persistTask?.cancel()
         persist()
         compileTask?.cancel()
+        solvengCheckTask?.cancel()
         stopWatcher()
         exportRunner.cancel()
         if let fontObserver { NotificationCenter.default.removeObserver(fontObserver) }

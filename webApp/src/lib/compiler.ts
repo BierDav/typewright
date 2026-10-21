@@ -9,7 +9,7 @@ export type CompileOutput = {
   diagnostics: DiagnosticJSON[];
   packageErrors: string[];
   duration: number;
-  /** solveng's report from the last compile that produced a document, see the typst bridge's `solveng_report`. */
+  /** solveng's report if the compile produced a document (empty otherwise), see the typst bridge's `solveng_report`. */
   solveng: string;
 };
 
@@ -17,7 +17,8 @@ export type Completion = { kind: string; label: string; apply?: string | null; d
 export type Location = { path: string; package?: boolean; from: number; to: number } | { std: string | null };
 export type Jump = { path: string; offset: number } | { url: string } | { page: number; x: number; y: number };
 
-export const Format = { pdf: 0, html: 1, svg: 2 } as const;
+/** `check` lays out without output, for solveng's report. */
+export const Format = { pdf: 0, html: 1, svg: 2, check: 3 } as const;
 
 type Pending = { resolve: (value: any) => void; reject: (err: Error) => void; op: string };
 

@@ -88,7 +88,7 @@ enum Highlighter {
                     replacement: unichar(clamping: values[i + 2]),
                     equation: NSRange(location: Int(values[i + 3]), length: Int(values[i + 4] - values[i + 3])))
         }
-        guard text.contains(SolvengSupport.tag) || !context.isEmpty || text.contains("solve-block") else { return math }
+        guard text.contains(SolvengSupport.tag) || !context.isEmpty || text.contains("worksheet") else { return math }
         let code = SolvengSupport.conceals(text, context: context)
         let solveng = stride(from: 0, to: code.count - 4, by: 5).map { i in
             let v = { code[i + $0] }
@@ -149,9 +149,9 @@ enum Highlighter {
             if !attrs.isEmpty { storage.addAttributes(attrs, range: r) }
             if run.tag == .raw, depth < InjectedLanguages.maxDepth { injectRaw(in: storage, run: r, font: font, depth: depth) }
         }
-        // solveng colours what it calculates: its code, math and untagged code as `integration` says, and its calls' strings.
-        guard !code, text.contains(SolvengSupport.tag) || !solvengContext.isEmpty || text.contains("solve-block")
-                || text.contains("#def") || text.contains("#solve") || text.contains("#graph") || text.contains("#lambdify") else { return }
+        // solveng colours what it calculates: its code blocks, math as `integration` says, and its calls' strings.
+        guard !code, text.contains(SolvengSupport.tag) || !solvengContext.isEmpty || text.contains("worksheet")
+                || text.contains("#graph") || text.contains("#lambdify") else { return }
         guard let solveng = SolvengSupport.highlight(text, context: solvengContext) else { return }
         for i in stride(from: 0, to: solveng.plain.count - 1, by: 2) where solveng.plain[i + 1] <= range.length {
             storage.addAttributes([.font: font, .foregroundColor: NSColor.textColor],

@@ -207,7 +207,7 @@ export default function Editor(props: { workspace: Workspace }) {
   });
 
   createEffect(on(() => ws.state.selected, (path) => show(path, ws.state.text), { defer: true }));
-  createEffect(on(() => ws.state.solvengReport, () => view?.dispatch({ effects: refreshHighlights.of(null) }), { defer: true }));
+  createEffect(on(() => [ws.state.solvengReport, ws.state.solvengFileReport], () => view?.dispatch({ effects: refreshHighlights.of(null) }), { defer: true }));
 
   // The file changed outside the editor: sync, another tab or a refactoring elsewhere.
   createEffect(

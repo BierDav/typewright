@@ -124,6 +124,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         Opener.shared.closed(self)
     }
+
+    // The empty toolbar would stay as an opaque strip; it comes down with the menu bar instead.
+    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
+        proposedOptions.union([.fullScreen, .autoHideMenuBar, .autoHideToolbar])
+    }
 }
 
 struct MainWindow: View {
@@ -326,8 +331,11 @@ private struct HiddenTitleBar: NSViewRepresentable {
 
     private final class WindowView: NSView {
         private var tracking: NSTrackingArea?
-        // Lives as long as the window, like this view.
+        // Live as long as the window, like this view.
         private var frameObserver: (any NSObjectProtocol)?
+        private var fullScreenObservers: [any NSObjectProtocol] = []
+        /// Full screen shows the buttons only with the menu bar, so they keep their colors there.
+        private var isFullScreen = false
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -339,6 +347,23 @@ private struct HiddenTitleBar: NSViewRepresentable {
             window.toolbarStyle = .unified
             // The toolbar moves the buttons once it's laid out.
             DispatchQueue.main.async { [weak self] in self?.setUpTrafficLights() }
+            guard fullScreenObservers.isEmpty else { return }
+            isFullScreen = window.styleMask.contains(.fullScreen)
+            let center = NotificationCenter.default
+            fullScreenObservers = [
+                center.addObserver(forName: NSWindow.willEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.isFullScreen = true
+                        self?.setHighlighted(false, animated: false)
+                    }
+                },
+                center.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.isFullScreen = false
+                        self?.setUpTrafficLights()
+                    }
+                },
+            ]
         }
 
         private var buttons: [NSButton] {
@@ -395,8 +420,9 @@ private struct HiddenTitleBar: NSViewRepresentable {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = animated ? 0.15 : 0
                 for button in buttons {
-                    button.contentFilters = on ? [] : [grey]
-                    button.animator().alphaValue = on ? 1 : 0.45
+                    let colored = on || isFullScreen
+                    button.contentFilters = colored ? [] : [grey]
+                    button.animator().alphaValue = colored ? 1 : 0.45
                 }
             }
         }

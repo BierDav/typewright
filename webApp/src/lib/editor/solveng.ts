@@ -6,7 +6,8 @@ import { compiler } from "../compiler";
 
 export type SolvengLocation = { path?: string | null; start: number; end: number };
 
-export type SolvengItem = { label: string; kind: number; detail: string; insert: string; documentation?: string };
+/** `filter`, when set, is what typing matches instead of `insert`: `Delta_R` for `Δ_R`. */
+export type SolvengItem = { label: string; kind: number; detail: string; insert: string; documentation?: string; filter?: string };
 
 /** Offsets are UTF-16; `context` comes from `Solveng.context`. */
 export const Solveng = {
@@ -18,9 +19,13 @@ export const Solveng = {
   CONSTANT: 3,
   PARAMETER: 4,
   VALUE: 5,
-  /** The files around a document (paths relative to the space), the last compile's report, its path and whether it's the compiled file. */
-  context: (files: { path: string; text: string }[], report: string, path: string, main: boolean, mainPath = "") =>
-    JSON.stringify({ files, report, path, main, mainPath: main ? path : mainPath }),
+  KEYWORD: 6,
+  /**
+   * The files around a document (paths relative to the space), the last compile's report, its path, whether it's the
+   * compiled file, and the report of compiling it on its own, used when the compiled file doesn't reach it.
+   */
+  context: (files: { path: string; text: string }[], report: string, path: string, main: boolean, mainPath = "", fileReport = "") =>
+    JSON.stringify({ files, report, path, main, mainPath: main ? path : mainPath, fileReport }),
   /** Every solveng token as flat `(start, length, kind)` triples, and `(start, end)` pairs shown plain under them. */
   highlight: (document: string, context: string) => compiler.solveng<{ tokens: number[]; plain: number[] } | null>("highlight", document, context),
   /** `items` replace `from..<offset`; `exclusive` ones replace typst's completions. */
@@ -54,7 +59,7 @@ export const fenceClosing = EditorView.inputHandler.of((view, from, to, text) =>
 
 export type Conversion = { title: string; run: () => void };
 
-/** `#def` ⇄ math and `#solve` ⇄ solveng code at the caret; `around` is the text of the files around. */
+/** solveng math ⇄ a solveng code block at the caret; `around` is the text of the files around. */
 export async function conversions(view: EditorView, around: string): Promise<Conversion[]> {
   const text = view.state.doc.toString();
   return (await Solveng.conversions(text, around, view.state.selection.main.head)).map((c) => ({

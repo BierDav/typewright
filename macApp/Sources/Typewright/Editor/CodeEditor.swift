@@ -45,6 +45,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     }
     var onSwatchClick: ((ColorLiteral) -> Void)?
     var onDefinition: ((Int) -> Void)?
+    /// A click moved the caret far from this location, which the navigation history keeps.
+    var onJump: ((Int) -> Void)?
     var onComplete: (() -> Void)?
     /// F1: docs of the selected completion, or of the symbol at the caret.
     var onShowDocs: (() -> Void)?
@@ -147,34 +149,62 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// Sorted by location; found again while each edit is processed, before anything is laid out with stale positions.
     private(set) var conceals: [Highlighter.Conceal] = [] {
-        didSet { pieces = Self.pieces(of: conceals) }
+        didSet {
+            let (kept, pieces) = Self.pieces(of: conceals)
+            // Setting it here doesn't run didSet again.
+            if kept.count != conceals.count { conceals = kept }
+            self.pieces = pieces
+        }
     }
 
-    /// What reveals as one: a symbol, or a string with both its quotes. `box` is the part that stays visible.
+    /// What reveals as one: a symbol, a string with both its quotes, or such pieces glued by empty strings
+    /// (`Delta""Gamma`). `boxes` are the parts that stay visible.
     private struct Piece {
         let range: NSRange
-        let box: NSRange
+        let boxes: [NSRange]
     }
     private var pieces: [Piece] = []
 
-    private static func pieces(of conceals: [Highlighter.Conceal]) -> [Piece] {
-        var pieces: [Piece] = []
+    /// The pieces of `conceals`, and the conceals without empty strings that glue nothing, which show as typed.
+    private static func pieces(of conceals: [Highlighter.Conceal]) -> ([Highlighter.Conceal], [Piece]) {
+        // Single pieces first, each with its conceals.
+        var singles: [(range: NSRange, box: NSRange?, conceals: ArraySlice<Highlighter.Conceal>)] = []
         var i = 0
         while i < conceals.count {
             let c = conceals[i]
-            i += 1
             // Hidden quotes come in pairs.
-            if c.replacement == 0, i < conceals.count, conceals[i].replacement == 0, conceals[i].equation == c.equation {
-                let close = conceals[i].range
-                i += 1
-                pieces.append(Piece(range: NSRange(location: c.range.location, length: NSMaxRange(close) - c.range.location),
-                                    box: NSRange(location: NSMaxRange(c.range), length: close.location - NSMaxRange(c.range))))
+            if c.replacement == 0, i + 1 < conceals.count, conceals[i + 1].replacement == 0, conceals[i + 1].equation == c.equation {
+                let close = conceals[i + 1].range
+                let box = NSRange(location: NSMaxRange(c.range), length: close.location - NSMaxRange(c.range))
+                singles.append((NSRange(location: c.range.location, length: NSMaxRange(close) - c.range.location),
+                                box.length > 0 ? box : nil, conceals[i...(i + 1)]))
+                i += 2
             } else {
-                pieces.append(Piece(range: c.range, box: NSRange(location: c.range.location, length: c.replacement == 0 ? 0 : 1)))
+                singles.append((c.range, c.replacement == 0 ? nil : NSRange(location: c.range.location, length: 1), conceals[i...i]))
+                i += 1
             }
         }
-        return pieces
+        // Runs of pieces that touch through an empty string; one with nothing else in it isn't concealed.
+        let empty = { (k: Int) in singles[k].box == nil && singles[k].conceals.count == 2 }
+        var kept: [Highlighter.Conceal] = []
+        var pieces: [Piece] = []
+        var j = 0
+        while j < singles.count {
+            var end = j
+            while end + 1 < singles.count, NSMaxRange(singles[end].range) == singles[end + 1].range.location,
+                  empty(end) || empty(end + 1) { end += 1 }
+            let run = singles[j...end]
+            let boxes = run.compactMap(\.box)
+            if (j...end).contains(where: { !empty($0) }) {
+                kept += run.flatMap(\.conceals)
+                let start = run.first!.range.location
+                pieces.append(Piece(range: NSRange(location: start, length: NSMaxRange(run.last!.range) - start), boxes: boxes))
+            }
+            j = end + 1
+        }
+        return (kept, pieces)
     }
+
     private var storageObserver: (any NSObjectProtocol)?
     /// The conceals before the edits not yet compared, and how much those edits changed the length.
     private var pendingConceals: (old: [Highlighter.Conceal], delta: Int)?
@@ -265,16 +295,19 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         return nil
     }
 
-    /// A quiet box around each piece shown differently from its source, like IntelliJ's folded code.
+    /// A quiet outline around each piece shown differently from its source, like IntelliJ's folded code; not filled,
+    /// so it can't be taken for the selection.
     private func drawConcealBoxes(in rect: NSRect, boxes: ([NSRange]) -> [NSRect]) {
         guard concealsMath, !conceals.isEmpty, let lm = layoutManager, let container = textContainer else { return }
         let visible = lm.characterRange(forGlyphRange: lm.glyphRange(
             forBoundingRect: rect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y), in: container), actualGlyphRange: nil)
-        NSColor.secondaryLabelColor.withAlphaComponent(0.14).setFill()
-        for piece in pieces where piece.box.length > 0 && piece.range != revealedPiece
+        NSColor.tertiaryLabelColor.setStroke()
+        for piece in pieces where !piece.boxes.isEmpty && piece.range != revealedPiece
             && NSIntersectionRange(piece.range, visible).length > 0 {
-            for box in boxes([piece.box]) where box.intersects(rect) {
-                NSBezierPath(roundedRect: box.insetBy(dx: -1, dy: 1), xRadius: 3, yRadius: 3).fill()
+            for box in boxes(piece.boxes) where box.intersects(rect) {
+                let path = NSBezierPath(roundedRect: box.insetBy(dx: -0.5, dy: 1.5), xRadius: 3, yRadius: 3)
+                path.lineWidth = 1
+                path.stroke()
             }
         }
     }
@@ -728,7 +761,20 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
             onDefinition(index)
             return
         }
+        let before = selectedRange().location
         super.mouseDown(with: event)
+        if let onJump, Self.isFar(before, selectedRange().location, in: string as NSString) { onJump(before) }
+    }
+
+    /// More than a screenful apart, roughly; nearer moves aren't worth going back to.
+    private static func isFar(_ a: Int, _ b: Int, in s: NSString) -> Bool {
+        let range = NSRange(location: min(a, b, s.length), length: min(abs(a - b), max(s.length - min(a, b), 0)))
+        var lines = 0
+        s.enumerateSubstrings(in: range, options: [.byLines, .substringNotRequired]) { _, _, _, stop in
+            lines += 1
+            if lines > 20 { stop.pointee = true }
+        }
+        return lines > 20
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -912,7 +958,11 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         let sel = selectedRange()
         let trimmed = sel.length > 0 && s.character(at: NSMaxRange(sel) - 1) == 10
         let block = s.lineRange(for: trimmed ? NSRange(location: sel.location, length: sel.length - 1) : sel)
-        guard block.length > 0, up ? block.location > 0 : NSMaxRange(block) < s.length else { return NSSound.beep() }
+        // After a final break the last line is empty, a line like any other.
+        let emptyLast = s.length == 0 || s.character(at: s.length - 1) == 10
+        let isEmptyLast = { (r: NSRange) in emptyLast && r.location == s.length }
+        guard block.length > 0 || isEmptyLast(block),
+              up ? block.location > 0 : NSMaxRange(block) < s.length || (emptyLast && !isEmptyLast(block)) else { return NSSound.beep() }
         // The last line has no break of its own; borrow the one before it so both halves stay lines.
         func lines(_ r: NSRange) -> String {
             let text = s.substring(with: r)
@@ -920,7 +970,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         }
         let neighbour = s.lineRange(for: NSRange(location: up ? block.location - 1 : NSMaxRange(block), length: 0))
         let union = NSUnionRange(block, neighbour)
-        let endsWithBreak = s.substring(with: union).hasSuffix("\n")
+        let endsWithBreak = s.substring(with: union).hasSuffix("\n") && !isEmptyLast(block) && !isEmptyLast(neighbour)
         let moved = lines(block), other = lines(neighbour)
         let swapped = (up ? moved + "\n" + other : other + "\n" + moved) + (endsWithBreak ? "\n" : "")
         let shift = up ? -((other as NSString).length + 1) : (other as NSString).length + 1
@@ -1042,6 +1092,8 @@ struct CodeEditor: NSViewRepresentable {
     var solvengRevision = 0
     /// The Vim mode for the status bar, nil while Vim is off.
     var onVimModeChange: ((String?) -> Void)?
+    /// Called with where the caret was when a click moves it far, for the navigation history.
+    var onJump: ((Int) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1120,6 +1172,7 @@ struct CodeEditor: NSViewRepresentable {
         c.hover?.provider = language.map { l in { await l.hover(at: $0) } }
         c.occurrenceProvider = language.map { l in { await l.occurrences(at: $0) } }
         guard let tv = c.textView as? TypstTextView else { return }
+        tv.onJump = onJump
         tv.glidingCaret = glidingCursor
         tv.concealsMath = concealsMath && highlights
         tv.autoPairs = !autoClose ? [:] : highlights ? ["(": ")", "[": "]", "{": "}", "\"": "\"", "$": "$", "`": "`"]
@@ -1542,7 +1595,7 @@ struct CodeEditor: NSViewRepresentable {
             return fixes + solvengConversions(at: index)
         }
 
-        /// `#def` ⇄ math and `#solve` ⇄ solveng code.
+        /// solveng math ⇄ a solveng code block.
         private func solvengConversions(at index: Int) -> [QuickFix] {
             guard let tv = textView else { return [] }
             let text = tv.string

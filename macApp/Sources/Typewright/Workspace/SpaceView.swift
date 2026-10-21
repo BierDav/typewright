@@ -221,7 +221,8 @@ struct SpaceView: View {
                     language: workspace.selectedKind == .typst ? workspace : nil,
                     live: workspace.live,
                     solvengRevision: workspace.solvengRevision,
-                    onVimModeChange: { vimMode = $0 }
+                    onVimModeChange: { vimMode = $0 },
+                    onJump: workspace.recordJump(from:)
                 )
                 .overlay(alignment: .bottomTrailing) {
                     if workspace.previewFile != nil { issuesButton }

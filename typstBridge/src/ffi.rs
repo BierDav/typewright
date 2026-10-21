@@ -148,6 +148,10 @@ impl TWWorld {
                 *self.solveng.lock() = solveng_report(self, &**doc.introspector());
                 Ok(self.svg(doc))
             }),
+            TWFormat::Check => finish(typst::compile::<PagedDocument>(self), |doc| {
+                *self.solveng.lock() = solveng_report(self, &**doc.introspector());
+                Ok(Vec::new())
+            }),
         }
     }
 
@@ -208,6 +212,8 @@ pub enum TWFormat {
     Pdf = 0,
     Html = 1,
     Svg = 2,
+    /// Lays out without exporting, for solveng's report on a file the editor shows.
+    Check = 3,
 }
 
 #[repr(C)]
@@ -525,15 +531,15 @@ mod solveng_tests {
 
     #[test]
     fn reports_solveng_metadata() {
-        // What solveng's solve-block leaves for each element and block.
-        let main = r#"#show math.equation: it => it + context [#metadata((kind: "math", element: it.location(), active: true, integration: "full")) <solveng>]
+        // What solveng's worksheet leaves for each element and block.
+        let main = r#"#show math.equation: it => it + context [#metadata((kind: "math", element: it.location(), active: true, integration: "math")) <solveng>]
 #metadata((kind: "block", defined: ((name: "a", kind: "value", value: "1"),), units: ())) <solveng>
 Text $a = 1$ more."#;
         let report = unsafe { compile_report(main) };
         let element = &report["elements"][0];
         assert_eq!(element["path"], "main.typ");
         assert_eq!(element["text"], "$a = 1$");
-        assert_eq!(element["integration"], "full");
+        assert_eq!(element["integration"], "math");
         assert_eq!(element["active"], true);
         assert_eq!(element["start"], main.encode_utf16().count() - "$a = 1$ more.".encode_utf16().count());
         assert_eq!(report["defined"][0]["name"], "a");

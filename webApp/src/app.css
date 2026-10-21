@@ -1045,6 +1045,14 @@ button.issue:hover:not(:disabled) {
 .tw-param {
   color: var(--hl-param);
 }
+.tw-parameter {
+  font-weight: 600;
+}
+/* solveng's = or -> that shows a result: as bold as Mathcad's, past what the font's weights give */
+.tw-evaluate {
+  font-weight: 900;
+  -webkit-text-stroke: 0.06em currentColor;
+}
 .tw-label {
   color: var(--hl-label);
 }

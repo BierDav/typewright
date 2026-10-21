@@ -88,8 +88,11 @@ final class HoverController {
         anchor = .null
         guard let panel else { return }
         self.panel = nil
-        panel.parent?.removeChildWindow(panel)
+        let parent = panel.parent
+        parent?.removeChildWindow(panel)
         panel.orderOut(nil)
+        // A click made it key to select text; typing goes back to the editor.
+        if panel.isKeyWindow { parent?.makeKey() }
     }
 
     private func show(at point: NSPoint) async {
@@ -158,8 +161,11 @@ final class HoverController {
         })
         let host = NSHostingView(rootView: content)
         host.frame.size = host.fittingSize
+        // Takes key on a click, so its text can be selected and copied.
         let panel = HoverPanel(contentRect: NSRect(origin: .zero, size: host.frame.size),
                                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        panel.becomesKey = true
+        panel.onCancel = { [weak self] in self?.hide() }
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
@@ -211,6 +217,8 @@ final class HoverController {
 final class HoverPanel: NSPanel {
     var onEnter: (() -> Void)?
     var onExit: (() -> Void)?
+    /// Esc while it's key.
+    var onCancel: (() -> Void)?
     /// Borderless panels can't take key by default, which selecting and copying text needs.
     var becomesKey = false
     private var tracking: NSTrackingArea?
@@ -229,6 +237,7 @@ final class HoverPanel: NSPanel {
 
     override func mouseEntered(with event: NSEvent) { onEnter?() }
     override func mouseExited(with event: NSEvent) { onExit?() }
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
 }
 
 struct HoverContent: View {
@@ -412,11 +421,27 @@ private struct MarkdownView: View {
     }
 
     private static func code(_ text: String, language: String) -> AttributedString {
-        switch language {
+        // ```solveng units=bar,ü: the document's own units
+        let words = language.split(separator: " ")
+        if words.first.map(String.init) == SolvengSupport.tag {
+            let units = words.first { $0.hasPrefix("units=") }.map { $0.dropFirst(6).split(separator: ",").map(String.init) } ?? []
+            return solveng(text, units: units)
+        }
+        return switch language {
         case "typc": Highlighter.highlighted(text, code: true, size: 12)
         case "typ", "typst", "": Highlighter.highlighted(text, code: false, size: 12)
         default: AttributedString(text)
         }
+    }
+
+    /// solveng code with powers and indices written out, coloured like the editor colours it.
+    private static func solveng(_ text: String, units: [String]) -> AttributedString {
+        let pretty = SolvengSupport.pretty(text, units: units)
+        let shown = pretty?.text ?? text
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let storage = NSTextStorage(string: shown, attributes: [.font: font, .foregroundColor: NSColor.textColor])
+        InjectedLanguages.color(pretty?.tokens ?? [], in: storage, at: 0, length: storage.length, font: font)
+        return (try? AttributedString(storage, including: \.appKit)) ?? AttributedString(shown)
     }
 
     private static func inline(_ text: String) -> AttributedString {

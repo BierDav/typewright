@@ -112,6 +112,8 @@ async function obtain(spec: string): Promise<void> {
   loaded.add(spec);
 }
 
+let compiles: Promise<unknown> = Promise.resolve();
+
 async function compile(main: string, format: number) {
   compiler!.setMain(main);
   const started = performance.now();
@@ -181,8 +183,12 @@ async function handle(request: Request): Promise<unknown> {
       return c.setFonts(r.files);
     case "fontFamilies":
       return c.fontFamilies();
-    case "compile":
-      return compile(r.main, r.format);
+    case "compile": {
+      // One at a time: a compile waiting for packages would otherwise see another's main file.
+      const run = compiles.then(() => compile(r.main, r.format));
+      compiles = run.catch(() => {});
+      return run;
+    }
     case "complete":
       return JSON.parse(c.complete(r.path, r.cursor, r.explicit));
     case "tooltip":

@@ -90,9 +90,9 @@ pub(crate) fn svg_pages(cache: &Mutex<HashMap<u128, Arc<str>>>, doc: &PagedDocum
 
 #[derive(Serialize, Default)]
 struct SolvengReport {
-    /// How many `solve-block`s (and resets in them) reported; none means solveng didn't run or predates reports.
+    /// How many `worksheet`s (and resets in them) reported; none means solveng didn't run or predates reports.
     blocks: usize,
-    /// Equations and raw elements a `solve-block` saw, by their source.
+    /// Equations and raw elements a `worksheet` saw, by their source.
     elements: Vec<SolvengElement>,
     /// Everything the blocks defined, the later definition of a name winning.
     defined: Vec<SolvengValue>,
@@ -118,7 +118,7 @@ struct SolvengValue {
     value: String,
 }
 
-/// What solveng's `solve-block`s report as `<solveng>` metadata, as JSON. Each element names the equation or raw
+/// What solveng's `worksheet`s report as `<solveng>` metadata, as JSON. Each element names the equation or raw
 /// element by its location; its span leads back to the source, as clicking in the preview does.
 pub(crate) fn solveng_report(world: &dyn World, introspector: &dyn typst::introspection::Introspector) -> String {
     use typst::foundations::{Dict, Label, Selector};

@@ -18,6 +18,8 @@ enum SolvengSupport {
         /// Inserted text; `$0` marks the caret.
         let insert: String
         let documentation: String?
+        /// What typing matches when it differs from `insert`: `Delta_R` for `Δ_R`.
+        let filter: String?
     }
 
     /// `items` replace `from..<offset`; `exclusive` ones replace the language server's.
@@ -47,6 +49,21 @@ enum SolvengSupport {
         let end: Int
     }
 
+    /// Replace `start..<end` with `text`, in the document (no path) or a context file (relative to the root).
+    struct Edit: Decodable {
+        let path: String?
+        let start: Int
+        let end: Int
+        let text: String
+    }
+
+    /// A name that can be renamed, as written at `start..<end`.
+    struct RenameTarget: Decodable {
+        let start: Int
+        let end: Int
+        let name: String
+    }
+
     /// A problem solveng would report, found while typing, like an unknown unit.
     struct Problem: Decodable {
         let start: Int
@@ -56,10 +73,12 @@ enum SolvengSupport {
     }
 
     /// The context JSON the bridge reads: the files around (paths relative to the root), the last compile's report,
-    /// the document's path, whether it's the compiled file and that file's path, where scopes are followed from.
-    static func context(files: [(path: String, text: String)], report: String, path: String, main: Bool, mainPath: String = "") -> String {
+    /// the document's path, whether it's the compiled file and that file's path, where scopes are followed from, and
+    /// the report of compiling the document on its own, used when the compiled file doesn't reach it.
+    static func context(files: [(path: String, text: String)], report: String, path: String, main: Bool, mainPath: String = "",
+                        fileReport: String = "") -> String {
         let object: [String: Any] = ["files": files.map { ["path": $0.path, "text": $0.text] }, "report": report,
-                                     "path": path, "main": main, "mainPath": main ? path : mainPath]
+                                     "path": path, "main": main, "mainPath": main ? path : mainPath, "fileReport": fileReport]
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return "" }
         return String(decoding: data, as: UTF8.self)
     }
@@ -80,6 +99,15 @@ enum SolvengSupport {
 
     /// Tokens of solveng code as flat `(start, length, kind)` triples, kinds as in `InjectedLanguages.Kind`.
     static func tokens(_ code: String) -> [Int32] { decode(call("tokens", code)) ?? [] }
+
+    /// solveng code as documentation shows it (A², x₂), with its tokens as flat triples.
+    struct Pretty: Decodable {
+        let text: String
+        let tokens: [Int32]
+    }
+
+    /// `units`: the document's own, read as units after a number like the built-in ones.
+    static func pretty(_ code: String, units: [String] = []) -> Pretty? { decode(call("pretty", code, context: units.joined(separator: ","))) }
 
     /// Every solveng token of a document (calculated code and math, its calls' strings and options), and `(start, end)`
     /// pairs of calculated code and call strings, plain under them.
@@ -115,6 +143,16 @@ enum SolvengSupport {
     /// Every use of the solveng name at `offset`, its definition included.
     static func usages(_ document: String, context: String, offset: Int) -> [Location] {
         decode(call("usages", document, context: context, offset: offset)) ?? []
+    }
+
+    /// The solveng name at `offset` that `rename` renames.
+    static func renameTarget(_ document: String, context: String, offset: Int) -> RenameTarget? {
+        decode(call("renameTarget", document, context: context, offset: offset))
+    }
+
+    /// Edits renaming the solveng name at `offset` and its usages to `name`, spelled as each place needs.
+    static func rename(_ document: String, context: String, offset: Int, to name: String) -> [Edit] {
+        decode(call("rename:" + name, document, context: context, offset: offset)) ?? []
     }
 
     static func diagnostics(_ document: String, context: String) -> [Problem] {

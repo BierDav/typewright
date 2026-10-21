@@ -44,6 +44,8 @@ struct SidebarView: View {
                         .contentShape(Rectangle())
                         .gesture(WindowDragGesture())
                 }
+                // The list fills the view exactly, so the slide to and from the selector would flash scrollers.
+                .scrollIndicators(CGFloat(rows.count) * Self.rowPitch + 8 > geo.size.height ? .automatic : .never)
             }
             .safeAreaInset(edge: .top, spacing: 0) {
                 SpaceHeader(name: workspace.name, isDropTarget: dropTarget?.path == workspace.root.path,

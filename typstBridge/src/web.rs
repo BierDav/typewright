@@ -302,10 +302,13 @@ impl Compiler {
         self.world.fonts.book().families().map(|(name, _)| name.to_string()).collect()
     }
 
-    /// Compiles the main file to `format` 0 PDF, 1 HTML or 2 SVG pages separated by NUL bytes.
+    /// Compiles the main file to `format` 0 PDF, 1 HTML or 2 SVG pages separated by NUL bytes; 3 lays out without
+    /// output, for solveng's report on the file the editor shows.
     pub fn compile(&mut self, format: u8) -> CompileResult {
         self.world.time.reset();
         self.world.missing.get_mut().clear();
+        // Empty unless this compile reports, since the last report may be another main file's.
+        self.world.solveng = String::new();
         let (data, diags) = if self.world.main.is_none() {
             (None, vec![SourceDiagnostic::error(typst::syntax::Span::detached(), "no main file")])
         } else {
@@ -357,6 +360,14 @@ impl Compiler {
                     self.world.solveng = solveng_report(&self.world, &**doc.introspector());
                 }
                 (data, diags)
+            }
+            3 => {
+                let (_, diags, doc) = finish(typst::compile::<PagedDocument>(world), |_| Ok(Vec::new()));
+                // Not kept for completions, since it isn't the previewed document.
+                if let Some(doc) = doc {
+                    self.world.solveng = solveng_report(&self.world, &**doc.introspector());
+                }
+                (None, diags)
             }
             _ => {
                 let (data, diags, doc) =

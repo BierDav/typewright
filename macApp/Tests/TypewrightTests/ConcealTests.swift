@@ -41,6 +41,19 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "R = $12k?$ ok")
     }
 
+    func testEmptyStringsGlueNeighboursAndRevealWithThem() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$Delta\"\"Gamma\"\"Omega + a\"\"b$"
+        tv.setSelectedRange(NSRange(location: 21, length: 0))
+        tv.concealsMath = true
+        // An empty string next to nothing concealed stays as typed.
+        XCTAssertEqual(shown(tv), "$??? + a\"\"b$")
+        tv.setSelectedRange(NSRange(location: 10, length: 0))
+        tv.updateRevealedEquation()
+        XCTAssertEqual(shown(tv), "$Delta\"\"Gamma\"\"Omega + a\"\"b$", "all five reveal together")
+    }
+
     func testEscapesShowTheirCharacter() {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)

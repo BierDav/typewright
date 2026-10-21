@@ -2381,7 +2381,6 @@ checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 [[package]]
 name = "solveng-ide"
 version = "0.2.0"
-source = "git+https://github.com/BierDav/solveng?tag=v0.2.0#dc77bf868f0963d3a33c38667a400c6131b98a04"
 dependencies = [
  "regex",
  "serde",

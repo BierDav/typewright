@@ -10,11 +10,11 @@ final class SolvengContextTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let main = root.appendingPathComponent("main.typ")
         let chapter = chapters.appendingPathComponent("one.typ")
-        try "#import \"defaults.typ\": *\n#show: setup\n#show: solve-block\n#include \"chapters/one.typ\""
+        try "#import \"defaults.typ\": *\n#show: setup\n#show: worksheet\n#include \"chapters/one.typ\""
             .write(to: main, atomically: true, encoding: .utf8)
-        try "#let setup = solve-config.with(integration: \"full\")\n#def(\"U = 5 V\")"
+        try "#let setup = worksheet-config.with(integration: \"none\")\n#worksheet(\"U := 5 V\")"
             .write(to: root.appendingPathComponent("defaults.typ"), atomically: true, encoding: .utf8)
-        try "#import \"../loop.typ\"\nText `P = U`".write(to: chapter, atomically: true, encoding: .utf8)
+        try "#import \"../loop.typ\"\nText $P := U$".write(to: chapter, atomically: true, encoding: .utf8)
         try "#import \"chapters/one.typ\"".write(to: root.appendingPathComponent("loop.typ"), atomically: true, encoding: .utf8)
 
         let ws = Workspace(url: main)
@@ -26,9 +26,9 @@ final class SolvengContextTests: XCTestCase {
         let files = try XCTUnwrap(json["files"] as? [[String: String]])
         XCTAssertEqual(files.first?["path"], "main.typ")
         let context = files.compactMap { $0["text"] }.joined(separator: "\n")
-        XCTAssertTrue(context.contains("#show: solve-block"), "the main file")
-        XCTAssertTrue(context.contains("integration: \"full\""), "its defaults")
+        XCTAssertTrue(context.contains("#show: worksheet"), "the main file")
+        XCTAssertTrue(context.contains("integration: \"none\""), "its defaults")
         XCTAssertTrue(context.contains("#import \"chapters/one.typ\""), "the chapter's own import")
-        XCTAssertFalse(context.contains("Text `P = U`"), "not the chapter itself, despite the loop")
+        XCTAssertFalse(context.contains("Text $P := U$"), "not the chapter itself, despite the loop")
     }
 }
