@@ -14,6 +14,11 @@ export function onChange(listener: (change: Change) => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/** Announces paths written behind this module's back, like the jj repository's working-copy writes. */
+export function notify(paths: string[]) {
+  announce(paths);
+}
+
 function announce(paths: string[]) {
   const change = { paths };
   listeners.forEach((l) => l(change));

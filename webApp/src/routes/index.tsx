@@ -18,6 +18,7 @@ import { loadIdentity } from "~/lib/identity";
 import { isEditable, isPreviewable } from "~/lib/kinds";
 import { setSettings, settings } from "~/lib/settings";
 import { refreshSpaces, spaces } from "~/lib/spaces";
+import * as jj from "~/lib/jj";
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
 import type { Workspace } from "~/lib/workspace";
@@ -193,6 +194,7 @@ export default function Home() {
     try {
       await Promise.all([loadIdentity(), refreshSpaces()]);
       void syncService.restart();
+      jj.start();
       void fs.persist();
       const last = lastSpace();
       if (last && spaces.names.includes(last)) openSpace(last);

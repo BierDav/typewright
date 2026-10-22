@@ -8,7 +8,9 @@ on:
       - sharedCore/**
       - irohBridge/**
       - typstBridge/**
+      - jjBridge/**
       - scripts/build-webApp-wasm.sh
+      - scripts/build-webApp-jj.sh
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -30,13 +32,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             sharedCore -> ../.build/cargo-wasm
             irohBridge -> ../.build/cargo-wasm
             typstBridge -> ../.build/cargo-wasm
+            jjBridge -> ../.build/cargo-wasi
       - name: Find wasm-bindgen version
         id: bindgen
         run: echo "version=$(grep -m1 -o 'wasm-bindgen = "=[0-9.]*"' irohBridge/Cargo.toml | grep -o '[0-9.]*[0-9]')" >> "$GITHUB_OUTPUT"

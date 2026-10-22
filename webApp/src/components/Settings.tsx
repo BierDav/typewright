@@ -135,6 +135,31 @@ function General() {
           </Show>
         </Row>
       </Section>
+      <Section
+        title="History"
+        footer="Every space keeps a version of each file a few seconds after it changes. Older versions are kept one per day. Larger files and binary files like PDFs and images have no history and are synced whole; when two devices change one at once, both versions are kept."
+      >
+        <Row label="Keep every version for">
+          <Stepper value={settings.historySquashDays} min={1} max={365} suffix=" days" onChange={(v) => setSettings("historySquashDays", v)} />
+        </Row>
+        <Row label="Track files up to">
+          <div class="inline-field">
+            <input
+              class="text-field number"
+              type="number"
+              min="0.1"
+              step="0.5"
+              value={settings.lfsThresholdMB}
+              onChange={(e) => {
+                const value = Math.max(0.1, Number(e.currentTarget.value) || 1);
+                setSettings("lfsThresholdMB", value);
+                syncService.setLfsThreshold(value);
+              }}
+            />
+            <span>MB</span>
+          </div>
+        </Row>
+      </Section>
       <Section title="Trash" footer="Deleted files and files other devices deleted wait here.">
         <Show when={trash()?.length} fallback={<div class="form-row secondary">The trash is empty.</div>}>
           <For each={trash()!.slice(0, 100)}>
@@ -493,28 +518,6 @@ function Devices() {
               Join Shared Space…
             </button>
           </div>
-        </Section>
-        <Section
-          title="Large and Binary Files"
-          footer="Edits of the same text file on two devices are merged line by line. Larger files and binary files like PDFs and images are replaced whole instead, and when two devices change one at once both versions are kept."
-        >
-          <Row label="Merge text files up to">
-            <div class="inline-field">
-              <input
-                class="text-field number"
-                type="number"
-                min="0.1"
-                step="0.5"
-                value={settings.lfsThresholdMB}
-                onChange={(e) => {
-                  const value = Math.max(0.1, Number(e.currentTarget.value) || 1);
-                  setSettings("lfsThresholdMB", value);
-                  syncService.setLfsThreshold(value);
-                }}
-              />
-              <span>MB</span>
-            </div>
-          </Row>
         </Section>
       </Show>
     </>

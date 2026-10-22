@@ -27,7 +27,8 @@ function saveOrder(order: string[]) {
 }
 
 export async function refreshSpaces() {
-  const folders = (await fs.list(SPACES)).filter((e) => e.kind === "dir").map((e) => fs.basename(e.path));
+  // `.jj` is the history repository's own folder (see jj.ts).
+  const folders = (await fs.list(SPACES)).filter((e) => e.kind === "dir" && !fs.basename(e.path).startsWith(".")).map((e) => fs.basename(e.path));
   let order = storedOrder();
   for (const name of folders.sort((a, b) => a.localeCompare(b))) order = spaceOrderAdd(order, name);
   saveOrder(order);

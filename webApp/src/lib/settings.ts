@@ -19,8 +19,10 @@ export type Settings = {
   ignoreLibraryWarnings: boolean;
   /** Folders inside each space, relative to its root, searched for fonts. */
   spaceFontPaths: string[];
-  /** Text files up to this many megabytes merge when synced. */
+  /** Files up to this many megabytes get history and merge when synced; larger ones are LFS files, kept whole. */
   lfsThresholdMB: number;
+  /** History older than this many days keeps one version per day; 0 keeps every version. */
+  historySquashDays: number;
   /** Labels this device's cursor on other devices. */
   deviceName: string;
   sidebarVisible: boolean;
@@ -41,6 +43,7 @@ const defaults: Settings = {
   ignoreLibraryWarnings: false,
   spaceFontPaths: ["./fonts"],
   lfsThresholdMB: 1,
+  historySquashDays: 30,
   deviceName: defaultDeviceName(),
   sidebarVisible: true,
   spacesVisible: true,
