@@ -191,6 +191,9 @@ struct SidebarView: View {
         }
         items.append(.divider)
         items.append(.init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) })
+        if SpaceList.isInRepository(workspace.root) {
+            items.append(.init("Link to…", "link") { Opener.shared.link(node.url) })
+        }
         items.append(.init("Copy Absolute Path", "doc.on.doc") { copyPath(node.url) })
         items.append(.init("Copy Relative Path", "doc.on.doc") {
             copyPath(String(node.url.path.dropFirst(workspace.root.path.count + 1)))
@@ -208,6 +211,7 @@ struct SidebarView: View {
             .init("Rename Space…", "pencil", action: rename),
             .init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([workspace.root]) },
             .init("Copy Path", "doc.on.doc") { copyPath(workspace.root) },
+        ] + (SpaceList.isInRepository(workspace.root) ? [.init("Link to…", "link") { Opener.shared.link(workspace.root) }] : []) + [
             .divider,
             .init("Open in New Window", "macwindow.badge.plus") { Opener.shared.openInNewWindow(workspace.root) },
             .init("Close Space", "xmark") { Opener.shared.closeSpace() },

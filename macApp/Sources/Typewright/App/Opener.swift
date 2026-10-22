@@ -11,20 +11,51 @@ final class Opener {
 
     /// Focuses the window showing `url`, else loads it into an empty window, else opens a new one.
     func open(_ url: URL) {
-        let url = url.standardizedFileURL
-        if focus(url) { return }
+        let (url, file) = Self.resolve(url)
+        if focus(url) {
+            if let file { controllers.first { $0.state.workspace?.root == url }?.state.workspace?.select(file) }
+            return
+        }
         let empty = controllers.filter { $0.state.space == nil }
         if let target = empty.first(where: { $0.window?.isKeyWindow == true }) ?? empty.first {
+            target.state.pendingFile = file
             target.state.space = url
             target.showWindow(nil)
         } else {
-            show(MainWindowController(space: url))
+            let controller = MainWindowController(space: url)
+            controller.state.pendingFile = file
+            show(controller)
         }
     }
 
     /// Switches `state`'s window to `url`; other windows may show the same space.
     func open(_ url: URL, in state: WindowState) {
-        state.space = url.standardizedFileURL
+        let (url, file) = Self.resolve(url)
+        state.pendingFile = file
+        state.space = url
+    }
+
+    /// Links and items inside repository spaces lead to the space itself, showing the file.
+    private static func resolve(_ url: URL) -> (space: URL, file: URL?) {
+        guard let found = SpaceList.repositorySpace(of: url) else { return (url.standardizedFileURL, nil) }
+        var isDir: ObjCBool = false
+        let file = found.item.flatMap { FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDir) && !isDir.boolValue ? $0 : nil }
+        return (found.space, file)
+    }
+
+    /// Finder and the Open panel: folders outside the repository are imported first; single files open in place.
+    func openFromOutside(_ url: URL, in state: WindowState? = nil) {
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+        let known = SpaceList.all.contains { $0.path == url.resolvingSymlinksInPath().path }
+        guard exists, isDir.boolValue, !known, !SpaceList.isInRepository(url) else {
+            if let state { open(url, in: state) } else { open(url) }
+            return
+        }
+        Task {
+            guard let space = await importSpace(url) else { return }
+            if let state { open(space, in: state) } else { open(space) }
+        }
     }
 
     /// A new window on `space`, showing `file` when given.
@@ -185,7 +216,7 @@ final class Opener {
         state.overlay = .search(allSpaces: nil)
     }
 
-    private var keyState: WindowState? {
+    var keyState: WindowState? {
         state(for: NSApp.keyWindow)
     }
 
@@ -201,7 +232,10 @@ final class Opener {
         guard controllers.isEmpty else { return }
         let paths = UserDefaults.standard.stringArray(forKey: Self.sessionKey) ?? []
         let urls = paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
-        if urls.isEmpty { newWindow() } else { urls.forEach { show(MainWindowController(space: $0)) } }
+        if urls.isEmpty { newWindow() } else {
+            // Imported folders left links behind; open their copies.
+            urls.forEach { show(MainWindowController(space: Self.resolve($0).space)) }
+        }
     }
 
     func saveSession() {
@@ -220,6 +254,10 @@ final class Opener {
 
     var isTerminating = false
 
+    func flushAllSaves() {
+        controllers.forEach { $0.state.workspace?.flushSaves() }
+    }
+
     private func show(_ controller: MainWindowController) {
         // Offset from the front window, so the new one doesn't hide exactly behind it.
         if let front = controllers.first(where: { $0.window?.isKeyWindow == true })?.window ?? controllers.last?.window,
@@ -232,19 +270,126 @@ final class Opener {
         saveSession()
     }
 
-    /// Asks for a space folder; the panel's New Folder button covers creating one.
+    /// Asks for a folder to import as a space.
     func openPanel(in state: WindowState? = nil) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        panel.prompt = "Link"
-        panel.message = "Choose a folder to link as a space"
+        panel.prompt = "Import"
+        panel.message = "Choose a folder to import as a space"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard SpaceList.repositorySpace(of: url) == nil else {
+            if let state { open(url, in: state) } else { open(url) }
+            return
+        }
+        Task {
+            guard let space = await importSpace(url) else { return }
+            if let state { open(space, in: state) } else { open(space) }
+        }
+    }
+
+    /// A new, empty space folder in the repository, at the end of the list.
+    @discardableResult
+    func newSpace(named name: String = "Untitled Space") -> URL? {
+        do {
+            let url = try SpaceFolders.create(named: name, in: SpaceList.repository)
+            SpaceList.add(url)
+            return url
+        } catch {
+            NSAlert(error: error).runModal()
+            return nil
+        }
+    }
+
+    /// "New Space" from the menu and palette: makes one and shows it.
+    func newSpace(in state: WindowState?, named name: String = "Untitled Space") {
+        guard let url = newSpace(named: name) else { return }
         if let state { open(url, in: state) } else { open(url) }
     }
 
-    /// Renames a space's folder on disk; every window showing it, its saved state and its sync follow along.
+    /// Copies a folder into the repository, asking whether a link replaces the original. Returns the new space.
+    func importSpace(_ source: URL, replace: Bool? = nil) async -> URL? {
+        let source = source.standardizedFileURL
+        var replace = replace
+        if replace == nil {
+            let alert = NSAlert()
+            alert.messageText = "Import “\(source.lastPathComponent)” into Typewright?"
+            alert.informativeText = "Typewright copies the folder into its spaces, where every change is kept in its history. "
+                + "A link to the copy can take the original's place, so you still find it where it was; the original goes to the Trash."
+            alert.addButton(withTitle: "Import and Replace With Link")
+            alert.addButton(withTitle: "Import and Keep Original")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: replace = true
+            case .alertSecondButtonReturn: replace = false
+            default: return nil
+            }
+        }
+        let windows = windows(showing: source.resolvingSymlinksInPath())
+        windows.forEach { $0.state.workspace?.flushSaves() }
+        let root = SpaceList.repository
+        let link = replace ?? false
+        let result = await Task.detached { Result(catching: { try SpaceFolders.importFolder(source, into: root, replace: link) }) }.value
+        switch result {
+        case .failure(let error):
+            NSAlert(error: error).runModal()
+            return nil
+        case .success(let target):
+            if link { SpaceLinks.shared.record(source, to: target) }
+            relocate(windows, from: source.resolvingSymlinksInPath(), to: target)
+            // Keeps the space where it was in the list.
+            SpaceList.replace(source, with: target)
+            return target
+        }
+    }
+
+    /// Moves a repository space to the Trash; links to it go too.
+    func trash(space url: URL) {
+        let url = url.standardizedFileURL
+        let alert = NSAlert()
+        alert.messageText = "Move “\(url.lastPathComponent)” to the Trash?"
+        alert.informativeText = "Its files go to the Trash, where you can still get them back."
+        if SyncService.shared.isSynced(url) { alert.informativeText += " This Mac stops syncing it; your other devices keep it." }
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let windows = windows(showing: url)
+        windows.forEach { $0.state.workspace?.flushSaves() }
+        SyncService.shared.stopSyncing(url)
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        windows.forEach { $0.state.space = nil }
+        SpaceLinks.shared.removed(url)
+        SpaceList.remove(url)
+    }
+
+    /// Asks where to put a link to a space or an item in one, ~/Documents first.
+    func link(_ item: URL) {
+        let panel = NSSavePanel()
+        panel.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        panel.nameFieldStringValue = item.lastPathComponent
+        panel.canCreateDirectories = true
+        panel.prompt = "Link"
+        panel.message = "Choose where to put a link to “\(item.lastPathComponent)”"
+        guard panel.runModal() == .OK, let location = panel.url else { return }
+        do {
+            // The panel already asked whether to replace an existing item.
+            if FileManager.default.fileExists(atPath: location.path) || SpaceFolders.isLink(location) {
+                try FileManager.default.trashItem(at: location, resultingItemURL: nil)
+            }
+            try SpaceLinks.shared.create(to: item, at: location)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    /// Renames a space's folder on disk; every window showing it, its saved state, its links and its sync follow along.
     @discardableResult
     func rename(space old: URL, to name: String) -> URL? {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -260,10 +405,7 @@ final class Opener {
             alert.runModal()
             return nil
         }
-        let windows = controllers.filter { controller in
-            let root = controller.state.workspace?.root ?? controller.state.space.map(Workspace.root)
-            return root?.standardizedFileURL.path == old.path
-        }
+        let windows = windows(showing: old)
         windows.forEach { $0.state.workspace?.flushSaves() }
         do {
             try FileManager.default.moveItem(at: old, to: target)
@@ -271,35 +413,88 @@ final class Opener {
             NSAlert(error: error).runModal()
             return nil
         }
+        SpaceLinks.shared.moved(from: old, to: target)
+        relocate(windows, from: old, to: target)
+        SpaceList.replace(old, with: target)
+        return target
+    }
+
+    private func windows(showing root: URL) -> [MainWindowController] {
+        let path = root.standardizedFileURL.path
+        return controllers.filter { controller in
+            let root = controller.state.workspace?.root ?? controller.state.space.map(Workspace.root)
+            return root?.standardizedFileURL.path == path || root?.resolvingSymlinksInPath().path == path
+        }
+    }
+
+    /// Points windows, saved state and sync at a space's new folder.
+    private func relocate(_ windows: [MainWindowController], from old: URL, to target: URL) {
         // Persist under the old key first so the saved state moves along.
         windows.forEach { $0.state.workspace?.close() }
         SpaceStore.move(from: old, to: target)
-        SpaceList.replace(old, with: target)
         SyncService.shared.moved(from: old, to: target)
         for window in windows {
             // A window opened on a file inside the space keeps that file.
             let space = window.state.space?.standardizedFileURL
-            if let space, space.path.hasPrefix(old.path + "/") {
-                window.state.space = URL(fileURLWithPath: target.path + space.path.dropFirst(old.path.count))
+            let base = window.state.workspace?.root.path ?? old.path
+            if let space, space.path.hasPrefix(base + "/") {
+                window.state.space = URL(fileURLWithPath: target.path + space.path.dropFirst(base.count))
             } else {
                 window.state.space = target
             }
         }
-        return target
     }
 }
 
-/// The user's spaces in their chosen order.
+/// The user's spaces in their chosen order: the repository's folders, plus folders elsewhere left as they were.
 enum SpaceList {
     // Named before projects became spaces; kept so the list survives.
     private static let key = "recentProjects"
 
+    /// Where the spaces live; the same as `SpaceRepository.shared.root`, without opening the repository.
+    static let repository = SpaceRepository.defaultRoot.standardizedFileURL
+
     static var all: [URL] {
+        order(stored: stored, repository: SpaceFolders.spaces(in: repository))
+    }
+
+    /// Stored entries that still exist (older ones may be files or links), then repository folders not stored yet.
+    static func order(stored: [String], repository: [URL]) -> [URL] {
         var seen = Set<String>()
-        return (UserDefaults.standard.stringArray(forKey: key) ?? [])
-            // Older entries may be files; their folder is the space.
+        let known = stored
             .map { Workspace.root(of: URL(fileURLWithPath: $0)).resolvingSymlinksInPath() }
             .filter { FileManager.default.fileExists(atPath: $0.path) && seen.insert($0.path).inserted }
+        return known + repository.filter { seen.insert($0.resolvingSymlinksInPath().path).inserted }
+    }
+
+    /// Whether `url` lies in the repository, so it has history and saves quickly.
+    static func isInRepository(_ url: URL) -> Bool {
+        url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(repository.resolvingSymlinksInPath().path + "/")
+    }
+
+    /// The repository space holding `url` (through links too), with the file or folder inside it if any.
+    static func repositorySpace(of url: URL) -> (space: URL, item: URL?)? {
+        let resolved = url.resolvingSymlinksInPath().standardizedFileURL
+        let base = repository.resolvingSymlinksInPath().path
+        guard resolved.path.hasPrefix(base + "/") else { return nil }
+        let parts = resolved.path.dropFirst(base.count + 1).split(separator: "/")
+        guard let first = parts.first else { return nil }
+        let space = repository.appendingPathComponent(String(first), isDirectory: true).standardizedFileURL
+        return (space, parts.count > 1 ? resolved : nil)
+    }
+
+    /// Where a space is, for its row: the folders linking to it, or its folder outside the repository.
+    @MainActor static func subtitle(of url: URL) -> String {
+        func short(_ url: URL) -> String { url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
+        let path: String
+        if isInRepository(url) {
+            let links = SpaceLinks.shared.links(to: url)
+            path = links.isEmpty ? "Typewright" : links.map { short($0.url.deletingLastPathComponent()) }.joined(separator: ", ")
+        } else {
+            path = short(url.deletingLastPathComponent())
+        }
+        guard let branch = branch(of: url) else { return path }
+        return "\(path) · \(branch)"
     }
 
     private static var stored: [String] {
@@ -314,13 +509,20 @@ enum SpaceList {
 
     /// Moves a space to `index` in `all`; missing folders keep their entries for when they return.
     static func move(_ url: URL, to index: Int) {
-        stored = spaceOrderMove(stored: stored, visible: all.map(\.path), path: url.path, index: Int32(clamping: index))
+        let visible = all.map(\.path)
+        // Repository folders not stored yet join the stored order first, so they can be placed.
+        let current = visible.reduce(stored) { spaceOrderAdd(stored: $0, path: $1) }
+        stored = spaceOrderMove(stored: current, visible: visible, path: url.path, index: Int32(clamping: index))
     }
 
-    /// Swaps a renamed space in place, keeping its position.
+    /// Swaps a renamed or imported space in place, keeping its position.
     static func replace(_ old: URL, with new: URL) {
-        stored = spaceOrderReplace(stored: stored, old: old.resolvingSymlinksInPath().path,
-                                    new: new.resolvingSymlinksInPath().path)
+        let new = new.resolvingSymlinksInPath().path
+        // An imported folder's old path now leads to the copy, so match it as typed too.
+        for path in Set([old.standardizedFileURL.path, old.resolvingSymlinksInPath().path]) {
+            stored = spaceOrderReplace(stored: stored, old: path, new: new)
+        }
+        if !stored.contains(new) { add(URL(fileURLWithPath: new)) }
     }
 
     /// Drops every entry that leads to the space, like a file inside it or a symlinked spelling of its path.

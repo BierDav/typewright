@@ -295,7 +295,12 @@ private struct SpacesPane: View {
                             withAnimation(.smooth(duration: 0.2)) { onChange() }
                         }
                     } onForget: {
-                        forget(url)
+                        if SpaceList.isInRepository(url) {
+                            Opener.shared.trash(space: url)
+                            withAnimation(.smooth(duration: 0.3)) { onChange() }
+                        } else {
+                            forget(url)
+                        }
                     } onToggleSync: {
                         toggleSync(url)
                     } onRemoveEverywhere: {
@@ -321,7 +326,7 @@ private struct SpacesPane: View {
                         .padding(.horizontal, 10)
                         .frame(height: 34)
                 }
-                LinkFolderRow { Opener.shared.openPanel(in: state) }
+                NewSpaceRow { Opener.shared.newSpace(in: state) } onImport: { Opener.shared.openPanel(in: state) }
                     .offset(y: externalDrop == nil ? 0 : Self.pitch)
                 if !sync.elsewhere.isEmpty {
                     Text("On Other Devices")
@@ -410,6 +415,20 @@ private struct SpacesPane: View {
         externalDrop = nil
         var index = index(at: location)
         for url in urls {
+            var isDir: ObjCBool = false
+            let known = SpaceList.all.contains { $0.path == url.resolvingSymlinksInPath().path }
+            if !known, !SpaceList.isInRepository(url), FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+               isDir.boolValue {
+                // Outside folders become spaces by importing them, at the drop position.
+                let at = index
+                Task {
+                    guard let space = await Opener.shared.importSpace(url) else { return }
+                    SpaceList.move(space, to: at)
+                    withAnimation(.smooth(duration: 0.25)) { onChange() }
+                }
+                index += 1
+                continue
+            }
             let root = Workspace.root(of: url).resolvingSymlinksInPath()
             // Known spaces before the drop point shift the position by one when they move.
             if let from = SpaceList.all.firstIndex(where: { $0.path == root.path }), from < index { index -= 1 }
@@ -599,7 +618,17 @@ private struct SpaceRow: View {
                 Button("Copy Invite Link…", action: onInvite)
             }
             Divider()
-            Button("Forget Space", action: onForget)
+            if inRepository {
+                Button("Link to…") { Opener.shared.link(url) }
+                Divider()
+                Button("Move to Trash…", action: onForget)
+            } else {
+                Button("Import Into Typewright…") {
+                    Task { await Opener.shared.importSpace(url) }
+                }
+                Divider()
+                Button("Forget Space", action: onForget)
+            }
         }
         .help("Drag to reorder")
     }
@@ -610,23 +639,22 @@ private struct SpaceRow: View {
         return hovered ? 0.06 : 0
     }
 
-    private var subtitle: String {
-        let path = url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
-        guard let branch = SpaceList.branch(of: url) else { return path }
-        return "\(path) · \(branch)"
-    }
+    private var inRepository: Bool { SpaceList.isInRepository(url) }
+
+    private var subtitle: String { SpaceList.subtitle(of: url) }
 }
 
 /// Like Zen's "New Tab" row: a quiet plus at the end of the list.
-private struct LinkFolderRow: View {
+private struct NewSpaceRow: View {
     let action: () -> Void
+    let onImport: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: "plus").frame(width: 16)
-                Text("Link Folder as Space…")
+                Text("New Space")
                 Spacer(minLength: 0)
             }
             .font(.system(size: 13))
@@ -639,7 +667,8 @@ private struct LinkFolderRow: View {
         .buttonStyle(ZenRowPressStyle())
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
-        .help("Link a folder as a space")
+        .contextMenu { Button("Import Folder as Space…", action: onImport) }
+        .help("Make a new space")
     }
 }
 

@@ -412,8 +412,12 @@ struct CommandPalette: View {
         items += fontItems
         items += settingsItems
         items += [
-            PaletteItem(id: "spaces.open", title: "Link Folder as Space…", icon: "folder.badge.plus", shortcut: keys.openSpace.display,
-                        section: "Spaces", action: .run { Opener.shared.openPanel(in: state) }),
+            PaletteItem(id: "spaces.new", title: "New Space", icon: "plus.square", section: "Spaces",
+                        keywords: ["create space", "new folder"],
+                        action: .run { DispatchQueue.main.async { Opener.shared.newSpace(in: state) } }),
+            PaletteItem(id: "spaces.open", title: "Import Folder as Space…", icon: "folder.badge.plus", shortcut: keys.openSpace.display,
+                        section: "Spaces", keywords: ["open folder", "link folder"],
+                        action: .run { Opener.shared.openPanel(in: state) }),
             PaletteItem(id: "spaces.search", title: "Search All Spaces", icon: "magnifyingglass", section: "Spaces",
                         action: .run { DispatchQueue.main.async { state.overlay = .search(allSpaces: true) } }),
             PaletteItem(id: "app.settings", title: "Settings…", icon: "gearshape", shortcut: keys.settings.display, section: "App",
@@ -506,6 +510,12 @@ struct CommandPalette: View {
                                  }))))
         items.append(PaletteItem(id: "space.finder", title: "Reveal \(ws.name) in Finder", icon: "folder", section: "Space",
                                  action: .run { NSWorkspace.shared.activateFileViewerSelecting([ws.root]) }))
+        if SpaceList.isInRepository(ws.root) {
+            // The save panel waits until the palette is gone.
+            items.append(PaletteItem(id: "space.link", title: "Link \(ws.name) to…", icon: "link", section: "Space",
+                                     keywords: ["symlink", "alias", "shortcut"],
+                                     action: .run { DispatchQueue.main.async { Opener.shared.link(ws.root) } }))
+        }
         if SyncService.shared.isSynced(ws.root) {
             // The confirmation alert waits until the palette is gone.
             items.append(PaletteItem(id: "space.invite", title: "Copy Invite Link to \(ws.name)…", icon: "person.badge.plus", section: "Space",
