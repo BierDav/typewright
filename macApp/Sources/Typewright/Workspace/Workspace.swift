@@ -2,6 +2,7 @@ import AppKit
 import Observation
 import PDFKit
 import TypewrightCore
+import UniformTypeIdentifiers
 
 struct FileNode: Identifiable, Hashable {
     let url: URL
@@ -49,6 +50,7 @@ final class Workspace: EditorLanguage {
     /// Each file keeps its own format; files never previewed before use the last one picked.
     var renderMode: RenderMode {
         didSet {
+            if renderMode == .svg { renderMode = .pdf }
             // Switching files brings their format along; `setPreview` does the rest.
             guard !isFollowingFile else { return }
             UserDefaults.standard.set(renderMode.rawValue, forKey: "renderMode")
@@ -58,9 +60,7 @@ final class Workspace: EditorLanguage {
             schedulePersist()
             // Output from the last time a format was shown is stale; it would flash an older document.
             html = nil
-            svgPages = nil
             htmlPreview.clear()
-            svgPreview.clear()
             restorePreviews(for: previewFile)
             invalidateCompile()
             scheduleCompile(delay: 0)
@@ -68,7 +68,6 @@ final class Workspace: EditorLanguage {
     }
     private(set) var document: PDFDocument?
     private(set) var html: String?
-    private(set) var svgPages: [String]?
     /// The previewed Markdown file as HTML.
     private(set) var markdownHTML: String?
     private(set) var diagnostics: [Diagnostic] = []
@@ -81,7 +80,6 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored let find = FindModel()
     @ObservationIgnored let preview = PreviewController()
     @ObservationIgnored let htmlPreview = HTMLPreviewController()
-    @ObservationIgnored let svgPreview = SVGPreviewController()
     @ObservationIgnored let markdownPreview = HTMLPreviewController(markdown: true)
     /// Shows a selected PDF file instead of the compiled document.
     @ObservationIgnored let filePreview = PreviewController()
@@ -95,7 +93,7 @@ final class Workspace: EditorLanguage {
     /// Edits not yet on disk, for searches that read files.
     var unsavedBuffers: [URL: String] { buffers.filter { dirty.contains($0.key) || $0.key == selectedFile } }
     private var compileTask: Task<Void, Never>?
-    /// Bumped when the previewed file or format changes, so in-flight results are dropped.
+    /// Bumped on new work so an old preview never interrupts newer edits.
     private var generation = 0
     private var compileRunning = false
     private var compileQueued = false
@@ -124,7 +122,7 @@ final class Workspace: EditorLanguage {
         let isDir = root == url
         builtin = BuiltinCompiler(root: root)
         live = LiveEditing(root: root)
-        renderMode = UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf
+        renderMode = UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init)?.migrated ?? .pdf
 
         let saved = session?.state ?? SpaceStore.state(for: root)
         let state = saved ?? SpaceState()
@@ -213,9 +211,8 @@ final class Workspace: EditorLanguage {
     var hasOutput: Bool {
         if previewIsMarkdown { return markdownHTML != nil }
         return switch renderMode {
-        case .pdf: document != nil
+        case .pdf, .svg: document != nil
         case .html: html != nil
-        case .svg: svgPages != nil
         }
     }
 
@@ -404,11 +401,9 @@ final class Workspace: EditorLanguage {
         if fontFolders != fontDirs { updateFonts() }
         document = nil
         html = nil
-        svgPages = nil
         markdownHTML = nil
         preview.clear()
         htmlPreview.clear()
-        svgPreview.clear()
         markdownPreview.clear()
         failureLog = nil
         diagnostics = []
@@ -461,15 +456,9 @@ final class Workspace: EditorLanguage {
         }
         // Only a preview that already shows this file's output, and isn't about to jump elsewhere, knows where it is.
         switch mode ?? renderMode {
-        case .pdf:
+        case .pdf, .svg:
             guard document != nil, preview.view.document === document, preview.pendingPosition == nil,
                   let shown = preview.position() else { return }
-            position.page = shown.page
-            position.zoom = shown.zoom
-            position.pan = shown.pan
-        case .svg:
-            guard svgPages != nil, svgPreview.pendingRestore == nil else { return }
-            let shown = svgPreview.position()
             position.page = shown.page
             position.zoom = shown.zoom
             position.pan = shown.pan
@@ -490,7 +479,7 @@ final class Workspace: EditorLanguage {
     /// Takes on the format the previewed file was last shown in.
     private func followPreviewMode() {
         guard let file = previewFile, !previewIsMarkdown else { return }
-        let mode = positions[file]?.mode ?? UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf
+        let mode = (positions[file]?.mode ?? UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf).migrated
         guard mode != renderMode else { return }
         isFollowingFile = true
         renderMode = mode
@@ -504,7 +493,6 @@ final class Workspace: EditorLanguage {
         preview.pendingRestore = nil
         preview.pendingPosition = position
         htmlPreview.pendingRestore = position
-        svgPreview.pendingRestore = position
         markdownPreview.pendingRestore = position
     }
 
@@ -635,6 +623,46 @@ final class Workspace: EditorLanguage {
         reloadTree()
         if imported.count == 1, let file = imported.first, !file.isDir { select(file.url) }
         schedulePersist()
+    }
+
+    /// Saves images on the pasteboard next to the shown Typst or Markdown file and returns the text that shows them.
+    /// Text on the pasteboard wins over a picture, except for copied image files.
+    func pasteImage(from pasteboard: NSPasteboard) -> String? {
+        guard let file = selectedFile else { return nil }
+        let markdown = MarkdownRenderer.isMarkdown(file)
+        guard markdown || selectedKind == .typst else { return nil }
+        let dir = file.deletingLastPathComponent()
+        let fm = FileManager.default
+        var saved: [URL] = []
+        let files = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+            .filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
+        if !files.isEmpty {
+            for url in files {
+                let target = Self.unique(in: dir, name: url.deletingPathExtension().lastPathComponent, ext: url.pathExtension)
+                do { try fm.copyItem(at: url, to: target); saved.append(target) } catch { NSAlert(error: error).runModal() }
+            }
+        } else if pasteboard.string(forType: .string) == nil, let (data, ext) = Self.imageData(on: pasteboard) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+            let target = Self.unique(in: dir, name: "image-\(formatter.string(from: Date()))", ext: ext)
+            do { try data.write(to: target); saved.append(target) } catch { NSAlert(error: error).runModal() }
+        }
+        guard !saved.isEmpty else { return nil }
+        reloadTree()
+        return saved.map { url in
+            let name = url.lastPathComponent
+            if markdown { return "![](\(name.contains(" ") ? "<\(name)>" : name))" }
+            return "#image(\"\(name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\")"
+        }.joined(separator: "\n")
+    }
+
+    /// PNG and JPEG are written as they are; everything else (screenshots arrive as TIFF) becomes PNG.
+    private static func imageData(on pasteboard: NSPasteboard) -> (Data, String)? {
+        if let png = pasteboard.data(forType: .png) { return (png, "png") }
+        if let jpeg = pasteboard.data(forType: NSPasteboard.PasteboardType(UTType.jpeg.identifier)) { return (jpeg, "jpg") }
+        guard let image = NSImage(pasteboard: pasteboard), let tiff = image.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return nil }
+        return (png, "png")
     }
 
     /// Moves a file or folder to the Trash and drops everything that pointed into it.
@@ -789,8 +817,8 @@ final class Workspace: EditorLanguage {
         }
         dirty.insert(url)
         scheduleAutosave()
-        // HTML skips layout and SVG only swaps changed pages, so both keep up with every keystroke.
-        scheduleCompile(delay: renderMode == .pdf && !previewIsMarkdown && !live ? 0.25 : 0)
+        // Incremental PDF pages and HTML both update without waiting for an idle pause.
+        scheduleCompile(delay: 0)
     }
 
     /// Edits only reach disk every 30 s and on file, window or app switches; the built-in compiler reads the buffers.
@@ -841,7 +869,7 @@ final class Workspace: EditorLanguage {
         }
         dirty.insert(url)
         scheduleAutosave()
-        scheduleCompile(delay: renderMode == .pdf && !previewIsMarkdown && !live ? 0.25 : 0)
+        scheduleCompile(delay: 0)
     }
 
     // MARK: - Other windows
@@ -1385,6 +1413,7 @@ final class Workspace: EditorLanguage {
     // MARK: - Compilation
 
     func scheduleCompile(delay: TimeInterval) {
+        invalidateCompile()
         scheduleSolvengCheck(delay: max(delay, 0.25))
         compileTask?.cancel()
         compileTask = Task { [weak self] in
@@ -1429,7 +1458,7 @@ final class Workspace: EditorLanguage {
             flushSaves()
             guard renderMode != .svg else {
                 stopWatcher()
-                failureLog = "The SVG preview needs the built-in compiler. Choose it in Settings, or render as PDF."
+                failureLog = "The incremental preview needs the built-in compiler. Choose it in Settings, or render as PDF."
                 return
             }
             startWatcher(binary: binary, main: previewFile)
@@ -1451,7 +1480,7 @@ final class Workspace: EditorLanguage {
         let current = generation
         let mode = renderMode
         isCompiling = true
-        let result = await builtin.compile(main: rel, buffers: relativeBuffers(), format: mode)
+        let result = await builtin.compile(main: rel, buffers: relativeBuffers(), format: mode, incremental: true)
         isCompiling = false
         guard current == generation else { return }
         apply(result, mode: mode)
@@ -1504,18 +1533,20 @@ final class Workspace: EditorLanguage {
         failureLog = result.output == nil && result.diagnostics.isEmpty && !result.log.isEmpty ? result.log : nil
         guard let data = result.output else { return }
         switch mode {
-        case .pdf:
-            if let doc = PDFDocument(data: data) { document = doc }
+        case .pdf, .svg:
+            if let pages = result.previewPages {
+                preview.showPages(pages)
+                document = preview.view.document
+            } else if let doc = PDFDocument(data: data) { document = doc }
         case .html:
             html = String(decoding: data, as: UTF8.self)
-        case .svg:
-            svgPages = data.split(separator: 0, omittingEmptySubsequences: false).map { String(decoding: $0, as: UTF8.self) }
         }
     }
 
     /// Writes a PDF of the main file, compiling one if the preview isn't a PDF.
     func exportPDF(to url: URL) async -> String? {
-        if renderMode == .pdf, let document, !isCompiling, !diagnostics.contains(where: { $0.severity == .error }) {
+        if renderMode == .pdf, CompilerManager.shared.active != .builtin, let document,
+           !isCompiling, !diagnostics.contains(where: { $0.severity == .error }) {
             return document.write(to: url) ? nil : "Could not write \(url.lastPathComponent)."
         }
         guard let previewFile, let compiler = CompilerManager.shared.active else { return "No compiler available." }

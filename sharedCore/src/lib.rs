@@ -4,11 +4,14 @@
 uniffi::setup_scaffolding!();
 
 pub mod arguments;
+pub mod brackets;
+pub mod comments;
 pub mod diagnostics;
 pub mod files;
 pub mod highlight;
 pub mod ignore;
 pub mod invites;
+pub mod line_editing;
 pub mod merge;
 pub mod packages;
 pub mod references;

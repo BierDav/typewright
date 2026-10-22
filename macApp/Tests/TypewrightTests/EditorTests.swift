@@ -4,6 +4,45 @@ import XCTest
 @testable import Typewright
 
 final class EditorTests: XCTestCase {
+    @MainActor func testBracketMatchingIgnoresParsedComments() {
+        let source = "#grid(\n  // Convert index to a) b) c) etc.\n  [content],\n)" as NSString
+        let close = source.length - 1
+        XCTAssertEqual(CodeEditor.Coordinator.matchingBrackets(at: 6, in: source),
+                       [NSRange(location: 5, length: 1), NSRange(location: close, length: 1)])
+        XCTAssertEqual(CodeEditor.Coordinator.matchingBrackets(at: close + 1, in: source),
+                       [NSRange(location: close, length: 1), NSRange(location: 5, length: 1)])
+        let commented = source.range(of: "a)").location + 1
+        XCTAssertTrue(CodeEditor.Coordinator.matchingBrackets(at: commented, in: source).isEmpty)
+        let block = "#let x = (/* ) /* ( */ } */ 1)" as NSString
+        XCTAssertEqual(CodeEditor.Coordinator.matchingBrackets(at: 10, in: block),
+                       [NSRange(location: 9, length: 1), NSRange(location: block.length - 1, length: 1)])
+        let url = "#let url = \"https://example.com\"; (1)" as NSString
+        XCTAssertEqual(CodeEditor.Coordinator.matchingBrackets(at: url.length, in: url),
+                       [NSRange(location: url.length - 1, length: 1), NSRange(location: url.length - 3, length: 1)])
+    }
+
+    @MainActor func testDocumentEditingPerformance() throws {
+        guard let path = ProcessInfo.processInfo.environment["TYPEWRIGHT_PERF_DOCUMENT"] else {
+            throw XCTSkip("Set TYPEWRIGHT_PERF_DOCUMENT to profile a local document")
+        }
+        let source = try String(contentsOfFile: path, encoding: .utf8)
+        let view = TypstTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 800))
+        view.string = source
+        view.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        view.concealsMath = true
+        let coordinator = CodeEditor.Coordinator()
+        coordinator.textView = view
+        coordinator.font = view.font
+        view.delegate = coordinator
+        coordinator.style(view.textStorage!)
+        for _ in 0..<5 {
+            let start = Date()
+            view.insertText("x", replacementRange: NSRange(location: 0, length: 0))
+            view.layoutManager?.ensureLayout(for: view.textContainer!)
+            print("Editor insertion and layout: \(Date().timeIntervalSince(start)) s")
+        }
+    }
+
     func testFindsColorLiterals() {
         let text = "#set text(fill: rgb(\"#FF4136\")); #box(fill: rgb(10, 20, 30, 50%)) luma(40%) and red text, stroke: blue"
         let found = ColorLiteral.find(in: text)
@@ -247,6 +286,45 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(tv.selectedRange().location, 6)
         tv.toggleBlockComment()
         XCTAssertEqual(tv.string, "a\n  bc\nd")
+    }
+
+    @MainActor func testUncommentsTheEnclosingMultilineBlock() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.comments = .typst
+        let original = "before\n/* first\n\n  middle\nlast */\nafter"
+        let expected = "before\n first\n\n  middle\nlast \nafter"
+        for token in ["first", "\n\n", "middle", "last", "*/"] {
+            tv.string = original
+            let caret = (original as NSString).range(of: token).location
+            tv.setSelectedRange(NSRange(location: caret, length: 0))
+            tv.toggleBlockComment()
+            XCTAssertEqual(tv.string, expected)
+            XCTAssertEqual(tv.selectedRange(), NSRange(location: min(caret - 2, (expected as NSString).range(of: "\nafter").location), length: 0))
+        }
+        tv.string = original
+        let selection = (original as NSString).range(of: "middle")
+        tv.setSelectedRange(selection)
+        tv.toggleBlockComment()
+        XCTAssertEqual(tv.string, expected)
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: selection.location - 2, length: selection.length))
+    }
+
+    @MainActor func testUncommentsOnlyTheContainingBlock() {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.comments = .typst
+        tv.string = "/*outer\n/*inner*/\nend*//*other*/"
+        tv.setSelectedRange((tv.string as NSString).range(of: "inner"))
+        tv.toggleBlockComment()
+        XCTAssertEqual(tv.string, "/*outer\ninner\nend*//*other*/")
+        tv.string = "/*first*//*second*/"
+        tv.setSelectedRange((tv.string as NSString).range(of: "second"))
+        tv.toggleBlockComment()
+        XCTAssertEqual(tv.string, "/*first*/second")
+        tv.comments = .markdown
+        tv.string = "before\n<!--\nparagraph\n-->\nafter"
+        tv.setSelectedRange((tv.string as NSString).range(of: "paragraph"))
+        tv.toggleBlockComment()
+        XCTAssertEqual(tv.string, "before\n\nparagraph\n\nafter")
     }
 
     func testDuplicatesAndDeletesLines() {

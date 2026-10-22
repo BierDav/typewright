@@ -1,6 +1,7 @@
 import AppKit
+import TypewrightCore
 
-/// Several carets or selections edited at once: ⌥-drag selects a column, ⌃⇧-click adds a caret, ⌃⇧↑ and ⌃⇧↓ add
+/// Several carets or selections edited at once: ⌥-drag selects a column, ⌥⇧-click toggles a caret, ⌃⇧↑ and ⌃⇧↓ add
 /// one on the line above or below, like Xcode. In column selection mode (⇧⌘8, like IntelliJ) a plain drag selects a
 /// column and ⇧↑ and ⇧↓ add lines to it. A column started past the end of its line puts carets at the end of shorter lines.
 extension TypstTextView {
@@ -131,7 +132,7 @@ extension TypstTextView {
         }
     }
 
-    /// Adds a caret where a ⌃⇧-click lands, or takes away the one there.
+    /// Adds a caret where a ⌥⇧-click lands, or takes away the one there.
     func toggleCaret(at index: Int) {
         var carets = isColumnMode ? columnCarets : [ColumnCaret(anchor: selectedRange().location, head: NSMaxRange(selectedRange()))]
         if let hit = carets.firstIndex(where: { $0.range.length == 0 && $0.head == index }), carets.count > 1 {
@@ -312,6 +313,48 @@ extension TypstTextView {
         return below.location + min(column, end - below.location)
     }
 
+    var currentCarets: [ColumnCaret] {
+        isColumnMode ? columnCarets : [ColumnCaret(anchor: selectedRange().location, head: NSMaxRange(selectedRange()))]
+    }
+
+    var hasOnlyInsertionPoints: Bool { currentCarets.allSatisfy { $0.range.length == 0 } }
+
+    func applyLineChange(_ change: LineChange, action: String) {
+        let primary = isColumnMode ? primaryColumn : 0
+        let edit = change.edit
+        if edit.range.length > 0 || !edit.newText.isEmpty {
+            let range = NSRange(location: Int(edit.range.location), length: Int(edit.range.length))
+            breakUndoCoalescing()
+            guard shouldChangeText(in: range, replacementString: edit.newText) else { return }
+            isUpdatingColumns = true
+            replaceCharacters(in: range, with: edit.newText)
+            isUpdatingColumns = false
+            didChangeText()
+            undoManager?.setActionName(action)
+        }
+        setColumns(change.selections.map { ColumnCaret(anchor: Int($0.anchor), head: Int($0.head)) }, primary: primary)
+    }
+
+    func copyCurrentRows(selectRows: Bool = true) {
+        let offsets = currentCarets.map { Int32($0.head) }
+        let primary = selectedRange().location
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(copyCurrentLines(offsets: offsets, text: string), forType: .string)
+        if selectRows {
+            let rows = currentLineSelections(offsets: offsets, text: string).map {
+                ColumnCaret(anchor: Int($0.anchor), head: Int($0.head))
+            }
+            let main = rows.firstIndex { NSLocationInRange(primary, $0.range) || $0.anchor == primary } ?? rows.count - 1
+            setColumns(rows, primary: main)
+        }
+    }
+
+    func cutCurrentRows() {
+        let change = cutCurrentLines(offsets: currentCarets.map { Int32($0.head) }, text: string)
+        copyCurrentRows(selectRows: false)
+        applyLineChange(change, action: "Cut")
+    }
+
     // MARK: Pasteboard
 
     /// Each selection's text on a line of its own.
@@ -333,23 +376,31 @@ extension TypstTextView {
 
     // MARK: Drawing
 
-    /// Every column selection, including the primary one, as rounded boxes that join along the column.
-    func drawColumnSelections(in rect: NSRect) {
-        guard isColumnMode, let lm = layoutManager, let container = textContainer else { return }
-        let length = (string as NSString).length
-        let origin = textContainerOrigin
-        var boxes: [NSRect] = []
-        for caret in columnCarets where caret.range.length > 0 && NSMaxRange(caret.range) <= length {
-            let glyphs = lm.glyphRange(forCharacterRange: caret.range, actualCharacterRange: nil)
-            lm.enumerateEnclosingRects(forGlyphRange: glyphs, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                                       in: container) { box, _ in
-                let shifted = box.offsetBy(dx: origin.x, dy: origin.y)
-                boxes.append(shifted)
-            }
-        }
+    func drawSelections(in rect: NSRect) {
+        let ranges = isColumnMode ? columnCarets.map(\.range) : selectedRanges.map(\.rangeValue)
+        let boxes = ranges.flatMap { selectionBoxes(for: $0) }
         guard !boxes.isEmpty else { return }
         selectionColor.setFill()
         selectionPath(for: boxes).fill()
+    }
+
+    func selectionBoxes(for range: NSRange) -> [NSRect] {
+        guard let lm = layoutManager, let container = textContainer, range.length > 0,
+              range.location != NSNotFound, NSMaxRange(range) <= (string as NSString).length else { return [] }
+        let origin = textContainerOrigin
+        let glyphs = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var boxes: [NSRect] = []
+        lm.enumerateLineFragments(forGlyphRange: glyphs) { _, used, _, lineGlyphs, _ in
+            let selected = NSIntersectionRange(glyphs, lineGlyphs)
+            lm.enumerateEnclosingRects(forGlyphRange: selected, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                                       in: container) { box, _ in
+                // Newlines otherwise fill the space to the wrap guide; empty lines keep a small mark.
+                let end = max(used.maxX - container.lineFragmentPadding, box.minX + 2)
+                let clipped = NSRect(x: box.minX, y: box.minY, width: min(box.maxX, end) - box.minX, height: box.height)
+                boxes.append(clipped.offsetBy(dx: origin.x, dy: origin.y))
+            }
+        }
+        return boxes
     }
 
     /// Round the joined outline, including inward corners where neighboring lines are wider.

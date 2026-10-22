@@ -85,7 +85,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     // MARK: Column selection
 
-    /// The fill of selections; a column selection draws rounded boxes of its own.
+    /// The fill of rounded selections.
     var selectionColor = NSColor.gray.withAlphaComponent(0.3) {
         didSet { updateSelectionBackground() }
     }
@@ -106,13 +106,13 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         didSet { if columnSelectionMode != oldValue { window?.invalidateCursorRects(for: self) } }
     }
 
-    /// While columns draw their own boxes, the text view's rectangular selection background steps aside.
     private func updateSelectionBackground() {
-        let color = isColumnMode ? NSColor.clear : selectionColor
-        guard (selectedTextAttributes[.backgroundColor] as? NSColor) != color else { return }
-        var attributes = selectedTextAttributes
-        attributes[.backgroundColor] = color
-        selectedTextAttributes = attributes
+        // AppKit's rectangular fill would cover the rounded corners.
+        if (selectedTextAttributes[.backgroundColor] as? NSColor) != .clear {
+            var attributes = selectedTextAttributes
+            attributes[.backgroundColor] = NSColor.clear
+            selectedTextAttributes = attributes
+        }
         needsDisplay = true
     }
 
@@ -130,6 +130,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
                 return NSValue(range: NSRange(location: start, length: max(0, end - start)))
             } : ranges
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        updateSelectionBackground()
         if !isUpdatingColumns { updateRevealedEquation() }
     }
 
@@ -144,17 +145,32 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     override func copy(_ sender: Any?) {
+        if hasOnlyInsertionPoints { return copyCurrentRows() }
         if isColumnMode { copyColumns() } else { super.copy(sender) }
     }
 
     override func cut(_ sender: Any?) {
+        guard isEditable else { return }
+        if hasOnlyInsertionPoints { return cutCurrentRows() }
         guard isColumnMode else { return super.cut(sender) }
         copyColumns()
         replaceInColumns(columnCarets.map { ($0.range, "") }, action: "Cut")
     }
 
+    /// Saves pasted images next to the shown file and returns the text that shows them; nil pastes as usual.
+    var onPasteImage: ((NSPasteboard) -> String?)?
+
     override func paste(_ sender: Any?) {
-        if isColumnMode { pasteInColumns() } else { super.paste(sender) }
+        if isColumnMode { return pasteInColumns() }
+        if let onPasteImage, let reference = onPasteImage(.general) {
+            let range = selectedRange()
+            // A `#` typed just before keeps the call from getting two.
+            let text = range.location > 0 && (string as NSString).character(at: range.location - 1) == 35 && reference.hasPrefix("#")
+                ? String(reference.dropFirst()) : reference
+            let end = NSRange(location: range.location + (text as NSString).length, length: 0)
+            return replace(range, with: text, select: end, action: "Paste")
+        }
+        super.paste(sender)
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
@@ -931,7 +947,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
-        drawColumnSelections(in: rect)
+        drawSelections(in: rect)
         if let x = guideX, x < bounds.maxX {
             let active = isDraggingGuide || guideHovered
             (active ? NSColor.controlAccentColor.withAlphaComponent(0.7) : NSColor.separatorColor).setFill()
@@ -1051,6 +1067,14 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         }
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let hit = super.hitTest(point) { return hit }
+        // AppKit excludes the area beyond a fixed-width text container.
+        guard wrapColumn > 0, !isHiddenOrHasHiddenAncestor, let superview,
+              bounds.contains(convert(point, from: superview)) else { return nil }
+        return self
+    }
+
     override func mouseDown(with event: NSEvent) {
         onDismissHover?()
         let point = convert(event.locationInWindow, from: nil)
@@ -1063,7 +1087,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         if event.clickCount == 1, modifiers == .option || columnSelectionMode && modifiers.isEmpty {
             return dragColumns(from: event)
         }
-        if event.clickCount == 1, modifiers == [.control, .shift] {
+        if event.clickCount == 1, modifiers == [.option, .shift] || modifiers == [.control, .shift] {
             window?.makeFirstResponder(self)
             return toggleCaret(at: characterIndexForInsertion(at: point))
         }
@@ -1165,6 +1189,11 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(undo(_:)) { return onUndo != nil && isRenaming || undoManager?.canUndo == true }
         if item.action == #selector(redo(_:)) { return onRedo != nil && isRenaming || undoManager?.canRedo == true }
+        if item.action == #selector(copy(_:)) { return isSelectable }
+        if item.action == #selector(cut(_:)) { return isEditable && !string.isEmpty }
+        // A plain text view doesn't read images, so Paste would stay disabled for them.
+        if item.action == #selector(paste(_:)), isEditable, onPasteImage != nil,
+           NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil) { return true }
         return super.validateMenuItem(item)
     }
 
@@ -1295,28 +1324,9 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// Swaps the lines the selection touches with the line above or below; the selection moves along.
     func moveLines(up: Bool) {
-        let s = string as NSString
-        let sel = selectedRange()
-        let trimmed = sel.length > 0 && s.character(at: NSMaxRange(sel) - 1) == 10
-        let block = s.lineRange(for: trimmed ? NSRange(location: sel.location, length: sel.length - 1) : sel)
-        // After a final break the last line is empty, a line like any other.
-        let emptyLast = s.length == 0 || s.character(at: s.length - 1) == 10
-        let isEmptyLast = { (r: NSRange) in emptyLast && r.location == s.length }
-        guard block.length > 0 || isEmptyLast(block),
-              up ? block.location > 0 : NSMaxRange(block) < s.length || (emptyLast && !isEmptyLast(block)) else { return NSSound.beep() }
-        // The last line has no break of its own; borrow the one before it so both halves stay lines.
-        func lines(_ r: NSRange) -> String {
-            let text = s.substring(with: r)
-            return text.hasSuffix("\n") ? String(text.dropLast()) : text
-        }
-        let neighbour = s.lineRange(for: NSRange(location: up ? block.location - 1 : NSMaxRange(block), length: 0))
-        let union = NSUnionRange(block, neighbour)
-        let endsWithBreak = s.substring(with: union).hasSuffix("\n") && !isEmptyLast(block) && !isEmptyLast(neighbour)
-        let moved = lines(block), other = lines(neighbour)
-        let swapped = (up ? moved + "\n" + other : other + "\n" + moved) + (endsWithBreak ? "\n" : "")
-        let shift = up ? -((other as NSString).length + 1) : (other as NSString).length + 1
-        replace(union, with: swapped, select: NSRange(location: sel.location + shift, length: sel.length),
-                action: up ? "Move Line Up" : "Move Line Down")
+        let selections = currentCarets.map { LineSelection(anchor: Int32($0.anchor), head: Int32($0.head)) }
+        applyLineChange(moveSelectedLines(selections: selections, up: up, text: string),
+                        action: up ? "Move Line Up" : "Move Line Down")
     }
 
     /// Deletes the lines the selection touches, keeping the caret's column on the next line.
@@ -1408,6 +1418,18 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         let suffix = comments.blockSuffix
         let prefixLength = (prefix as NSString).length
         let suffixLength = (suffix as NSString).length
+        let regions = prefix == "/*" ? Highlighter.runs(in: string).filter { $0.tag == .comment }.map(\.range)
+            : [NSRange(location: 0, length: s.length)]
+        if let enclosing = enclosingBlockComment(
+            selection: TypewrightCore.TextRange(location: Int32(selection.location), length: Int32(selection.length)),
+            text: string, prefix: prefix, suffix: suffix,
+            regions: regions.map { TypewrightCore.TextRange(location: Int32($0.location), length: Int32($0.length)) }
+        ) {
+            let block = NSRange(location: Int(enclosing.location), length: Int(enclosing.length))
+            return applyCommentEdits([CommentEdit(at: block.location, remove: prefixLength, insert: ""),
+                                      CommentEdit(at: NSMaxRange(block) - suffixLength, remove: suffixLength, insert: "")],
+                                     in: block, action: "Uncomment Block")
+        }
 
         if selection.length > 0 {
             let text = s.substring(with: selection) as NSString
@@ -1640,6 +1662,8 @@ struct CodeEditor: NSViewRepresentable {
     var onVimModeChange: ((String?) -> Void)?
     /// Called with where the caret was when a click moves it far, for the navigation history.
     var onJump: ((Int) -> Void)?
+    /// Saves pasted images and returns the text that shows them; nil pastes them as usual.
+    var onPasteImage: ((NSPasteboard) -> String?)?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1666,7 +1690,7 @@ struct CodeEditor: NSViewRepresentable {
         tv.backgroundColor = .textBackgroundColor
         tv.insertionPointColor = .labelColor
         // Neutral selection instead of the system accent.
-        tv.selectedTextAttributes = [.backgroundColor: tv.selectionColor]
+        tv.selectedTextAttributes = [.backgroundColor: NSColor.clear]
         tv.delegate = context.coordinator
 
         let scroll = NSScrollView()
@@ -1722,6 +1746,7 @@ struct CodeEditor: NSViewRepresentable {
         c.occurrenceProvider = language.map { l in { await l.occurrences(at: $0) } }
         guard let tv = c.textView as? TypstTextView else { return }
         tv.onJump = onJump
+        tv.onPasteImage = onPasteImage
         tv.comments = comments
         tv.glidingCaret = glidingCursor
         tv.concealsMath = concealsMath && highlights
@@ -2079,12 +2104,26 @@ struct CodeEditor: NSViewRepresentable {
             report()
         }
 
+        private var bracketSource: NSString?
+        private var bracketComments: [NSRange] = []
+
         /// Matches the bracket at the caret right away and asks the server for the symbol's uses after a pause.
         private func updateHighlights() {
             guard let tv = textView as? TypstTextView else { return }
             let selection = tv.selectedRange()
             let s = tv.string as NSString
-            tv.brackets = highlights && selection.length == 0 ? Self.matchingBrackets(at: selection.location, in: s) : []
+            let nextToBracket = [selection.location - 1, selection.location].contains { index in
+                index >= 0 && index < s.length && [34, 40, 41, 91, 93, 123, 125].contains(Int(s.character(at: index)))
+            }
+            if highlights && selection.length == 0 && nextToBracket {
+                if bracketSource != s {
+                    bracketSource = s
+                    bracketComments = Highlighter.runs(in: tv.string).filter { $0.tag == .comment }.map(\.range)
+                }
+                tv.brackets = Self.matchingBrackets(at: selection.location, in: s, comments: bracketComments)
+            } else {
+                tv.brackets = []
+            }
             occurrenceTask?.cancel()
             if !tv.occurrences.contains(where: { NSLocationInRange(selection.location, $0) || NSMaxRange($0) == selection.location }) {
                 tv.occurrences = []
@@ -2101,49 +2140,12 @@ struct CodeEditor: NSViewRepresentable {
             }
         }
 
-        private static let pairs: [unichar: (partner: unichar, forward: Bool)] = [
-            40: (41, true), 41: (40, false), 91: (93, true), 93: (91, false), 123: (125, true), 125: (123, false),
-        ]
-
-        /// The bracket or quote before or after the caret and the one it pairs with.
-        static func matchingBrackets(at caret: Int, in s: NSString) -> [NSRange] {
-            for index in [caret - 1, caret] where index >= 0 && index < s.length {
-                let c = s.character(at: index)
-                if c == 34, let partner = matchingQuote(at: index, in: s) {
-                    return [NSRange(location: index, length: 1), NSRange(location: partner, length: 1)]
-                }
-                guard let pair = pairs[c] else { continue }
-                var depth = 0
-                var i = index
-                // Bounded so huge files stay responsive.
-                for _ in 0..<50_000 {
-                    i += pair.forward ? 1 : -1
-                    guard i >= 0, i < s.length else { break }
-                    let x = s.character(at: i)
-                    if x == c { depth += 1 }
-                    if x == pair.partner {
-                        if depth == 0 { return [NSRange(location: index, length: 1), NSRange(location: i, length: 1)] }
-                        depth -= 1
-                    }
-                }
-            }
-            return []
-        }
-
-        /// Quotes pair up in order along their line, skipping escaped ones.
-        private static func matchingQuote(at index: Int, in s: NSString) -> Int? {
-            let line = s.lineRange(for: NSRange(location: index, length: 0))
-            var quotes: [Int] = []
-            var i = line.location
-            while i < NSMaxRange(line) {
-                let c = s.character(at: i)
-                if c == 92 { i += 2; continue }
-                if c == 34 { quotes.append(i) }
-                i += 1
-            }
-            guard let k = quotes.firstIndex(of: index) else { return nil }
-            let partner = k % 2 == 0 ? k + 1 : k - 1
-            return quotes.indices.contains(partner) ? quotes[partner] : nil
+        /// The bracket or quote next to the caret, excluding comments from Typst's parser.
+        static func matchingBrackets(at caret: Int, in s: NSString, comments: [NSRange]? = nil) -> [NSRange] {
+            let comments = comments ?? Highlighter.runs(in: s as String).filter { $0.tag == .comment }.map(\.range)
+            return TypewrightCore.matchingBrackets(caret: Int32(caret), text: s as String, comments: comments.map {
+                TypewrightCore.TextRange(location: Int32($0.location), length: Int32($0.length))
+            }).map { NSRange(location: Int($0.location), length: Int($0.length)) }
         }
 
         // MARK: - Quick fixes

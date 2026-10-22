@@ -176,13 +176,21 @@ final class LanguageClient {
     private var nextID = 0
     private var pending: [Int: CheckedContinuation<Any?, Never>] = [:]
     /// Messages wait here until the server answered `initialize`.
-    private var outbox: [Data] = []
+    private var outbox: [(data: Data, document: String?)] = []
+    private var writer: LanguageServerWriter!
     private var ready = false
     private var versions: [URL: Int] = [:]
     private(set) var isRunning = false
     private var resolvesCompletions = false
 
     init?(binary: URL, root: URL, fontPaths: [String]) {
+        writer = LanguageServerWriter(handle: input.fileHandleForWriting) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.process.isRunning { self.process.terminate() }
+                self.terminated()
+            }
+        }
         process.executableURL = binary
         process.arguments = ["lsp"]
         process.currentDirectoryURL = root
@@ -228,21 +236,24 @@ final class LanguageClient {
             let result = await request("initialize", params, force: true) as? [String: Any]
             let capabilities = result?["capabilities"] as? [String: Any]
             resolvesCompletions = (capabilities?["completionProvider"] as? [String: Any])?["resolveProvider"] as? Bool ?? false
+            guard isRunning else { return }
             ready = true
             write(["jsonrpc": "2.0", "method": "initialized", "params": [String: Any]()])
-            outbox.forEach(send)
+            outbox.forEach { writer.send($0.data, document: $0.document) }
             outbox.removeAll()
         }
     }
 
     func stop() {
         guard isRunning else { return }
+        // The timeout must also run when the server never answers shutdown.
+        Task { [process] in
+            try? await Task.sleep(for: .seconds(1))
+            if process.isRunning { process.terminate() }
+        }
         Task {
             _ = await request("shutdown", nil)
             notify("exit", nil)
-            // A server that hangs on shutdown still goes.
-            try? await Task.sleep(for: .seconds(1))
-            if process.isRunning { process.terminate() }
         }
     }
 
@@ -495,11 +506,22 @@ final class LanguageClient {
         guard isRunning, let body = try? JSONSerialization.data(withJSONObject: message) else { return }
         var frame = Data("Content-Length: \(body.count)\r\n\r\n".utf8)
         frame.append(body)
-        if ready || force { send(frame) } else { outbox.append(frame) }
-    }
-
-    private func send(_ frame: Data) {
-        try? input.fileHandleForWriting.write(contentsOf: frame)
+        let document = message["method"] as? String == "textDocument/didChange"
+            ? ((message["params"] as? [String: Any])?["textDocument"] as? [String: Any])?["uri"] as? String : nil
+        if ready || force {
+            writer.send(frame, document: document)
+        } else {
+            if let document {
+                for index in outbox.indices.reversed() {
+                    guard outbox[index].document != nil else { break }
+                    if outbox[index].document == document {
+                        outbox.remove(at: index)
+                        break
+                    }
+                }
+            }
+            outbox.append((frame, document))
+        }
     }
 
     private func handle(_ data: Data) {
@@ -521,6 +543,8 @@ final class LanguageClient {
 
     private func terminated() {
         isRunning = false
+        writer.stop()
+        outbox.removeAll()
         output.fileHandleForReading.readabilityHandler = nil
         pending.values.forEach { $0.resume(returning: nil) }
         pending.removeAll()

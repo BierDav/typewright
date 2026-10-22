@@ -2,6 +2,25 @@ import XCTest
 @testable import Typewright
 
 final class CompilerTests: XCTestCase {
+    func testDocumentCompilationPerformance() async throws {
+        guard let path = ProcessInfo.processInfo.environment["TYPEWRIGHT_PERF_DOCUMENT"] else {
+            throw XCTSkip("Set TYPEWRIGHT_PERF_DOCUMENT to profile a local document")
+        }
+        let file = URL(fileURLWithPath: path)
+        let source = try String(contentsOf: file, encoding: .utf8)
+        let compiler = BuiltinCompiler(root: file.deletingLastPathComponent())
+        for mode in [RenderMode.html, .pdf, .svg] {
+            for revision in 0..<3 {
+                let result = await compiler.compile(main: file.lastPathComponent,
+                    buffers: [file.lastPathComponent: source + "\nPerformance revision \(revision)"], format: mode)
+                let bytes = result.previewPages?.reduce(0) { $0 + $1.byteCount } ?? result.output?.count ?? 0
+                print("Document \(mode), revision \(revision): \(result.duration) s, \(bytes) bytes")
+                XCTAssertNotNil(result.output, result.log)
+                XCTAssertFalse(result.diagnostics.contains { $0.severity == .error })
+            }
+        }
+    }
+
     private var root: URL!
 
     override func setUpWithError() throws {
@@ -48,18 +67,30 @@ final class CompilerTests: XCTestCase {
         XCTAssertTrue(String(decoding: result.output ?? Data(), as: UTF8.self).contains("font-family: &quot;georgia&quot;"))
     }
 
-    func testSVGHasOnePagePerSVGAndKeepsUnchangedPages() async {
+    func testIncrementalPDFKeepsUnchangedPages() async {
         let compiler = BuiltinCompiler(root: root)
-        func pages(_ source: String) async -> [String] {
-            let result = await compiler.compile(main: "main.typ", buffers: ["main.typ": source], format: .svg)
-            return (result.output ?? Data()).split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+        func pages(_ source: String) async -> [CompiledPage] {
+            let result = await compiler.compile(main: "main.typ", buffers: ["main.typ": source], format: .pdf, incremental: true)
+            XCTAssertEqual(result.output, Data())
+            return result.previewPages ?? []
         }
         let before = await pages("One\n#pagebreak()\nTwo")
         XCTAssertEqual(before.count, 2)
-        XCTAssertTrue(before.allSatisfy { $0.hasPrefix("<svg") })
+        XCTAssertTrue(before.allSatisfy { $0.document.pageCount == 1 })
         let after = await pages("One\n#pagebreak()\nTwo, edited")
         XCTAssertEqual(after.first, before.first)
         XCTAssertNotEqual(after.last, before.last)
+        let reverted = await pages("One\n#pagebreak()\nTwo")
+        XCTAssertEqual(reverted.map { $0.page.string }, before.map { $0.page.string })
+        let removed = await pages("One")
+        XCTAssertEqual(removed.count, 1)
+        let restored = await pages("One\n#pagebreak()\nTwo")
+        XCTAssertEqual(restored.map { $0.page.string }, before.map { $0.page.string })
+        let failed = await compiler.compile(main: "main.typ", buffers: ["main.typ": "#nope"], format: .pdf, incremental: true)
+        XCTAssertNil(failed.output)
+        _ = await compiler.compile(main: "main.typ", buffers: ["main.typ": "Other format"], format: .pdf)
+        let recovered = await pages("One\n#pagebreak()\nTwo")
+        XCTAssertEqual(recovered.map { $0.page.string }, before.map { $0.page.string })
     }
 
     func testProducesPDF() async {

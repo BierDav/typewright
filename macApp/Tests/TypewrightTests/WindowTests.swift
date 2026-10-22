@@ -63,8 +63,8 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(fork.text, "= Unsaved text")
         XCTAssertEqual(try String(contentsOf: other, encoding: .utf8), "= Other")
         XCTAssertEqual(fork.editorState(for: other), cursor)
-        XCTAssertEqual(fork.svgPreview.pendingRestore, position)
-        XCTAssertEqual(fork.renderMode, .svg)
+        XCTAssertEqual(fork.preview.pendingPosition, position)
+        XCTAssertEqual(fork.renderMode, .pdf)
         XCTAssertEqual(fork.split, 0.65)
 
         fork.editorStateDidChange(EditorState(selection: 1))

@@ -14,6 +14,11 @@ final class BuiltinCompiler: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.bierdav.Typewright.typst", qos: .userInitiated)
     private let world: OpaquePointer
     private var overlays: Set<String> = []
+    private struct PreviewPageID: Hashable {
+        let high: UInt64
+        let low: UInt64
+    }
+    private var previewCache: [PreviewPageID: CompiledPage] = [:]
     /// Main files whose HTML fails with the font spans; they compile without them from then on.
     private var unwrapped: Set<String> = []
 
@@ -45,9 +50,9 @@ final class BuiltinCompiler: @unchecked Sendable {
     }
 
     /// Compiles `main` with `buffers` (paths relative to the root) replacing the files on disk.
-    func compile(main: String, buffers: [String: String], format: RenderMode) async -> CompileResult {
+    func compile(main: String, buffers: [String: String], format: RenderMode, incremental: Bool = false) async -> CompileResult {
         await withCheckedContinuation { cont in
-            queue.async { [self] in cont.resume(returning: run(main: main, buffers: buffers, format: format)) }
+            queue.async { [self] in cont.resume(returning: run(main: main, buffers: buffers, format: format, incremental: incremental)) }
         }
     }
 
@@ -85,18 +90,18 @@ final class BuiltinCompiler: @unchecked Sendable {
 
         """
 
-    private func run(main: String, buffers: [String: String], format: RenderMode) -> CompileResult {
+    private func run(main: String, buffers: [String: String], format: RenderMode, incremental: Bool) -> CompileResult {
         let start = Date()
         let result = run(main: main, buffers: buffers, format: format, wrapped: format == .html && !unwrapped.contains(main),
-                         start: start)
+                         start: start, incremental: incremental)
         // The font spans are invalid in some places, like raw text elements; plain output beats none.
         guard format == .html, result.output == nil, result.wrapperFailed else { return result.compiled }
         unwrapped.insert(main)
-        return run(main: main, buffers: buffers, format: format, wrapped: false, start: start).compiled
+        return run(main: main, buffers: buffers, format: format, wrapped: false, start: start, incremental: incremental).compiled
     }
 
     private func run(main: String, buffers: [String: String], format: RenderMode, wrapped: Bool,
-                     start: Date) -> (compiled: CompileResult, output: Data?, wrapperFailed: Bool) {
+                     start: Date, incremental: Bool) -> (compiled: CompileResult, output: Data?, wrapperFailed: Bool) {
         var buffers = buffers
         var main = main
         if wrapped {
@@ -108,9 +113,9 @@ final class BuiltinCompiler: @unchecked Sendable {
         load(main: main, buffers: buffers)
 
         let twFormat: TWFormat = switch format {
-        case .pdf: TWFormatPDF
+        case .pdf: incremental ? TWFormatPDFPages : TWFormatPDF
         case .html: TWFormatHTML
-        case .svg: TWFormatSVG
+        case .svg: TWFormatPDFPages
         }
         let result = tw_world_compile(world, twFormat)
         defer { tw_result_free(result) }
@@ -120,6 +125,7 @@ final class BuiltinCompiler: @unchecked Sendable {
         let located = all.filter { !$0.path.isEmpty && $0.path != Self.htmlWrapper }
         let log = all.filter { $0.path.isEmpty || $0.path == Self.htmlWrapper }.map { "\($0.severity): \($0.message)" }.joined(separator: "\n")
         let wrapperFailed = all.contains { $0.path == Self.htmlWrapper && $0.severity == "error" }
+        let previewPages = (format == .svg || incremental) && format != .html && output?.isEmpty == true ? readPreviewPages() : nil
         let compiled = CompileResult(
             output: output,
             diagnostics: located.map {
@@ -129,9 +135,25 @@ final class BuiltinCompiler: @unchecked Sendable {
             log: log,
             duration: Date().timeIntervalSince(start),
             // The world keeps the last report, which may be another main file's.
-            solveng: output != nil ? Self.solvengReport(world) : nil
+            solveng: output != nil ? Self.solvengReport(world) : nil,
+            previewPages: previewPages
         )
         return (compiled, output, wrapperFailed)
+    }
+
+    private func readPreviewPages() -> [CompiledPage]? {
+        var next: [PreviewPageID: CompiledPage] = [:]
+        var pages: [CompiledPage] = []
+        for index in 0..<tw_world_preview_page_count(world) {
+            let page = tw_world_preview_page(world, index)
+            let id = PreviewPageID(high: page.hash_high, low: page.hash_low)
+            guard let bytes = page.data,
+                  let pdf = previewCache[id] ?? next[id] ?? CompiledPage(data: Data(bytes: bytes, count: page.len)) else { return nil }
+            next[id] = pdf
+            pages.append(pdf)
+        }
+        previewCache = next
+        return pages
     }
 
     private static func solvengReport(_ world: OpaquePointer) -> String {

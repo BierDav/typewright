@@ -48,6 +48,6 @@ final class PreviewStateTests: XCTestCase {
         ws.setPreview(a)
         XCTAssertEqual(ws.renderMode, .html)
         ws.setPreview(b)
-        XCTAssertEqual(ws.renderMode, .svg)
+        XCTAssertEqual(ws.renderMode, .pdf)
     }
 }

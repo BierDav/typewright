@@ -71,6 +71,8 @@ pub struct TWWorld {
     extra_fonts: Vec<(PathBuf, u32)>,
     /// SVGs of the last compile's pages by layout hash, so unchanged pages aren't rendered again.
     svg_pages: Mutex<HashMap<u128, Arc<str>>>,
+    pdf_preview: Mutex<Vec<(u128, Arc<[u8]>)>>,
+    pdf_pages: Mutex<HashMap<u128, Arc<[u8]>>>,
     /// solveng's report from the last compile that produced a document, see `solveng_report`.
     solveng: Mutex<String>,
 }
@@ -148,11 +150,52 @@ impl TWWorld {
                 *self.solveng.lock() = solveng_report(self, &**doc.introspector());
                 Ok(self.svg(doc))
             }),
+            TWFormat::PdfPages => finish(typst::compile::<PagedDocument>(self), |doc| {
+                *self.solveng.lock() = solveng_report(self, &**doc.introspector());
+                // Page-range exports omit links into other pages; preserve their document-wide destinations.
+                fn internal_links(frame: &typst::layout::Frame) -> bool {
+                    frame.items().any(|(_, item)| match item {
+                        typst::layout::FrameItem::Link(destination, _) => !matches!(destination, typst::model::Destination::Url(_)),
+                        typst::layout::FrameItem::Group(group) => internal_links(&group.frame),
+                        _ => false,
+                    })
+                }
+                if doc.pages().iter().any(|page| internal_links(&page.frame)) {
+                    return typst_pdf::pdf(doc, &PdfOptions::default());
+                }
+                *self.pdf_preview.lock() = self.preview_pages(doc)?;
+                Ok(Vec::new())
+            }),
             TWFormat::Check => finish(typst::compile::<PagedDocument>(self), |doc| {
                 *self.solveng.lock() = solveng_report(self, &**doc.introspector());
                 Ok(Vec::new())
             }),
         }
+    }
+
+    fn preview_pages(&self, doc: &PagedDocument) -> typst::diag::SourceResult<Vec<(u128, Arc<[u8]>)>> {
+        let mut cache = self.pdf_pages.lock();
+        let mut next = HashMap::with_capacity(doc.pages().len());
+        let mut pages = Vec::with_capacity(doc.pages().len());
+        for (index, page) in doc.pages().iter().enumerate() {
+            let hash = typst::utils::hash128(page);
+            let pdf = match cache.get(&hash).or_else(|| next.get(&hash)) {
+                Some(pdf) => Arc::clone(pdf),
+                None => {
+                    let number = std::num::NonZeroUsize::new(index + 1);
+                    let options = PdfOptions {
+                        page_ranges: Some(typst::layout::PageRanges::new(vec![number..=number])),
+                        tagged: false,
+                        ..PdfOptions::default()
+                    };
+                    Arc::from(typst_pdf::pdf(doc, &options)?)
+                }
+            };
+            pages.push((hash, Arc::clone(&pdf)));
+            next.insert(hash, pdf);
+        }
+        *cache = next;
+        Ok(pages)
     }
 
     fn svg(&self, doc: &PagedDocument) -> Vec<u8> {
@@ -214,6 +257,15 @@ pub enum TWFormat {
     Svg = 2,
     /// Lays out without exporting, for solveng's report on a file the editor shows.
     Check = 3,
+    PdfPages = 4,
+}
+
+#[repr(C)]
+pub struct TWPreviewPage {
+    pub data: *const u8,
+    pub len: usize,
+    pub hash_high: u64,
+    pub hash_low: u64,
 }
 
 #[repr(C)]
@@ -253,6 +305,8 @@ pub unsafe extern "C" fn tw_world_new(root: *const c_char) -> *mut TWWorld {
         fonts: DEFAULT_FONTS.clone(),
         extra_fonts: Vec::new(),
         svg_pages: Mutex::new(HashMap::new()),
+        pdf_preview: Mutex::new(Vec::new()),
+        pdf_pages: Mutex::new(HashMap::new()),
         solveng: Mutex::new("{}".into()),
     }))
 }
@@ -357,6 +411,26 @@ pub unsafe extern "C" fn tw_world_compile(world: *mut TWWorld, format: TWFormat)
             TWResult { data: ptr, len, diagnostics }
         }
         None => TWResult { data: std::ptr::null_mut(), len: 0, diagnostics },
+    }
+}
+
+/// # Safety
+/// `world` must be valid and not concurrently accessed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_world_preview_page_count(world: *const TWWorld) -> usize {
+    unsafe { &*world }.pdf_preview.lock().len()
+}
+
+/// # Safety
+/// `world` must be valid; the borrowed bytes remain valid until its next PDF-pages compile or destruction.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_world_preview_page(world: *const TWWorld, index: usize) -> TWPreviewPage {
+    let pages = unsafe { &*world }.pdf_preview.lock();
+    match pages.get(index) {
+        Some((hash, svg)) => TWPreviewPage {
+            data: svg.as_ptr(), len: svg.len(), hash_high: (hash >> 64) as u64, hash_low: *hash as u64,
+        },
+        None => TWPreviewPage { data: std::ptr::null(), len: 0, hash_high: 0, hash_low: 0 },
     }
 }
 
@@ -510,6 +584,43 @@ pub extern "C" fn tw_markdown_code_css() -> *mut c_char {
 #[cfg(test)]
 mod solveng_tests {
     use super::*;
+
+    #[test]
+    fn pdf_preview_reuses_unchanged_buffers() {
+        let root = CString::new(std::env::temp_dir().to_str().unwrap()).unwrap();
+        let main = CString::new("main.typ").unwrap();
+        unsafe {
+            let world = tw_world_new(root.as_ptr());
+            tw_world_set_main(world, main.as_ptr());
+            let compile = |source: &str, format| {
+                tw_world_set_overlay(world, main.as_ptr(), source.as_ptr(), source.len());
+                let result = tw_world_compile(world, format);
+                assert!(!result.data.is_null(), "{}", CStr::from_ptr(result.diagnostics).to_string_lossy());
+                result
+            };
+            let first = compile("One\n#pagebreak()\nTwo", TWFormat::PdfPages);
+            assert_eq!(first.len, 0);
+            tw_result_free(first);
+            assert_eq!(tw_world_preview_page_count(world), 2);
+            let unchanged = tw_world_preview_page(world, 0);
+            let changed = tw_world_preview_page(world, 1);
+
+            let second = compile("One\n#pagebreak()\nEdited", TWFormat::PdfPages);
+            tw_result_free(second);
+            let reused = tw_world_preview_page(world, 0);
+            let edited = tw_world_preview_page(world, 1);
+            assert_eq!((unchanged.hash_high, unchanged.hash_low), (reused.hash_high, reused.hash_low));
+            assert_eq!(unchanged.data, reused.data);
+            assert_ne!((changed.hash_high, changed.hash_low), (edited.hash_high, edited.hash_low));
+            assert!(tw_world_preview_page(world, 2).data.is_null());
+
+            for index in 0..2 {
+                let page = tw_world_preview_page(world, index);
+                assert!(std::slice::from_raw_parts(page.data, page.len).starts_with(b"%PDF"));
+            }
+            tw_world_free(world);
+        }
+    }
 
     unsafe fn compile_report(main: &str) -> serde_json::Value {
         let dir = std::env::temp_dir().join(format!("tw-solveng-{}", std::process::id()));

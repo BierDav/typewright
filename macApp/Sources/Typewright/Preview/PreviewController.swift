@@ -26,6 +26,7 @@ final class PreviewController {
         v.autoScales = true
         v.displayMode = .singlePageContinuous
         v.displaysPageBreaks = true
+        v.maxScaleFactor = 100
         // Clear so the pane's sidebar material shows around the pages.
         v.backgroundColor = .clear
         return v
@@ -41,6 +42,7 @@ final class PreviewController {
     /// Horizontal scroll fraction to restore along with the pending state.
     @ObservationIgnored private var pendingPan: Double?
     @ObservationIgnored private var zoomTimer: Timer?
+    @ObservationIgnored private var compiledPages: [CompiledPage] = []
 
     init() {
         defaultMargins = view.pageBreakMargins
@@ -80,6 +82,7 @@ final class PreviewController {
     /// Swaps the document, keeping zoom and scroll position unless told otherwise.
     func show(_ document: PDFDocument?, keepingPosition: Bool = true) {
         guard let document, document !== view.document else { return }
+        compiledPages.removeAll()
         if pendingRestore == nil, let position = pendingPosition {
             pendingPosition = nil
             pendingRestore = Self.state(for: position, in: document)
@@ -115,8 +118,36 @@ final class PreviewController {
         sync()
     }
 
+    /// Keeps PDFKit's unchanged page objects and replaces only newly compiled pages.
+    func showPages(_ pages: [CompiledPage]) {
+        guard let document = view.document, !compiledPages.isEmpty else {
+            let document = PDFDocument()
+            for page in pages { document.insert(page.page.copy() as! PDFPage, at: document.pageCount) }
+            show(document)
+            compiledPages = pages
+            return
+        }
+        let position = pendingPosition ?? self.position()
+        let mustRestore = pendingPosition != nil
+        pendingPosition = nil
+        guard pages != compiledPages || mustRestore else { return }
+        for index in pages.indices {
+            if index < compiledPages.count, pages[index] === compiledPages[index] { continue }
+            if index < document.pageCount { document.removePage(at: index) }
+            document.insert(pages[index].page.copy() as! PDFPage, at: index)
+        }
+        while document.pageCount > pages.count { document.removePage(at: document.pageCount - 1) }
+        compiledPages = pages
+        view.layoutDocumentView()
+        if let position { restore(Self.state(for: position, in: document), pan: position.pan) }
+        // PDFKit's crossfade reveals the page before its text tiles finish rendering.
+        view.documentView?.layer?.removeAnimation(forKey: "transition")
+        sync()
+    }
+
     /// Empties the view when another file is previewed, so the old document never stands in for the new one.
     func clear() {
+        compiledPages.removeAll()
         guard view.document != nil else { return }
         view.document = nil
         sync()
@@ -133,14 +164,14 @@ final class PreviewController {
     }
 
     func state() -> PreviewState? {
-        guard let doc = view.document, let dest = view.currentDestination, let page = dest.page else { return nil }
+        guard let doc = view.document, let dest = topDestination(), let page = dest.page else { return nil }
         return PreviewState(scale: view.autoScales ? nil : Double(view.scaleFactor),
                             page: doc.index(for: page), x: dest.point.x, y: dest.point.y)
     }
 
     /// The top of the view as a page position, which the SVG and A4 HTML previews understand too.
     func position() -> DocumentPosition? {
-        guard let doc = view.document, let dest = view.currentDestination, let page = dest.page else { return nil }
+        guard let doc = view.document, let dest = topDestination(), let page = dest.page else { return nil }
         let bounds = page.bounds(for: view.displayBox)
         let fraction = bounds.height > 0 ? min(max((bounds.maxY - dest.point.y) / bounds.height, 0), 1) : 0
         var pan = 0.0
@@ -150,6 +181,12 @@ final class PreviewController {
         }
         return DocumentPosition(page: Double(doc.index(for: page)) + fraction,
                                 zoom: view.autoScales ? nil : Double(view.scaleFactor), pan: pan)
+    }
+
+    private func topDestination() -> PDFDestination? {
+        let top = NSPoint(x: view.bounds.midX, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY)
+        guard let page = view.page(for: top, nearest: true) else { return nil }
+        return PDFDestination(page: page, at: view.convert(top, to: page))
     }
 
     private static func state(for position: DocumentPosition, in doc: PDFDocument) -> PreviewState {
@@ -165,6 +202,9 @@ final class PreviewController {
         view.layoutDocumentView()
         guard let page = doc.page(at: min(state.page, doc.pageCount - 1)) else { return }
         view.go(to: PDFDestination(page: page, at: NSPoint(x: state.x, y: state.y)))
+        // Use the visible top edge instead of PDFKit's inset-adjusted destination.
+        keep(NSPoint(x: state.x, y: state.y), on: page,
+             at: NSPoint(x: view.bounds.minX, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY))
         if let pan, let scroll = view.documentView?.enclosingScrollView, let width = view.documentView?.frame.width {
             let clip = scroll.contentView
             var origin = clip.bounds.origin
@@ -176,21 +216,13 @@ final class PreviewController {
     }
 
     /// Keeps the spot under `windowPoint` in place while the scale changes.
-    private func zoom(by factor: CGFloat, at windowPoint: NSPoint) {
+    func zoom(by factor: CGFloat, at windowPoint: NSPoint) {
         let point = view.convert(windowPoint, from: nil)
-        guard let page = view.page(for: point, nearest: true),
-              let clip = view.documentView?.enclosingScrollView?.contentView else { return }
+        guard let page = view.page(for: point, nearest: true) else { return }
         let pagePoint = view.convert(point, to: page)
-        let before = clip.convert(point, from: view)
         view.autoScales = false
         view.scaleFactor = min(max(view.scaleFactor * factor, view.minScaleFactor), view.maxScaleFactor)
-        view.layoutDocumentView()
-        let after = clip.convert(view.convert(pagePoint, from: page), from: view)
-        var origin = clip.bounds.origin
-        origin.x += after.x - before.x
-        origin.y += after.y - before.y
-        clip.scroll(to: origin)
-        clip.enclosingScrollView?.reflectScrolledClipView(clip)
+        keep(pagePoint, on: page, at: point)
         sync()
     }
 
@@ -253,12 +285,12 @@ final class PreviewController {
     private func keep(_ point: NSPoint, on page: PDFPage, at target: NSPoint) {
         guard let scroll = view.documentView?.enclosingScrollView else { return }
         view.layoutDocumentView()
-        let now = view.convert(point, from: page)
         let clip = scroll.contentView
+        let now = clip.convert(view.convert(point, from: page), from: view)
+        let target = clip.convert(target, from: view)
         var origin = clip.bounds.origin
         origin.x += now.x - target.x
-        // The view's y grows upwards; a flipped document grows downwards.
-        origin.y += clip.isFlipped ? target.y - now.y : now.y - target.y
+        origin.y += now.y - target.y
         clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
         scroll.reflectScrolledClipView(clip)
     }

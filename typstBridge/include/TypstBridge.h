@@ -14,7 +14,20 @@ typedef enum : uint8_t {
     TWFormatSVG = 2,
     /// Lays out without output, for solveng's report.
     TWFormatCheck = 3,
+    /// Caches PDF pages; empty output uses tw_world_preview_page, otherwise output is a complete PDF.
+    TWFormatPDFPages = 4,
 } TWFormat;
+
+typedef struct {
+    const uint8_t *_Nullable data;
+    size_t len;
+    uint64_t hash_high;
+    uint64_t hash_low;
+} TWPreviewPage;
+
+size_t tw_world_preview_page_count(const TWWorld *_Nonnull world);
+/// Borrowed bytes, valid until the next PDF-pages compile or world destruction; NULL for an invalid index.
+TWPreviewPage tw_world_preview_page(const TWWorld *_Nonnull world, size_t index);
 
 typedef struct {
     /// Exported document, NULL if compilation failed.

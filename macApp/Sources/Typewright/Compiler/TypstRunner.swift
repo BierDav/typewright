@@ -2,9 +2,12 @@ import Foundation
 
 enum RenderMode: String, CaseIterable, Codable {
     case pdf, html, svg
+    static let allCases: [RenderMode] = [.pdf, .html]
+    var migrated: RenderMode { self == .svg ? .pdf : self }
 }
 
 struct CompileResult {
+    /// Incremental preview output is empty on success; its PDF pages are in `previewPages`.
     let output: Data?
     let diagnostics: [Diagnostic]
     /// Raw stderr, for failures typst doesn't report as diagnostics.
@@ -12,6 +15,8 @@ struct CompileResult {
     let duration: TimeInterval
     /// solveng's report from the built-in compiler (see `tw_world_solveng`); external compilers have none.
     var solveng: String? = nil
+    /// Unchanged pages reuse their parsed PDFs by layout hash.
+    var previewPages: [CompiledPage]? = nil
 }
 
 /// Runs one `typst compile` invocation and can cancel it.

@@ -47,6 +47,49 @@ final class ColumnSelectionTests: XCTestCase {
         XCTAssertFalse(tv.isColumnMode, "undo selects natively, which ends the columns")
     }
 
+    func testCopyWithoutSelectionSelectsAndCopiesWholeRowsOnce() {
+        let tv = editor("abc\ndef\nlast")
+        tv.setColumns([.init(1), .init(2), .init(10)], primary: 2)
+        tv.copy(nil)
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "abc\nlast\n")
+        XCTAssertEqual(carets(tv), [NSRange(location: 0, length: 4), NSRange(location: 8, length: 4)])
+        tv.setSelectedRange(NSRange(location: 5, length: 0))
+        tv.copy(nil)
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "def\n")
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 4, length: 4))
+        XCTAssertTrue(tv.validateMenuItem(NSMenuItem(title: "Copy", action: #selector(NSTextView.copy(_:)), keyEquivalent: "c")))
+    }
+
+    func testCutWithoutSelectionRemovesRowsAndUndoesAsOneEdit() {
+        let tv = editor("abc\nx\ndef\nz")
+        tv.setColumns([.init(1), .init(2), .init(8)], primary: 2)
+        event { tv.cut(nil) }
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "abc\ndef\n")
+        XCTAssertEqual(tv.string, "x\nz")
+        XCTAssertEqual(carets(tv).map(\.location), [1, 3])
+        window.undoManager?.undo()
+        XCTAssertEqual(tv.string, "abc\nx\ndef\nz")
+        tv.setSelectedRange(NSRange(location: 10, length: 0))
+        event { tv.cut(nil) }
+        XCTAssertEqual(tv.string, "abc\nx\ndef")
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "z\n")
+    }
+
+    func testMovesAllCursorRowsTogetherAndPreservesSelections() {
+        let tv = editor("a\nbb\nccc\nd\ne")
+        tv.setColumns([.init(3), .init(anchor: 7, head: 5), .init(12)], primary: 1)
+        let original = tv.columnCarets
+        event { tv.moveLines(up: true) }
+        XCTAssertEqual(tv.string, "bb\nccc\na\ne\nd")
+        XCTAssertEqual(tv.columnCarets, [.init(1), .init(anchor: 5, head: 3), .init(10)])
+        XCTAssertEqual(tv.primaryColumn, 1)
+        event { tv.moveLines(up: false) }
+        XCTAssertEqual(tv.string, "a\nbb\nccc\nd\ne")
+        XCTAssertEqual(tv.columnCarets, original)
+        window.undoManager?.undo()
+        XCTAssertEqual(tv.string, "bb\nccc\na\ne\nd")
+    }
+
     func testSelectsColumnsAndCopiesThemAsLines() {
         let tv = editor("alpha\nb\ngamma")
         tv.setColumns([.init(1)], primary: 0)
@@ -106,6 +149,81 @@ final class ColumnSelectionTests: XCTestCase {
                        "a column inside the text still skips short lines")
     }
 
+    private func mouse(_ tv: TypstTextView, from start: NSPoint, to end: NSPoint,
+                       modifiers: NSEvent.ModifierFlags = []) {
+        func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: tv.convert(point, to: nil), modifierFlags: modifiers,
+                               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                               context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        if modifiers != [.option, .shift] {
+            NSApp.postEvent(event(.leftMouseDragged, end), atStart: false)
+            NSApp.postEvent(event(.leftMouseUp, end), atStart: false)
+        }
+        tv.mouseDown(with: event(.leftMouseDown, start))
+        while NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantPast,
+                              inMode: .default, dequeue: true) != nil {}
+    }
+
+    private func point(_ tv: TypstTextView, at index: Int, x: CGFloat) -> NSPoint {
+        let lm = tv.layoutManager!, container = tv.textContainer!
+        lm.ensureLayout(for: container)
+        let glyph = lm.glyphIndexForCharacter(at: index)
+        let line = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        return NSPoint(x: x, y: line.midY + tv.textContainerOrigin.y)
+    }
+
+    func testOptionShiftClickTogglesIndividualCarets() {
+        let tv = editor("abc\ndef\nghi")
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        for index in [4, 8] {
+            let p = point(tv, at: index, x: tv.textContainerOrigin.x + tv.textContainer!.lineFragmentPadding)
+            mouse(tv, from: p, to: p, modifiers: [.option, .shift])
+        }
+        XCTAssertEqual(carets(tv).map(\.location), [0, 4, 8])
+        let p = point(tv, at: 4, x: tv.textContainerOrigin.x + tv.textContainer!.lineFragmentPadding)
+        mouse(tv, from: p, to: p, modifiers: [.option, .shift])
+        XCTAssertEqual(carets(tv).map(\.location), [0, 8])
+        let last = point(tv, at: 8, x: tv.textContainerOrigin.x + tv.textContainer!.lineFragmentPadding)
+        mouse(tv, from: last, to: last, modifiers: [.option, .shift])
+        XCTAssertFalse(tv.isColumnMode)
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 0, length: 0))
+    }
+
+    func testMouseInteractionsBeyondWrapGuide() {
+        _ = editor("")
+        let storage = NSTextStorage(), layout = NSLayoutManager()
+        storage.addLayoutManager(layout)
+        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        layout.addTextContainer(container)
+        let tv = TypstTextView(frame: .zero, textContainer: container)
+        tv.isVerticallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainerInset = NSSize(width: 6, height: 10)
+        let scroll = NSScrollView(frame: window.contentView!.bounds)
+        scroll.documentView = tv
+        window.contentView = scroll
+        tv.string = "ab\nabcdefgh\na\nabc"
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.wrapColumn = 20
+        let start = point(tv, at: 0, x: 350)
+        let end = point(tv, at: 14, x: 350)
+        XCTAssertGreaterThan(start.x, tv.textContainerOrigin.x + tv.textContainer!.size.width)
+        XCTAssertTrue(scroll.hitTest(scroll.convert(start, from: tv)) === tv)
+        mouse(tv, from: start, to: start)
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 2, length: 0))
+        mouse(tv, from: start, to: end)
+        XCTAssertEqual(tv.selectedRange(), NSRange(location: 2, length: 15))
+        mouse(tv, from: start, to: end, modifiers: .option)
+        XCTAssertEqual(carets(tv).map(\.location), [2, 11, 13, 17])
+        mouse(tv, from: start, to: start, modifiers: [.option, .shift])
+        XCTAssertEqual(carets(tv).map(\.location), [11, 13, 17])
+        XCTAssertNil(scroll.hitTest(scroll.convert(NSPoint(x: 450, y: start.y), from: tv)))
+    }
+
     func testHomeAndEndMoveEveryCaret() {
         let tv = editor("ab\ncd")
         tv.setColumns([.init(1), .init(4)], primary: 1)
@@ -125,12 +243,27 @@ final class ColumnSelectionTests: XCTestCase {
         XCTAssertEqual(tv.selectedRange(), NSRange(location: 3, length: 0))
     }
 
-    func testColumnsDrawTheirOwnBackground() {
+    func testNormalAndColumnSelectionsDrawTheirOwnBackground() {
         let tv = editor("ab\ncd")
+        tv.setSelectedRange(NSRange(location: 0, length: 1))
+        XCTAssertEqual(tv.selectedTextAttributes[.backgroundColor] as? NSColor, .clear)
         tv.setColumns([.init(anchor: 0, head: 1), .init(anchor: 3, head: 4)], primary: 1)
         XCTAssertEqual(tv.selectedTextAttributes[.backgroundColor] as? NSColor, .clear)
         tv.endColumns()
-        XCTAssertEqual(tv.selectedTextAttributes[.backgroundColor] as? NSColor, tv.selectionColor)
+        XCTAssertEqual(tv.selectedTextAttributes[.backgroundColor] as? NSColor, .clear)
+    }
+
+    func testFullLineSelectionsStopAtTextAndKeepEmptyLinesVisible() {
+        let tv = editor("abc\nabcdefgh\n\nx")
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.wrapColumn = 20
+        let boxes = tv.selectionBoxes(for: NSRange(location: 0, length: 14))
+        XCTAssertEqual(boxes.count, 3)
+        XCTAssertLessThan(boxes[0].maxX, boxes[1].maxX)
+        XCTAssertLessThan(boxes[1].maxX, tv.textContainer!.size.width / 2)
+        XCTAssertEqual(boxes[2].width, 2, accuracy: 0.01)
+        let partial = tv.selectionBoxes(for: NSRange(location: 0, length: 3))
+        XCTAssertEqual(boxes[0].maxX, partial[0].maxX, accuracy: 0.01)
     }
 
     func testColumnBackgroundRoundsOnlyItsOuterCorners() {
