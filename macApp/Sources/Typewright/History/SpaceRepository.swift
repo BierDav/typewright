@@ -103,6 +103,11 @@ final class SpaceRepository {
         run { twj_set_lfs_limit($0, bytes) }
     }
 
+    /// The Devices setting is in megabytes.
+    func setLFSLimit(megabytes: Double) {
+        setLFSLimit(bytes: UInt64(max(megabytes, 0) * 1_048_576))
+    }
+
     // MARK: - History
 
     /// Commits whatever changed on disk; returns the changed paths.

@@ -97,19 +97,20 @@ struct DeviceSettings: View {
             }
 
             Section {
-                LabeledContent("Merge text files up to") {
+                LabeledContent("LFS limit") {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        TextField("Merge text files up to", value: $sync.lfsThresholdMB, format: .number)
+                        TextField("LFS limit", value: $sync.lfsThresholdMB, format: .number)
                             .labelsHidden()
                             .frame(width: 60)
                             .multilineTextAlignment(.trailing)
                         Text("MB").foregroundStyle(.secondary)
                     }
                 }
+                .onChange(of: sync.lfsThresholdMB) { _, mb in SpaceRepository.shared.setLFSLimit(megabytes: mb) }
             } header: {
                 Text("Large and Binary Files")
             } footer: {
-                Text("Edits of the same text file on two Macs are merged line by line. Larger files and binary files like PDFs, Office documents and images use LFS mode instead: they're never diffed and are replaced whole, and when two Macs change one at once both versions are kept.")
+                Text("Text files up to this size keep a history and merge line by line when two devices edit them. Larger files and binary files like PDFs, Office documents and images are LFS files: they have no history, sync whole, and when two devices change one at once both versions are kept.")
                     .foregroundStyle(.secondary)
             }
         }

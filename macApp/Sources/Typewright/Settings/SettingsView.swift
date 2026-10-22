@@ -25,6 +25,7 @@ final class SettingsWindowController: NSWindowController {
         tabs.addTabViewItem(tab("Fonts", "character.textbox", FontSettings()))
         tabs.addTabViewItem(tab("Packages", "shippingbox", PackageSettings()))
         tabs.addTabViewItem(tab("Devices", "arrow.triangle.2.circlepath", DeviceSettings()))
+        tabs.addTabViewItem(tab("History", "clock.arrow.circlepath", HistorySettings()))
 
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
@@ -36,7 +37,7 @@ final class SettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Opens on a tab: 0 General, 1 Editor, 2 Fonts, 3 Packages, 4 Devices.
+    /// Opens on a tab: 0 General, 1 Editor, 2 Fonts, 3 Packages, 4 Devices, 5 History.
     func show(tab: Int) {
         (contentViewController as? NSTabViewController)?.selectedTabViewItemIndex = tab
         show()

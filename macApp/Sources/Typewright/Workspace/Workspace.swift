@@ -822,10 +822,10 @@ final class Workspace: EditorLanguage {
     }
 
     /// Edits only reach disk every 30 s and on file, window or app switches; the built-in compiler reads the buffers.
-    /// Synced spaces save within a second, so the other devices keep up.
+    /// Synced spaces save within a second, so the other devices keep up; repository spaces within two, for their history.
     private func scheduleAutosave() {
         guard autosaveTask == nil else { return }
-        let delay: Double = SyncService.shared.isSynced(root) ? 1 : 30
+        let delay: Double = SyncService.shared.isSynced(root) ? 1 : SpaceList.isInRepository(root) ? 2 : 30
         autosaveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
@@ -839,6 +839,7 @@ final class Workspace: EditorLanguage {
         for url in dirty {
             try? buffers[url]?.write(to: url, atomically: true, encoding: .utf8)
         }
+        if !dirty.isEmpty, SpaceList.isInRepository(root) { CommitScheduler.shared.noteChange() }
         dirty.removeAll()
     }
 

@@ -21,6 +21,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await LanguageServerManager.shared.setUp() }
         SyncService.shared.restart()
         Opener.shared.restoreSession()
+        // Tests run inside the app; they must neither commit to nor ask about the user's spaces.
+        if !Self.isTesting {
+            SpaceRepository.shared.setLFSLimit(megabytes: SyncService.shared.lfsThresholdMB)
+            CommitScheduler.shared.start()
+            DispatchQueue.main.async { SpaceMigration.askIfNeeded() }
+        }
         Opener.shared.installShortcuts()
         Opener.shared.installNavigationButtons()
         // SwiftUI builds its menus once; keep their key equivalents following the layout.
@@ -38,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            if Invites.handles(url) { Invites.open(url) } else { Opener.shared.open(url) }
+            if Invites.handles(url) { Invites.open(url) } else { Opener.shared.openFromOutside(url) }
         }
     }
 
@@ -47,6 +53,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         if !hasVisibleWindows { Opener.shared.showEmptyWindow() }
         return false
+    }
+
+    static let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
+    /// Pending edits reach disk and the history before quitting.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !Self.isTesting, SpaceRepository.shared.isOpen else { return .terminateNow }
+        Opener.shared.flushAllSaves()
+        Task { @MainActor in
+            await CommitScheduler.shared.commitNow()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -65,7 +84,8 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Window") { Opener.shared.newWindow() }
                 .keyboardShortcut(keys.newWindow)
-            Button("Link Folder as Space…") { Opener.shared.openPanel() }
+            Button("New Space") { Opener.shared.newSpace(in: Opener.shared.keyState) }
+            Button("Import Folder as Space…") { Opener.shared.openPanel() }
                 .keyboardShortcut(keys.openSpace)
             Menu("Spaces") {
                 ForEach(SpaceList.all, id: \.self) { url in
