@@ -213,9 +213,13 @@ final class ColumnSelectionTests: XCTestCase {
         let end = point(tv, at: 14, x: 350)
         XCTAssertGreaterThan(start.x, tv.textContainerOrigin.x + tv.textContainer!.size.width)
         XCTAssertTrue(scroll.hitTest(scroll.convert(start, from: tv)) === tv)
+        print("DIAG mouse start=\(start) end=\(end) number=\(window.windowNumber) key=\(window.isKeyWindow) "
+            + "visible=\(window.isVisible) tv=\(tv.frame) scroll=\(scroll.frame) text=\(tv.textContainerOrigin) size=\(tv.textContainer!.size)")
         mouse(tv, from: start, to: start)
+        print("DIAG after click selection=\(tv.selectedRange())")
         XCTAssertEqual(tv.selectedRange(), NSRange(location: 2, length: 0))
         mouse(tv, from: start, to: end)
+        print("DIAG after drag selection=\(tv.selectedRange())")
         XCTAssertEqual(tv.selectedRange(), NSRange(location: 2, length: 15))
         mouse(tv, from: start, to: end, modifiers: .option)
         XCTAssertEqual(carets(tv).map(\.location), [2, 11, 13, 17])
