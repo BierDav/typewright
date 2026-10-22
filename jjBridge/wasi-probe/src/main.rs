@@ -77,7 +77,70 @@ fn read(tree: &MergedTree, path: &str) -> String {
     }
 }
 
+fn load(settings: &UserSettings, root: &Path) -> (Workspace, Arc<ReadonlyRepo>) {
+    let ws = Workspace::load(settings, root, &default_backend_factories(), &default_working_copy_factories()).unwrap();
+    let repo = ws.repo_loader().load_at_head().block_on().unwrap();
+    (ws, repo)
+}
+
+// `bench <root> <files> <commits>`: a space of `files` files in 40 folders, then `commits` commits of 5 edits each.
+fn bench(root: &Path, files: usize, commits: usize) {
+    let settings = settings();
+    let _ = std::fs::remove_dir_all(root);
+    std::fs::create_dir_all(root).unwrap();
+    let (mut ws, mut repo) = Workspace::init_internal_git(&settings, root, gix::hash::Kind::Sha1).block_on().unwrap();
+    let path = |i: usize| root.join(format!("Bench/dir{:02}/file{i:05}.typ", i % 40));
+    for d in 0..40 { std::fs::create_dir_all(root.join(format!("Bench/dir{d:02}"))).unwrap(); }
+    let t = std::time::Instant::now();
+    for i in 0..files { std::fs::write(path(i), format!("= File {i}\n\nSome text for file {i}.\n")).unwrap(); }
+    println!("wrote {files} files in {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    repo = commit(&mut ws, &repo, "initial");
+    println!("initial commit in {:?}", t.elapsed());
+    let (mut total, mut max) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    for c in 1..=commits {
+        for k in 0..5 {
+            let i = (c * 7919 + k * 104729) % files;
+            // Alternate between two same-size texts, so only mtimes reveal most edits.
+            std::fs::write(path(i), format!("= File {i}\n\nEdit {} of file {i}.\n", if c % 2 == 0 { "A" } else { "B" })).unwrap();
+        }
+        let t = std::time::Instant::now();
+        repo = commit(&mut ws, &repo, &format!("edit {c}"));
+        let d = t.elapsed();
+        total += d;
+        max = max.max(d);
+        if c % 50 == 0 {
+            println!("commits {c}: avg {:?} max {:?}", total / 50, max);
+            total = std::time::Duration::ZERO;
+            max = std::time::Duration::ZERO;
+        }
+    }
+    println!("bench ok");
+}
+
+// `verify <root>`: the repo loads, snapshots and its history reads back.
+fn verify(root: &Path) {
+    let settings = settings();
+    let (mut ws, repo) = load(&settings, root);
+    let (repo, tree) = snapshot(&mut ws, &repo);
+    let wc_id = repo.view().get_wc_commit_id(WorkspaceName::DEFAULT).unwrap().clone();
+    let mut commit = repo.store().get_commit(&wc_id).unwrap();
+    let root_id = repo.store().root_commit_id().clone();
+    let mut n = 0;
+    while commit.id() != &root_id {
+        n += 1;
+        commit = repo.store().get_commit(&commit.parent_ids()[0]).unwrap();
+    }
+    println!("verify ok: {n} commits, file00000 = {:?}", read(&tree, "Bench/dir00/file00000.typ").lines().nth(2));
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("bench") => return bench(Path::new(&args[2]), args[3].parse().unwrap(), args[4].parse().unwrap()),
+        Some("verify") => return verify(Path::new(&args[2])),
+        _ => {}
+    }
     let root = Path::new(std::env::args().nth(1).as_deref().unwrap_or("/work/repo")).to_owned();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
