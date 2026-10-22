@@ -19,3 +19,5 @@ mod tests;
 
 pub use ffi::*;
 pub use repo::{Busy, Committed, Repo};
+#[cfg(target_os = "wasi")]
+mod wasi;

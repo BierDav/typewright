@@ -1172,8 +1172,6 @@ dependencies = [
 [[package]]
 name = "gix-tempfile"
 version = "25.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3dd7dd8df3345933caddd6ce67821c9eec17192564f1011cf0bd0b8cb0d07ffb"
 dependencies = [
  "dashmap",
  "gix-fs",
@@ -1502,8 +1500,6 @@ dependencies = [
 [[package]]
 name = "jj-core"
 version = "0.46.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cc6c2549b3eeb6b87063e49786e3c73abea653d9b88b20c982967a8b112db40"
 dependencies = [
  "async-trait",
  "blake2",
@@ -1543,8 +1539,6 @@ dependencies = [
 [[package]]
 name = "jj-lib"
 version = "0.46.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b82d2d9b1f8400db1dda9a22bccfa6c3118f5592dfe6578452e56dcb378e9ad"
 dependencies = [
  "async-trait",
  "blake2",
@@ -1696,8 +1690,6 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "memmap2"
 version = "0.9.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
 dependencies = [
  "libc",
 ]

@@ -25,5 +25,13 @@ libc = "0.2"
 
 [dev-dependencies]
 
+# wasm32-wasip1 (the web app): jj's file utilities and locks, gix's tempfile pids and memmap2 lack WASI support.
+# The patches only add `target_os = "wasi"` code; other targets build the upstream sources unchanged.
+[patch.crates-io]
+jj-core = { path = "vendor/jj-core" }
+jj-lib = { path = "vendor/jj-lib" }
+gix-tempfile = { path = "vendor/gix-tempfile" }
+memmap2 = { path = "vendor/memmap2" }
+
 [profile.release]
 lto = "thin"
