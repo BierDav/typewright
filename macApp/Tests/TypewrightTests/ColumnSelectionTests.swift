@@ -149,6 +149,7 @@ final class ColumnSelectionTests: XCTestCase {
                        "a column inside the text still skips short lines")
     }
 
+    /// One gesture: the tracker reads the drags the run loop posts while the mouse button is down.
     private func mouse(_ tv: TypstTextView, from start: NSPoint, to end: NSPoint,
                        modifiers: NSEvent.ModifierFlags = []) {
         func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
@@ -156,13 +157,28 @@ final class ColumnSelectionTests: XCTestCase {
                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
         }
-        if modifiers != [.option, .shift] {
-            NSApp.postEvent(event(.leftMouseDragged, end), atStart: false)
-            NSApp.postEvent(event(.leftMouseUp, end), atStart: false)
+        // Without a window on screen its number is 0 and the tracker never sees the posted drags.
+        window.makeKeyAndOrderFront(nil)
+        // One event per tracking-loop tick; a slow runner may not have consumed a whole queue by mouse-up.
+        var ticks = 0
+        let timer = Timer(timeInterval: 0.025, repeats: true) { timer in
+            MainActor.assumeIsolated {
+                guard modifiers != [.option, .shift] else { return timer.invalidate() }
+                ticks += 1
+                switch ticks {
+                case 1: NSApp.postEvent(event(.leftMouseDragged, end), atStart: false)
+                default:
+                    NSApp.postEvent(event(.leftMouseUp, end), atStart: false)
+                    timer.invalidate()
+                }
+            }
         }
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        RunLoop.main.add(timer, forMode: .default)
+        defer { timer.invalidate() }
         tv.mouseDown(with: event(.leftMouseDown, start))
-        while NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantPast,
-                              inMode: .default, dequeue: true) != nil {}
+        // Drop what the tracker didn't take, so it can't leak into the next gesture.
+        while NSApp.nextEvent(matching: .any, until: Date(), inMode: .default, dequeue: true) != nil {}
     }
 
     private func point(_ tv: TypstTextView, at index: Int, x: CGFloat) -> NSPoint {
@@ -213,9 +229,13 @@ final class ColumnSelectionTests: XCTestCase {
         let end = point(tv, at: 14, x: 350)
         XCTAssertGreaterThan(start.x, tv.textContainerOrigin.x + tv.textContainer!.size.width)
         XCTAssertTrue(scroll.hitTest(scroll.convert(start, from: tv)) === tv)
+        print("DIAG mouse start=\(start) end=\(end) number=\(window.windowNumber) key=\(window.isKeyWindow) "
+            + "visible=\(window.isVisible) tv=\(tv.frame) scroll=\(scroll.frame) text=\(tv.textContainerOrigin) size=\(tv.textContainer!.size)")
         mouse(tv, from: start, to: start)
+        print("DIAG after click selection=\(tv.selectedRange())")
         XCTAssertEqual(tv.selectedRange(), NSRange(location: 2, length: 0))
         mouse(tv, from: start, to: end)
+        print("DIAG after drag selection=\(tv.selectedRange())")
         XCTAssertEqual(tv.selectedRange(), NSRange(location: 2, length: 15))
         mouse(tv, from: start, to: end, modifiers: .option)
         XCTAssertEqual(carets(tv).map(\.location), [2, 11, 13, 17])
