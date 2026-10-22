@@ -46,6 +46,7 @@ impl Repo {
     /// the disk is snapshotted before anything is checked out.
     pub(crate) fn prepare(&mut self) -> Result<Arc<ReadonlyRepo>> {
         self.stale_workspaces.clear();
+        self.wrote_files = false;
         wait_for_lock(self.root())?;
         let mut repo = self.head()?;
         let name = self.workspace.workspace_name().to_owned();
@@ -118,6 +119,7 @@ impl Repo {
                     repo = tx.commit("typewright: refresh working copy").block_on()?;
                 }
                 locked.locked_wc().check_out(&target).block_on()?;
+                self.wrote_files = true;
             }
             Err(_) => {
                 // The working copy's operation is gone: jj's recovery commit keeps the disk as it is.

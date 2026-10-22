@@ -32,13 +32,16 @@ unsafe fn text<'a>(ptr: *const c_char) -> Result<&'a str> {
 
 unsafe fn repo<'a>(ptr: *mut TWJRepo) -> &'a mut Repo { &mut unsafe { &mut *ptr }.0 }
 
-/// Like `guard`, adding `staleWorkspaces` when the call left other workspaces stale.
+/// Like `guard`, adding `staleWorkspaces` when the call left other workspaces stale and `wrote` when it rewrote files.
 fn guard_repo(ptr: *mut TWJRepo, body: impl FnOnce(&mut Repo) -> Result<Value>) -> *mut c_char {
     guard(|| {
         let repo = unsafe { self::repo(ptr) };
         let mut value = body(repo)?;
         if !repo.stale_workspaces.is_empty() && value.is_object() {
             value["staleWorkspaces"] = json!(repo.stale_workspaces);
+        }
+        if repo.wrote_files && value.is_object() {
+            value["wrote"] = json!(true);
         }
         Ok(value)
     })

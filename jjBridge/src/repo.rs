@@ -62,6 +62,8 @@ pub struct Repo {
     pub(crate) state: State,
     /// Other workspaces our last call left stale (their files differ from their new @).
     pub(crate) stale_workspaces: Vec<String>,
+    /// Whether our last call rewrote files on disk while repairing a stale working copy.
+    pub(crate) wrote_files: bool,
     /// Where `.jj` went when it couldn't be loaded and was replaced.
     pub recovered_from: Option<PathBuf>,
     /// Fixed commit time for tests.
@@ -173,6 +175,7 @@ impl Repo {
             lfs_limit: limit,
             state,
             stale_workspaces: Vec::new(),
+            wrote_files: false,
             recovered_from,
             clock: None,
         };

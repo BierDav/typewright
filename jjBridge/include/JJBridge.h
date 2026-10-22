@@ -13,6 +13,7 @@
 /// changed), or with jj's recovery commit if the working copy's operation is gone. Files on disk are never lost.
 /// Other workspaces whose @ a call rewrote are refreshed in place when their files still match; otherwise they're
 /// left stale and the result gains `"staleWorkspaces": ["name", …]` (`jj workspace update-stale` fixes them).
+/// `"wrote": true` when the call first repaired our stale working copy and so rewrote files on disk: reload editors.
 /// Folders containing their own `.jj` or `.git` (nested workspaces or repos) are never tracked (jj skips them).
 typedef struct TWJRepo TWJRepo;
 

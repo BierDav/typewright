@@ -132,8 +132,11 @@ fn stale_working_copy_keeps_disk_edits() {
     write(root, "S/a.typ", "1\n2\n3\nmine\n");
     jj_ok(root, &["--ignore-working-copy", "edit", &c1]);
     repo.commit("Edit").unwrap();
+    assert!(repo.wrote_files, "the checkout rewrote b.typ, so editors must reload");
     assert_eq!(read(root, "S/a.typ"), "1\n2\n3\nmine\n");
     assert_eq!(read(root, "S/b.typ"), "b1\n");
+    repo.commit("Edit").unwrap();
+    assert!(!repo.wrote_files);
     jj_ok(root, &["st"]);
 
     // The other direction: the repo is rewound under the working copy.
