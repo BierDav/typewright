@@ -7,6 +7,7 @@ pub mod arguments;
 pub mod brackets;
 pub mod comments;
 pub mod diagnostics;
+pub mod diff;
 pub mod files;
 pub mod highlight;
 pub mod ignore;

@@ -80,7 +80,7 @@ fn lines(text: &str) -> Vec<&str> {
 }
 
 /// For each line of `a`, the index of the matching line in `b` along a shortest edit script.
-fn matches(a: &[&str], b: &[&str]) -> Vec<Option<usize>> {
+pub(crate) fn matches(a: &[&str], b: &[&str]) -> Vec<Option<usize>> {
     let mut ids = HashMap::new();
     let mut id = |line: &str| {
         let next = ids.len();
