@@ -1,7 +1,7 @@
 // The one internal jj repository (mirrors macApp's `SpaceRepository`): every space is a top-level folder of it, so
 // its working copy is `spaces/` in origin storage. Paths here are repo-relative (`Thesis/main.typ`). One tab per
 // browser runs the repository (a Web Lock); it commits what any tab writes, 5 s after the last change or every 60 s
-// while changes keep coming.
+// while changes keep coming. Edits it hasn't seen yet (made while no tab ran it) wait in localStorage.
 import { createEffect, createRoot } from "solid-js";
 import { createStore } from "solid-js/store";
 import JJWorker from "~/workers/jj.worker.ts?worker";
@@ -37,6 +37,8 @@ export const [repository, setRepository] = createStore({
   error: null as string | null,
   /** Conflicted files, repo-relative. */
   conflicted: [] as string[],
+  /** "asyncify" where the browser lacks JSPI: a larger, slower build of the module. */
+  mode: null as "jspi" | "asyncify" | null,
 });
 
 type Pending = { resolve: (value: any) => void; reject: (err: Error) => void };
@@ -71,7 +73,7 @@ function startWorker(): Worker {
     pending.delete(response.id);
     if (response.ok) {
       announce(response.written);
-      p?.resolve(response.value);
+      p?.resolve(response.mode ? { mode: response.mode } : response.value);
     } else {
       p?.reject(new Error(response.error));
       if (response.fatal) void restart();
@@ -111,11 +113,35 @@ async function restart() {
   await open();
 }
 
+const UNSEEN = "typewright.jj.unseen";
+const MAX_UNSEEN = 2000;
+
+function unseen(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(UNSEEN) ?? "[]");
+  } catch {
+    return [""];
+  }
+}
+
+/** Remembers edited paths until the repository has seen them; past the cap, everything counts as edited. */
+function addUnseen(paths: string[]) {
+  const all = new Set([...unseen(), ...paths]);
+  localStorage.setItem(UNSEEN, JSON.stringify(all.size > MAX_UNSEEN || all.has("") ? [""] : [...all]));
+}
+
+function removeUnseen(paths: string[]) {
+  const done = new Set(paths);
+  localStorage.setItem(UNSEEN, JSON.stringify(unseen().filter((p) => !done.has(p))));
+}
+
 async function open() {
   setRepository({ status: "starting", error: null });
   try {
-    await post({ op: "open", lfsLimit: lfsLimit() });
-    setRepository("status", "open");
+    const stale = unseen();
+    const value = await post({ op: "open", lfsLimit: lfsLimit(), stale });
+    removeUnseen(stale);
+    setRepository({ status: "open", mode: value?.mode ?? null });
     await refreshConflicts();
   } catch (err) {
     setRepository({ status: "failed", error: (err as Error).message });
@@ -249,7 +275,6 @@ createRoot(() => {
   if (typeof window === "undefined") return;
   // Edits from any tab (other tabs announce theirs over a BroadcastChannel).
   fs.onChange(({ paths }) => {
-    if (repository.status !== "open") return;
     const relative: string[] = [];
     for (const path of paths) {
       if (echoes.delete(path)) continue;
@@ -257,7 +282,12 @@ createRoot(() => {
       if (rel && fs.split(rel)[0] !== ".jj") relative.push(rel);
     }
     if (!relative.length) return;
-    void post({ op: "reload", paths: relative }).then(scheduleCommit, () => {});
+    addUnseen(relative);
+    if (repository.status !== "open") return;
+    void post({ op: "invalidate", paths: relative }).then(() => {
+      removeUnseen(relative);
+      scheduleCommit();
+    }, () => {});
   });
   addEventListener("pagehide", () => {
     if (idleTimer) void commit();

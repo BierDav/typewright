@@ -121,8 +121,23 @@ export async function readText(path: string): Promise<string | null> {
   return bytes ? new TextDecoder().decode(bytes) : null;
 }
 
+/** Retries while the jj worker holds the file's lock (a sync access handle, open only during a call). */
+async function unlocked<T>(body: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 10_000;
+  for (let wait = 5; ; wait = Math.min(wait * 2, 200)) {
+    try {
+      return await body();
+    } catch (err) {
+      const name = (err as DOMException)?.name;
+      // WebKit reports the lock as InvalidStateError.
+      if ((name !== "NoModificationAllowedError" && name !== "InvalidStateError") || Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
 async function write(handle: FileSystemFileHandle, data: Uint8Array | string) {
-  const writable = await handle.createWritable();
+  const writable = await unlocked(() => handle.createWritable());
   await writable.write(typeof data === "string" ? data : (data as Uint8Array<ArrayBuffer>));
   await writable.close();
 }
@@ -144,7 +159,7 @@ export async function remove(path: string, quiet = false): Promise<void> {
   const parent = await directory(dirname(path));
   if (!parent) return;
   try {
-    await parent.removeEntry(basename(path), { recursive: true });
+    await unlocked(() => parent.removeEntry(basename(path), { recursive: true }));
   } catch {}
   if (!quiet) announce([path]);
 }
@@ -204,7 +219,7 @@ export async function copy(from: string, to: string, quiet = false): Promise<voi
     const handle = await fileHandle(to, true);
     const source = await fileHandle(from);
     if (!handle || !source) throw new Error(`Can't copy ${from}`);
-    const writable = await handle.createWritable();
+    const writable = await unlocked(() => handle.createWritable());
     await (await source.getFile()).stream().pipeTo(writable);
   } else {
     await directory(to, true);
@@ -225,7 +240,7 @@ export async function move(from: string, to: string): Promise<void> {
   const movable = handle as (FileSystemHandle & { move?: (dir: FileSystemDirectoryHandle, name: string) => Promise<void> }) | null;
   if (movable?.move && target) {
     try {
-      await movable.move(target, basename(to));
+      await unlocked(() => movable.move!(target, basename(to)));
       announce([from, to]);
       return;
     } catch {}

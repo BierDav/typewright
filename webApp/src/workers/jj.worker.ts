@@ -1,17 +1,22 @@
-// Hosts the internal jj repository (`jjBridge` built for wasm32-wasip1) off the main thread. The repository's
-// working copy is origin storage's `spaces/` folder (each space a top-level folder, `.jj` beside them); the worker
-// holds it in memory for the module and writes back what the module touched after every call.
-import wasmUrl from "~/wasm/jj/jj_bridge.wasm?url";
-import { contents, MemFS, memDir, memFile, type MemDir, splitPath, Wasi } from "~/lib/wasi";
+// Hosts the internal jj repository (`jjBridge` built for wasm32-wasip1) off the main thread. Its working copy is
+// origin storage's `spaces/` folder (each space a top-level folder, `.jj` beside them); the module reads and writes
+// it directly through the OPFS host in `lib/wasi.ts`. `jj-host/` beside it keeps the host's mtimes (`state.json`)
+// and a journal of files being written, so a tab closed mid-call can't leave a file looking unchanged.
+import jspiUrl from "~/wasm/jj/jj_bridge.wasm?url";
+import asyncifyUrl from "~/wasm/jj/jj_bridge.asyncify.wasm?url";
+import { hasJSPI, type HostState, OpfsFS, unlocked, Wasi } from "~/lib/wasi";
 
 export type Arg = string | number | null;
 export type Request =
-  | { id: number; op: "open"; lfsLimit: number }
+  | { id: number; op: "open"; lfsLimit: number; stale: string[] }
   | { id: number; op: "call"; fn: string; args: Arg[] }
-  | { id: number; op: "reload"; paths: string[] };
-export type Response = { id: number; ok: true; value: unknown; written: string[] } | { id: number; ok: false; error: string; fatal?: boolean };
+  | { id: number; op: "invalidate"; paths: string[] };
+export type Response =
+  | { id: number; ok: true; value: unknown; written: string[]; mode?: "jspi" | "asyncify" }
+  | { id: number; ok: false; error: string; fatal?: boolean };
 
 export const ROOT = "spaces";
+const HOST = "jj-host";
 const GUEST_ROOT = "/repo";
 
 /** Argument kinds after the repo handle, as in `jjBridge/include/JJBridge.h`; `void` calls return nothing. */
@@ -37,144 +42,94 @@ type Exports = {
   memory: WebAssembly.Memory;
   twj_alloc(len: number): number;
   twj_dealloc(ptr: number, len: number): void;
-  twj_open(root: number): number;
   twj_string_free(ptr: number): void;
-} & Record<string, (...args: any[]) => any>;
+};
 
-const fs = new MemFS();
+let fs: OpfsFS | undefined;
 let wasi: Wasi | undefined;
 let exports: Exports | undefined;
 let repo = 0;
+let host: FileSystemDirectoryHandle | undefined;
+let journal: FileSystemSyncAccessHandle | undefined;
+let journalSize = 0;
 
-async function directory(path: string[], create: boolean): Promise<FileSystemDirectoryHandle | null> {
-  let dir = await navigator.storage.getDirectory();
-  for (const part of path) {
-    try {
-      dir = await dir.getDirectoryHandle(part, { create });
-    } catch {
-      return null;
-    }
-  }
-  return dir;
-}
-
-async function readDir(handle: FileSystemDirectoryHandle): Promise<MemDir> {
-  const dir = memDir();
-  for await (const [name, child] of handle.entries()) {
-    if (child.kind === "directory") dir.entries.set(name, await readDir(child as FileSystemDirectoryHandle));
-    else {
-      const file = await (child as FileSystemFileHandle).getFile();
-      dir.entries.set(name, memFile(new Uint8Array(await file.arrayBuffer()), BigInt(file.lastModified) * 1_000_000n));
-    }
-  }
-  return dir;
-}
-
-/** Takes `paths` (relative to `spaces/`) as they are in origin storage now, after the app wrote them. */
-async function reload(paths: string[]) {
-  for (const path of paths) {
-    const parts = splitPath(path);
-    if (parts[0] === ".jj" || parts.length === 0) continue;
-    const parent = await directory([ROOT, ...parts.slice(0, -1)], false);
-    const name = parts[parts.length - 1];
-    const file = await parent?.getFileHandle(name).then((h) => h.getFile()).catch(() => null);
-    if (file) {
-      // A fresh mtime, so jj rehashes even if origin storage reports an old date.
-      fs.put(path, memFile(new Uint8Array(await file.arrayBuffer())));
-      continue;
-    }
-    const dir = await parent?.getDirectoryHandle(name).catch(() => null);
-    if (dir) fs.put(path, await readDir(dir));
-    else fs.delete(path);
+async function readJSON<T>(name: string): Promise<T | null> {
+  try {
+    return JSON.parse(await (await (await host!.getFileHandle(name)).getFile()).text()) as T;
+  } catch {
+    return null;
   }
 }
 
-async function writeFile(dir: FileSystemDirectoryHandle, name: string, bytes: Uint8Array) {
-  await dir.removeEntry(name, { recursive: true }).catch(() => {});
-  const handle = await dir.getFileHandle(name, { create: true });
-  // Sync access handles are the one writer every browser offers in workers.
-  if (typeof handle.createSyncAccessHandle === "function") {
-    const access = await handle.createSyncAccessHandle();
-    try {
-      access.truncate(0);
-      access.write(bytes as Uint8Array<ArrayBuffer>, { at: 0 });
-      access.flush();
-    } finally {
-      access.close();
-    }
-  } else {
-    const writable = await (handle as FileSystemFileHandle).createWritable();
-    await writable.write(bytes as Uint8Array<ArrayBuffer>);
-    await writable.close();
+/** Replaces `name` atomically: a temp file moved over it. */
+async function writeAtomically(name: string, text: string) {
+  const temp = await host!.getFileHandle(`${name}.tmp`, { create: true });
+  const access = await unlocked(() => temp.createSyncAccessHandle());
+  try {
+    const bytes = new TextEncoder().encode(text);
+    access.truncate(0);
+    access.write(bytes, { at: 0 });
+    access.flush();
+  } finally {
+    access.close();
+  }
+  await (temp as FileSystemFileHandle & { move(dir: FileSystemDirectoryHandle, name: string): Promise<void> }).move(host!, name);
+}
+
+function appendJournal(path: string) {
+  const bytes = new TextEncoder().encode(`${path}\n`);
+  journalSize += journal!.write(bytes, { at: journalSize });
+  journal!.flush();
+}
+
+/** Saves the host's mtimes after a call; the journal then only needs files still open for writing. */
+async function saveState() {
+  const state = fs!.state();
+  if (state) await writeAtomically("state.json", JSON.stringify(state));
+  if (journalSize > 0 && (state || fs!.open.size === 0)) {
+    journal!.truncate(0);
+    journalSize = 0;
+    for (const path of fs!.open.keys()) appendJournal(path);
   }
 }
 
-async function writeTree(dir: FileSystemDirectoryHandle, node: MemDir, skip: Set<string>, prefix: string) {
-  for (const [name, child] of node.entries) {
-    const path = prefix ? `${prefix}/${name}` : name;
-    if (skip.has(path)) continue;
-    if (child.kind === "dir") {
-      const sub = await dir.getDirectoryHandle(name, { create: true }).catch(async () => {
-        await dir.removeEntry(name);
-        return dir.getDirectoryHandle(name, { create: true });
-      });
-      await writeTree(sub, child, skip, path);
-    } else await writeFile(dir, name, contents(child));
-  }
-}
-
-/** Writes what the module touched back to origin storage; operation heads and working-copy state go last, so a
- * tab closed halfway leaves the previous operation current. */
-async function persist(): Promise<string[]> {
-  const dirty = fs.takeDirty();
-  const late = (p: string) => p.startsWith(".jj/repo/op_heads") || p.startsWith(".jj/working_copy");
-  dirty.sort((a, b) => Number(late(a)) - Number(late(b)) || a.length - b.length);
-  const set = new Set(dirty);
-  for (const path of dirty) {
-    const parts = splitPath(path);
-    const name = parts[parts.length - 1];
-    if (!name) continue;
-    const node = fs.lookup(parts);
-    const parent = await directory([ROOT, ...parts.slice(0, -1)], node !== null);
-    if (!parent) continue;
-    if (!node) await parent.removeEntry(name, { recursive: true }).catch(() => {});
-    else if (node.kind === "file") await writeFile(parent, name, contents(node));
-    else {
-      const handle = await parent.getDirectoryHandle(name, { create: true }).catch(async () => {
-        await parent.removeEntry(name);
-        return parent.getDirectoryHandle(name, { create: true });
-      });
-      // Children dirty on their own are written in their turn; the rest arrived by a rename.
-      const skip = new Set([...set].filter((p) => p.startsWith(`${path}/`)).map((p) => p.slice(path.length + 1)));
-      await writeTree(handle, node, skip, "");
-    }
-  }
-  return dirty.filter((p) => !p.startsWith(".jj/") && p !== ".jj");
-}
-
-async function open(lfsLimit: number) {
-  const handle = await directory([ROOT], true);
-  fs.root = await readDir(handle!);
-  wasi = new Wasi(fs, { args: ["jj_bridge"], preopens: { [GUEST_ROOT]: "" } });
-  const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), { wasi_snapshot_preview1: wasi.imports });
-  wasi.initialize(instance);
-  exports = instance.exports as Exports;
-  repo = withString(GUEST_ROOT, (ptr) => exports!.twj_open(ptr));
+async function open(lfsLimit: number, staleFromTabs: string[]) {
+  const storage = await navigator.storage.getDirectory();
+  const root = await storage.getDirectoryHandle(ROOT, { create: true });
+  host = await storage.getDirectoryHandle(HOST, { create: true });
+  const state = await readJSON<HostState>("state.json");
+  const journalHandle = await host.getFileHandle("journal", { create: true });
+  const pending = (await (await journalHandle.getFile()).text()).split("\n").filter(Boolean);
+  journal = await unlocked(() => journalHandle.createSyncAccessHandle());
+  journalSize = journal.getSize();
+  fs = new OpfsFS(root, {
+    tracked: (path) => path !== ".jj" && !path.startsWith(".jj/"),
+    state: state ?? undefined,
+    // Without saved mtimes every file counts as changed once.
+    stale: state ? [...pending, ...staleFromTabs] : [""],
+  });
+  fs.onWillWrite = appendJournal;
+  const jspi = hasJSPI();
+  wasi = new Wasi(fs, { args: ["jj_bridge"], preopens: { [GUEST_ROOT]: "" } }, jspi ? "jspi" : "asyncify");
+  const { instance } = await WebAssembly.instantiateStreaming(fetch(jspi ? jspiUrl : asyncifyUrl), { wasi_snapshot_preview1: wasi.imports });
+  wasi.attach(instance);
+  exports = instance.exports as unknown as Exports;
+  const [ptr, len] = string(GUEST_ROOT);
+  repo = await wasi.call("twj_open", ptr);
+  exports.twj_dealloc(ptr, len);
   if (!repo) throw new Error("Can't open the repository");
-  exports.twj_set_lfs_limit(repo, BigInt(lfsLimit));
+  await wasi.call("twj_set_lfs_limit", repo, BigInt(lfsLimit));
+  return jspi ? "jspi" : "asyncify";
 }
 
-function withString<T>(text: string, body: (ptr: number) => T): T {
+/** A NUL-terminated copy of `text` in the module's memory: [pointer, allocated length]. */
+function string(text: string): [number, number] {
   const bytes = new TextEncoder().encode(text);
   const ptr = exports!.twj_alloc(bytes.length + 1);
   const memory = new Uint8Array(exports!.memory.buffer);
   memory.set(bytes, ptr);
   memory[ptr + bytes.length] = 0;
-  try {
-    return body(ptr);
-  } finally {
-    exports!.twj_dealloc(ptr, bytes.length + 1);
-  }
+  return [ptr, bytes.length + 1];
 }
 
 function readString(ptr: number): string {
@@ -184,9 +139,9 @@ function readString(ptr: number): string {
   return new TextDecoder().decode(memory.subarray(ptr, end));
 }
 
-function call(fn: string, args: Arg[]): unknown {
+async function call(fn: string, args: Arg[]): Promise<unknown> {
   const signature = SIGNATURES[fn];
-  if (!exports || !repo) throw new Error("The repository isn't open");
+  if (!exports || !repo || !wasi) throw new Error("The repository isn't open");
   if (!signature) throw new Error(`Unknown call ${fn}`);
   const allocated: [number, number][] = [];
   try {
@@ -198,15 +153,11 @@ function call(fn: string, args: Arg[]): unknown {
         if (kind === "str?") return 0;
         throw new Error(`${fn}: argument ${i} is missing`);
       }
-      const bytes = new TextEncoder().encode(String(value));
-      const ptr = exports!.twj_alloc(bytes.length + 1);
-      const memory = new Uint8Array(exports!.memory.buffer);
-      memory.set(bytes, ptr);
-      memory[ptr + bytes.length] = 0;
-      allocated.push([ptr, bytes.length + 1]);
-      return ptr;
+      const s = string(String(value));
+      allocated.push(s);
+      return s[0];
     });
-    const result = exports[fn](repo, ...raw);
+    const result = await wasi.call(fn, repo, ...raw);
     if (signature.void) return null;
     const text = readString(result);
     exports.twj_string_free(result);
@@ -218,7 +169,7 @@ function call(fn: string, args: Arg[]): unknown {
   }
 }
 
-// One request at a time: the module isn't reentrant, and a reload must not land between a call and its persist.
+// One request at a time: the module isn't reentrant, and suspended calls must not interleave.
 let queue: Promise<void> = Promise.resolve();
 
 self.onmessage = (event: MessageEvent<Request>) => {
@@ -227,14 +178,16 @@ self.onmessage = (event: MessageEvent<Request>) => {
     let response: Response;
     try {
       let value: unknown = null;
-      if (request.op === "open") await open(request.lfsLimit);
-      else if (request.op === "reload") await reload(request.paths);
-      else value = call(request.fn, request.args);
-      response = { id: request.id, ok: true, value, written: await persist() };
+      let mode: "jspi" | "asyncify" | undefined;
+      if (request.op === "open") mode = await open(request.lfsLimit, request.stale);
+      else if (request.op === "invalidate") fs?.invalidate(request.paths);
+      else value = await call(request.fn, request.args);
+      await saveState();
+      response = { id: request.id, ok: true, value, written: fs?.takeWritten() ?? [], mode };
     } catch (err) {
       // A trap leaves the module's memory unusable; the client starts a new worker.
       const fatal = err instanceof WebAssembly.RuntimeError;
-      await persist().catch(() => {});
+      await saveState().catch(() => {});
       response = { id: request.id, ok: false, error: err instanceof Error ? err.message : String(err), fatal };
     }
     self.postMessage(response);
