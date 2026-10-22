@@ -113,11 +113,11 @@ impl Repo {
             let old_path = from.clone().unwrap_or_else(|| current.clone());
             let old_value = if from.is_some() { before_tree.path_value(&old_path).block_on()? } else { before };
             let (added, removed) = line_counts(&content(&store, &old_path, &old_value)?, &content(&store, &current, &after)?);
-            let time = commit.committer().timestamp.timestamp.0 as f64 / 1000.0;
+            let time = commit.author().timestamp.timestamp.0 as f64 / 1000.0;
             let mut version = json!({
                 "commit": commit.id().hex(),
                 "time": time,
-                "description": commit.description().trim_end(),
+                "description": crate::repo::display_description(commit.description()),
                 "kind": kind,
                 "added": added,
                 "removed": removed,

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::repo::{Repo, repo_path};
 
 /// Kinds that are binary even when their first bytes look like text.
-const BINARY_EXTENSIONS: &[&str] = &[
+pub(crate) const BINARY_EXTENSIONS: &[&str] = &[
     "pdf", "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tif", "tiff", "bmp", "ico", "icns", "psd", "ai",
     "eps", "zip", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "tar", "dmg", "iso", "mp3", "m4a", "aac", "wav",
     "aif", "aiff", "flac", "ogg", "opus", "mp4", "mov", "m4v", "avi", "mkv", "webm", "otf", "ttf", "ttc", "woff",

@@ -18,6 +18,10 @@ blake3 = { version = "1", default-features = false, features = ["std"] }
 anyhow = "1"
 base64 = "0.22"
 tempfile = "3"
+rand_chacha = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 

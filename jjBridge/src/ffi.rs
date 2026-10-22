@@ -14,7 +14,13 @@ fn to_c(value: Value) -> *mut c_char {
 }
 
 fn respond(result: Result<Value>) -> *mut c_char {
-    to_c(result.unwrap_or_else(|e| json!({"error": format!("{e:#}")})))
+    to_c(result.unwrap_or_else(|e| {
+        let mut error = json!({"error": format!("{e:#}")});
+        if e.chain().any(|c| c.is::<crate::Busy>()) {
+            error["busy"] = json!(true);
+        }
+        error
+    }))
 }
 
 unsafe fn text<'a>(ptr: *const c_char) -> Result<&'a str> {
@@ -25,6 +31,18 @@ unsafe fn text<'a>(ptr: *const c_char) -> Result<&'a str> {
 }
 
 unsafe fn repo<'a>(ptr: *mut TWJRepo) -> &'a mut Repo { &mut unsafe { &mut *ptr }.0 }
+
+/// Like `guard`, adding `staleWorkspaces` when the call left other workspaces stale.
+fn guard_repo(ptr: *mut TWJRepo, body: impl FnOnce(&mut Repo) -> Result<Value>) -> *mut c_char {
+    guard(|| {
+        let repo = unsafe { self::repo(ptr) };
+        let mut value = body(repo)?;
+        if !repo.stale_workspaces.is_empty() && value.is_object() {
+            value["staleWorkspaces"] = json!(repo.stale_workspaces);
+        }
+        Ok(value)
+    })
+}
 
 /// Runs `body`, turning panics into errors so they never unwind into Swift.
 fn guard(body: impl FnOnce() -> Result<Value>) -> *mut c_char {
@@ -59,15 +77,15 @@ pub unsafe extern "C" fn twj_set_lfs_limit(repo: *mut TWJRepo, bytes: u64) { uns
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_commit(repo: *mut TWJRepo, message: *const c_char) -> *mut c_char {
-    guard(|| {
-        let c = unsafe { self::repo(repo) }.commit(unsafe { text(message) }?)?;
+    guard_repo(repo, |r| {
+        let c = r.commit(unsafe { text(message) }?)?;
         Ok(json!({"commit": c.commit, "changed": c.changed}))
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_squash(repo: *mut TWJRepo, days: u32) -> *mut c_char {
-    guard(|| Ok(json!({"squashed": unsafe { self::repo(repo) }.squash(days)?})))
+    guard_repo(repo, |r| Ok(json!({"squashed": r.squash(days)?})))
 }
 
 #[unsafe(no_mangle)]
@@ -82,7 +100,7 @@ pub unsafe extern "C" fn twj_file_at(repo: *mut TWJRepo, commit: *const c_char, 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_restore_file(repo: *mut TWJRepo, commit: *const c_char, path: *const c_char) -> *mut c_char {
-    guard(|| unsafe { self::repo(repo) }.restore_file(unsafe { text(commit) }?, unsafe { text(path) }?))
+    guard_repo(repo, |r| r.restore_file(unsafe { text(commit) }?, unsafe { text(path) }?))
 }
 
 #[unsafe(no_mangle)]
@@ -97,15 +115,15 @@ pub unsafe extern "C" fn twj_conflict(repo: *mut TWJRepo, path: *const c_char) -
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_resolve(repo: *mut TWJRepo, path: *const c_char, text: *const c_char, side: i32) -> *mut c_char {
-    guard(|| {
+    guard_repo(repo, |r| {
         let resolution = if text.is_null() { None } else { Some(unsafe { self::text(text) }?) };
-        unsafe { self::repo(repo) }.resolve(unsafe { self::text(path) }?, resolution, side)
+        r.resolve(unsafe { self::text(path) }?, resolution, side)
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_export_node(repo: *mut TWJRepo, share: *const c_char, path: *const c_char) -> *mut c_char {
-    guard(|| unsafe { self::repo(repo) }.export_node(unsafe { text(share) }?, unsafe { text(path) }?))
+    guard_repo(repo, |r| r.export_node(unsafe { text(share) }?, unsafe { text(path) }?))
 }
 
 #[unsafe(no_mangle)]
@@ -145,8 +163,7 @@ pub unsafe extern "C" fn twj_merge_node(
     node: *const c_char,
     lfs_dir: *const c_char,
 ) -> *mut c_char {
-    guard(|| {
-        let r = unsafe { self::repo(repo) };
+    guard_repo(repo, |r| {
         r.merge_node(unsafe { text(share) }?, unsafe { text(path) }?, unsafe { text(node) }?, unsafe { text(lfs_dir) }?)
     })
 }

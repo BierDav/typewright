@@ -1,4 +1,4 @@
-//! Opening the repository, snapshots and commits, squashing old history.
+//! Opening the repository, snapshots and commits.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::repo_path::{RepoPath, RepoPathBuf};
 use jj_lib::settings::UserSettings;
-use jj_lib::working_copy::{SnapshotOptions, UntrackedReason};
+use jj_lib::working_copy::{LockedWorkingCopy, SnapshotOptions, UntrackedReason};
 use jj_lib::workspace::Workspace;
 use pollster::FutureExt as _;
 use serde::{Deserialize, Serialize};
@@ -27,16 +27,27 @@ use serde::{Deserialize, Serialize};
 use crate::lfs::LfsFile;
 
 /// Names the Finder, editors and our own atomic writes leave behind; never tracked.
-const BASE_IGNORES: &[u8] = b".DS_Store\n._*\nIcon\r\n.Trashes\n.fseventsd\n.Spotlight-V100\n.TemporaryItems\n\
-.DocumentRevisions-V100\n.twj-tmp-*\n~$*\n.~lock.*\n*.swp\n";
+pub(crate) const BASE_IGNORES: &str = ".DS_Store\n._*\nIcon\r\n.Trashes\n.fseventsd\n.Spotlight-V100\n\
+.TemporaryItems\n.DocumentRevisions-V100\n.twj-tmp-*\n~$*\n.~lock.*\n*.swp\n/.jj.broken-*/\n";
 pub(crate) const TEMP_PREFIX: &str = ".twj-tmp-";
 
 pub(crate) const USER_NAME: &str = "Typewright";
 pub(crate) const USER_EMAIL: &str = "typewright@localhost";
+/// Marks commits Typewright made on its own; only those are ever squashed.
+pub(crate) const APP_TRAILER: &str = "Typewright-Commit: auto";
 
 /// Bookkeeping jj has no place for, in `.jj/typewright/state.json`.
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct State {
+    /// The workspace the app owns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Parents of the app's @ after the last call, to recreate a forgotten workspace in place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wc_parents: Vec<String>,
+    /// Hash of the managed repo config as last written, to tell user edits apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
     /// LFS files by repo path: untracked by jj, hashed lazily.
     #[serde(default)]
     pub lfs: BTreeMap<String, LfsFile>,
@@ -45,9 +56,14 @@ pub(crate) struct State {
 }
 
 pub struct Repo {
+    pub(crate) settings: UserSettings,
     pub(crate) workspace: Workspace,
     pub(crate) lfs_limit: u64,
     pub(crate) state: State,
+    /// Other workspaces our last call left stale (their files differ from their new @).
+    pub(crate) stale_workspaces: Vec<String>,
+    /// Where `.jj` went when it couldn't be loaded and was replaced.
+    pub recovered_from: Option<PathBuf>,
     /// Fixed commit time for tests.
     pub(crate) clock: Option<Timestamp>,
 }
@@ -57,12 +73,38 @@ pub struct Committed {
     pub changed: Vec<String>,
 }
 
-pub(crate) fn settings() -> Result<UserSettings> {
+/// The working copy is locked by someone else (usually the jj CLI); retry later.
+#[derive(Debug)]
+pub struct Busy;
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the repository is locked by another jj process")
+    }
+}
+
+impl std::error::Error for Busy {}
+
+pub(crate) fn base_settings() -> Result<StackedConfig> {
     let mut config = StackedConfig::with_defaults();
     let text = format!(
         "user.name = \"{USER_NAME}\"\nuser.email = \"{USER_EMAIL}\"\nui.conflict-marker-style = \"git\"\n"
     );
     config.add_layer(ConfigLayer::parse(ConfigSource::User, &text)?);
+    Ok(config)
+}
+
+pub(crate) fn settings_with(repo_config: Option<&Path>) -> Result<UserSettings> {
+    let mut config = base_settings()?;
+    if let Some(path) = repo_config
+        && path.is_file()
+    {
+        // The CLI reads the same file, so both materialize and parse conflicts alike.
+        match ConfigLayer::load_from_file(ConfigSource::Repo, path.to_owned()) {
+            Ok(layer) => config.add_layer(layer),
+            Err(e) => eprintln!("jj: ignoring {}: {e}", path.display()),
+        }
+    }
     Ok(UserSettings::from_config_and_home_dir(config, None)?)
 }
 
@@ -74,19 +116,69 @@ pub(crate) fn repo_path(path: &str) -> Result<RepoPathBuf> {
     RepoPathBuf::from_internal_string(path).map_err(|e| anyhow!("{e}"))
 }
 
+pub(crate) fn load_workspace(settings: &UserSettings, root: &Path) -> Result<Workspace> {
+    Ok(Workspace::load(settings, root, &default_backend_factories(), &default_working_copy_factories())?)
+}
+
+/// `YYYYMMDD-HHMMSS` in UTC, for names of moved-aside folders.
+fn stamp() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from days since 1970 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rest / 3600, rest % 3600 / 60, rest % 60)
+}
+
 impl Repo {
+    /// Opens (or creates) the repository. A `.jj` that can't be loaded is moved to `.jj.broken-<date>` and replaced by a
+    /// fresh repository tracking the files on disk; the files themselves are never touched.
     pub fn open(root: &Path) -> Result<Repo> {
         fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
-        let settings = settings()?;
-        let workspace = if root.join(".jj").is_dir() {
-            Workspace::load(&settings, root, &default_backend_factories(), &default_working_copy_factories())?
-        } else {
-            Workspace::init_internal_git(&settings, root, gix::hash::Kind::Sha1).block_on()?.0
-        };
-        let mut repo = Repo { workspace, lfs_limit: 1 << 20, state: State::default(), clock: None };
-        if let Ok(data) = fs::read(repo.state_path()) {
-            repo.state = serde_json::from_slice(&data).unwrap_or_default();
+        let base = settings_with(None)?;
+        let mut recovered_from = None;
+        if root.join(".jj").exists() && load_workspace(&base, root).is_err() {
+            // One retry: a CLI writing its state at this moment isn't corruption.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if let Err(e) = load_workspace(&base, root) {
+                let aside = root.join(format!(".jj.broken-{}", stamp()));
+                fs::rename(root.join(".jj"), &aside)
+                    .with_context(|| format!("move the unreadable .jj aside ({e:#})"))?;
+                eprintln!("jj: {} couldn't be loaded ({e:#}); moved to {}", root.join(".jj").display(), aside.display());
+                recovered_from = Some(aside);
+            }
         }
+        if !root.join(".jj").exists() {
+            Workspace::init_internal_git(&base, root, gix::hash::Kind::Sha1).block_on()?;
+        }
+        let mut state = State::default();
+        if let Ok(data) = fs::read(root.join(".jj/typewright/state.json")) {
+            state = serde_json::from_slice(&data).unwrap_or_default();
+        }
+        let limit = 1 << 20;
+        let config = crate::config::ensure_repo_config(&root.join(".jj/repo"), &mut state, limit);
+        let settings = settings_with(config.as_deref())?;
+        let workspace = load_workspace(&settings, root)?;
+        state.workspace = Some(workspace.workspace_name().as_str().to_owned());
+        let mut repo = Repo {
+            settings,
+            workspace,
+            lfs_limit: limit,
+            state,
+            stale_workspaces: Vec::new(),
+            recovered_from,
+            clock: None,
+        };
+        repo.save_state()?;
+        repo.write_excludes()?;
+        repo.prepare()?;
         Ok(repo)
     }
 
@@ -100,7 +192,15 @@ impl Repo {
         crate::fsutil::write_atomic(&path, &serde_json::to_vec_pretty(&self.state)?, false)
     }
 
-    pub fn set_lfs_limit(&mut self, bytes: u64) { self.lfs_limit = bytes; }
+    pub fn set_lfs_limit(&mut self, bytes: u64) {
+        if bytes == self.lfs_limit {
+            return;
+        }
+        self.lfs_limit = bytes;
+        let repo_dir = self.workspace.repo_path().to_owned();
+        crate::config::ensure_repo_config(&repo_dir, &mut self.state, bytes);
+        let _ = self.save_state();
+    }
 
     pub(crate) fn head(&self) -> Result<Arc<ReadonlyRepo>> {
         Ok(self.workspace.repo_loader().load_at_head().block_on()?)
@@ -126,60 +226,66 @@ impl Repo {
         path.to_fs_path(self.root()).map_err(|e| anyhow!("{e}"))
     }
 
-    /// Snapshots the disk; commits if anything changed. LFS files are kept out of the tree.
+    /// Ignores for snapshots: ours, then git's like the CLI (`core.excludesFile`, the user's part of `info/exclude`).
+    pub(crate) fn base_ignores(&self) -> Result<Arc<GitIgnoreFile>> {
+        let mut ignores = GitIgnoreFile::empty().chain(RepoPath::root(), Path::new(""), BASE_IGNORES.as_bytes())?;
+        if let Some(path) = crate::config::global_excludes_file(self) {
+            ignores = ignores.chain_with_file(RepoPath::root(), path)?;
+        }
+        if let (Some(path), Some(bytes)) = (crate::config::exclude_path(self), crate::config::user_excludes(self)) {
+            ignores = ignores.chain(RepoPath::root(), &path, &bytes)?;
+        }
+        Ok(ignores)
+    }
+
+    pub(crate) fn snapshot_inputs(&self) -> Result<SnapshotInputs> {
+        Ok(SnapshotInputs {
+            lfs: self.state.lfs.keys().filter_map(|p| repo_path(p).ok()).collect(),
+            ignores: self.base_ignores()?,
+            limit: self.lfs_limit,
+            root: self.root().to_owned(),
+        })
+    }
+
+    pub(crate) fn add_lfs(&mut self, paths: BTreeSet<RepoPathBuf>) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        for path in paths {
+            let key = path.as_internal_file_string().to_owned();
+            let disk = self.disk_path(&path)?;
+            self.state.lfs.insert(key.clone(), LfsFile::stat(&disk).unwrap_or_default());
+            keys.push(key);
+        }
+        Ok(keys)
+    }
+
+    /// The description for a commit of @: the user's own if they wrote one, else ours with the app trailer.
+    fn description_for(wc: &Commit, message: &str) -> String {
+        if wc.description().trim().is_empty() {
+            format!("{}\n\n{APP_TRAILER}\n", message.trim_end())
+        } else {
+            wc.description().to_owned()
+        }
+    }
+
+    /// Snapshots the disk; commits if anything changed and starts a new empty @ on top.
     pub fn commit(&mut self, message: &str) -> Result<Committed> {
         let mut lfs_changed = self.refresh_lfs()?;
-        let repo = self.head()?;
+        // Before the snapshot, so files that left the LFS list are seen again.
+        self.write_excludes()?;
+        let repo = self.prepare()?;
         let wc = self.wc_commit(&repo)?;
-        let lfs_paths: Vec<RepoPathBuf> = self.state.lfs.keys().filter_map(|p| repo_path(p).ok()).collect();
-        let not_lfs = DifferenceMatcher::new(EverythingMatcher, FilesMatcher::new(&lfs_paths));
-        let ignores = GitIgnoreFile::empty().chain(RepoPath::root(), Path::new(""), BASE_IGNORES)?;
-        let options = SnapshotOptions {
-            base_ignores: ignores,
-            progress: None,
-            start_tracking_matcher: &not_lfs,
-            force_tracking_matcher: &NothingMatcher,
-            max_new_file_size: self.lfs_limit,
-        };
-        let root = self.root().to_owned();
-        let limit = self.lfs_limit;
+        let parent_tree = wc.parent_tree(repo.as_ref()).block_on()?;
         let name = self.workspace.workspace_name().to_owned();
         let sig = self.signature();
+        let description = Self::description_for(&wc, message);
 
+        let inputs = self.snapshot_inputs()?;
         let mut locked = self.workspace.start_working_copy_mutation().block_on()?;
-        let (snapshot, stats) = locked.locked_wc().snapshot(&options).block_on()?;
-        let mut new_lfs = BTreeSet::new();
-        for (path, reason) in &stats.untracked_paths {
-            if matches!(reason, UntrackedReason::FileTooLarge { .. }) {
-                new_lfs.insert(path.clone());
-            }
-        }
-        // Tracked files that grew past the limit, and binary files, leave the tree.
-        let mut untrack = Vec::new();
-        for (path, after) in diff_files(&wc.tree(), &snapshot, &EverythingMatcher)? {
-            if let Some(Some(TreeValue::File { .. })) = after.as_resolved() {
-                let disk = path.to_fs_path(&root).map_err(|e| anyhow!("{e}"))?;
-                if crate::lfs::is_lfs(&disk, limit) {
-                    untrack.push(path);
-                }
-            }
-        }
-        let tree = if untrack.is_empty() {
-            snapshot
-        } else {
-            let mut builder = MergedTreeBuilder::new(snapshot);
-            for path in &untrack {
-                builder.set_or_remove(path.clone(), Merge::absent());
-                new_lfs.insert(path.clone());
-            }
-            builder.write_tree().block_on()?
-        };
-        let parent_tree = wc.parent_tree(repo.as_ref()).block_on()?;
+        let (tree, new_lfs) = snapshot_into(&inputs, locked.locked_wc(), &parent_tree)?;
         let changed: Vec<String> = diff_files(&parent_tree, &tree, &EverythingMatcher)?
             .into_iter()
             .map(|(p, _)| p.as_internal_file_string().to_owned())
             .collect();
-
         let mut tx = repo.start_transaction();
         let mut_repo = tx.repo_mut();
         let mut committed = None;
@@ -187,7 +293,7 @@ impl Repo {
             let done = mut_repo
                 .rewrite_commit(&wc)
                 .set_tree(tree.clone())
-                .set_description(message)
+                .set_description(description)
                 .set_author(sig.clone())
                 .set_committer(sig.clone())
                 .write()
@@ -205,20 +311,17 @@ impl Repo {
             mut_repo.rewrite_commit(&wc).set_tree(tree).write().block_on()?;
             mut_repo.rebase_descendants().block_on()?;
         }
-        let repo = if tx.repo().has_changes() { tx.commit("snapshot").block_on()? } else { repo };
-        let new_wc = {
-            let id = repo.view().get_wc_commit_id(&name).ok_or_else(|| anyhow!("no working-copy commit"))?;
-            repo.store().get_commit(id)?
-        };
-        locked.locked_wc().reset(&new_wc).block_on()?;
-        locked.finish(repo.op_id().clone()).block_on()?;
+        let new_repo = if tx.repo().has_changes() { tx.commit("typewright: commit").block_on()? } else { repo.clone() };
+        let id = new_repo.view().get_wc_commit_id(&name).ok_or_else(|| anyhow!("no working-copy commit"))?;
+        locked.locked_wc().reset(&new_repo.store().get_commit(id)?).block_on()?;
+        locked.finish(new_repo.op_id().clone()).block_on()?;
+        self.after_transaction(&repo, &new_repo)?;
 
-        for path in new_lfs {
-            let key = path.as_internal_file_string().to_owned();
-            let disk = self.disk_path(&path)?;
-            self.state.lfs.insert(key.clone(), LfsFile::stat(&disk).unwrap_or_default());
-            lfs_changed.push(key);
+        let added = self.add_lfs(new_lfs)?;
+        if !added.is_empty() {
+            self.write_excludes()?;
         }
+        lfs_changed.extend(added);
         self.save_state()?;
         let mut changed = changed;
         for path in lfs_changed {
@@ -230,22 +333,22 @@ impl Repo {
         Ok(Committed { commit: committed, changed })
     }
 
-    /// Writes `tree` into the working-copy commit and commits it as `message`, assuming the disk already matches.
+    /// Writes `tree` into @ and commits it as `message`, assuming the disk already matches.
     pub(crate) fn commit_tree(&mut self, tree: MergedTree, message: &str) -> Result<Option<String>> {
         let repo = self.head()?;
         let wc = self.wc_commit(&repo)?;
         let name = self.workspace.workspace_name().to_owned();
         let sig = self.signature();
-        let mut locked = self.workspace.start_working_copy_mutation().block_on()?;
+        let description = Self::description_for(&wc, message);
+        let parent_tree = wc.parent_tree(repo.as_ref()).block_on()?;
         let mut tx = repo.start_transaction();
         let mut_repo = tx.repo_mut();
-        let parent_tree = wc.parent_tree(repo.as_ref()).block_on()?;
         let mut committed = None;
         if tree.tree_ids_and_labels() != parent_tree.tree_ids_and_labels() {
             let done = mut_repo
                 .rewrite_commit(&wc)
                 .set_tree(tree)
-                .set_description(message)
+                .set_description(description)
                 .set_author(sig.clone())
                 .set_committer(sig.clone())
                 .write()
@@ -260,88 +363,68 @@ impl Repo {
             mut_repo.set_wc_commit(name.clone(), next.id().clone())?;
             committed = Some(done.id().hex());
         }
-        let repo = if tx.repo().has_changes() { tx.commit("sync").block_on()? } else { repo };
-        let id = repo.view().get_wc_commit_id(&name).ok_or_else(|| anyhow!("no working-copy commit"))?;
-        let new_wc = repo.store().get_commit(id)?;
-        locked.locked_wc().reset(&new_wc).block_on()?;
-        locked.finish(repo.op_id().clone()).block_on()?;
-        Ok(committed)
-    }
-
-    /// Commits older than `days` collapse into one commit per local calendar day.
-    pub fn squash(&mut self, days: u32) -> Result<usize> {
-        let now = self.clock.unwrap_or_else(Timestamp::now).timestamp.0;
-        let cutoff = now - i64::from(days) * 86_400_000;
-        let repo = self.head()?;
-        let name = self.workspace.workspace_name().to_owned();
-        let wc = self.wc_commit(&repo)?;
-        let mut chain = first_parent_chain(repo.as_ref(), &wc)?;
-        chain.reverse();
-        let groups = squash_groups(&chain, cutoff);
-        if groups.is_empty() {
-            return Ok(0);
-        }
-        // Rebuilt by hand rather than with rebase_descendants, which would stamp every rebased commit with now.
-        let mut tx = repo.start_transaction();
-        let mut_repo = tx.repo_mut();
-        let mut parent = repo.store().root_commit_id().clone();
-        let mut squashed = 0;
-        let mut i = 0;
-        while i < chain.len() {
-            let (commit, description) = match groups.iter().find(|g| g.start == i) {
-                Some(group) => {
-                    let members = &chain[group.clone()];
-                    for c in &members[..members.len() - 1] {
-                        mut_repo.record_abandoned_commit(c);
-                    }
-                    squashed += members.len() - 1;
-                    i = group.end;
-                    let mut seen = BTreeSet::new();
-                    let lines: Vec<&str> = members
-                        .iter()
-                        .map(|c| c.description().trim())
-                        .filter(|d| !d.is_empty() && seen.insert(*d))
-                        .collect();
-                    (members.last().unwrap(), Some(lines.join("\n")))
-                }
-                None => {
-                    i += 1;
-                    (&chain[i - 1], None)
-                }
-            };
-            if description.is_none() && commit.parent_ids() == [parent.clone()] {
-                parent = commit.id().clone();
-                continue;
-            }
-            let mut builder = mut_repo
-                .rewrite_commit(commit)
-                .set_parents(vec![parent.clone()])
-                .set_author(commit.author().clone())
-                .set_committer(commit.committer().clone());
-            if let Some(description) = description {
-                builder = builder.set_description(description);
-            }
-            parent = builder.write().block_on()?.id().clone();
-        }
-        let new_wc = mut_repo
-            .rewrite_commit(&wc)
-            .set_parents(vec![parent])
-            .set_author(wc.author().clone())
-            .set_committer(wc.committer().clone())
-            .write()
-            .block_on()?;
-        mut_repo.set_wc_commit(name, new_wc.id().clone())?;
-        mut_repo.rebase_descendants().block_on()?;
-        let repo = tx.commit("squash history").block_on()?;
-        let new_wc = self.wc_commit(&repo)?;
+        let new_repo = if tx.repo().has_changes() { tx.commit("typewright: sync").block_on()? } else { repo.clone() };
+        let id = new_repo.view().get_wc_commit_id(&name).ok_or_else(|| anyhow!("no working-copy commit"))?;
+        let new_wc = new_repo.store().get_commit(id)?;
         let mut locked = self.workspace.start_working_copy_mutation().block_on()?;
         locked.locked_wc().reset(&new_wc).block_on()?;
-        locked.finish(repo.op_id().clone()).block_on()?;
-        Ok(squashed)
+        locked.finish(new_repo.op_id().clone()).block_on()?;
+        self.after_transaction(&repo, &new_repo)?;
+        Ok(committed)
     }
 }
 
-/// Committed history from the working copy's parent down to (excluding) the root, newest first.
+pub(crate) struct SnapshotInputs {
+    lfs: Vec<RepoPathBuf>,
+    ignores: Arc<GitIgnoreFile>,
+    limit: u64,
+    root: PathBuf,
+}
+
+/// Snapshots the disk into `locked`; LFS files (listed, too large, binary) stay out of the tree.
+/// `reference` is the tree new files are judged against; returns the tree and newly found LFS paths.
+pub(crate) fn snapshot_into(
+    inputs: &SnapshotInputs,
+    locked: &mut dyn LockedWorkingCopy,
+    reference: &MergedTree,
+) -> Result<(MergedTree, BTreeSet<RepoPathBuf>)> {
+    let not_lfs = DifferenceMatcher::new(EverythingMatcher, FilesMatcher::new(&inputs.lfs));
+    let options = SnapshotOptions {
+        base_ignores: inputs.ignores.clone(),
+        progress: None,
+        start_tracking_matcher: &not_lfs,
+        force_tracking_matcher: &NothingMatcher,
+        max_new_file_size: inputs.limit,
+    };
+    let (snapshot, stats) = locked.snapshot(&options).block_on()?;
+    let mut new_lfs = BTreeSet::new();
+    for (path, reason) in &stats.untracked_paths {
+        if matches!(reason, UntrackedReason::FileTooLarge { .. }) {
+            new_lfs.insert(path.clone());
+        }
+    }
+    // Files that grew past the limit, and binary files (even when the CLI tracked them first), leave the tree.
+    let mut untrack = Vec::new();
+    for (path, after) in diff_files(reference, &snapshot, &EverythingMatcher)? {
+        if let Some(Some(TreeValue::File { .. })) = after.as_resolved() {
+            let disk = path.to_fs_path(&inputs.root).map_err(|e| anyhow!("{e}"))?;
+            if crate::lfs::is_lfs(&disk, inputs.limit) {
+                untrack.push(path);
+            }
+        }
+    }
+    if untrack.is_empty() {
+        return Ok((snapshot, new_lfs));
+    }
+    let mut builder = MergedTreeBuilder::new(snapshot);
+    for path in untrack {
+        builder.set_or_remove(path.clone(), Merge::absent());
+        new_lfs.insert(path);
+    }
+    Ok((builder.write_tree().block_on()?, new_lfs))
+}
+
+/// Committed history from @'s first parent down to (excluding) the root, newest first.
 pub(crate) fn first_parent_chain(repo: &dyn jj_lib::repo::Repo, wc: &Commit) -> Result<Vec<Commit>> {
     let root = repo.store().root_commit_id().clone();
     let mut chain = Vec::new();
@@ -357,35 +440,10 @@ pub(crate) fn first_parent_chain(repo: &dyn jj_lib::repo::Repo, wc: &Commit) -> 
     Ok(chain)
 }
 
-pub(crate) fn local_day(timestamp: &Timestamp) -> i64 {
-    let seconds = timestamp.timestamp.0.div_euclid(1000) + i64::from(timestamp.tz_offset) * 60;
-    seconds.div_euclid(86_400)
-}
-
-/// Runs of at least two consecutive commits older than `cutoff` on the same local day, as index ranges.
-fn squash_groups(oldest_first: &[Commit], cutoff: i64) -> Vec<std::ops::Range<usize>> {
-    let mut groups = Vec::new();
-    let mut i = 0;
-    while i < oldest_first.len() {
-        let time = &oldest_first[i].committer().timestamp;
-        if time.timestamp.0 >= cutoff {
-            break;
-        }
-        let day = local_day(time);
-        let mut j = i + 1;
-        while j < oldest_first.len() {
-            let t = &oldest_first[j].committer().timestamp;
-            if t.timestamp.0 >= cutoff || local_day(t) != day {
-                break;
-            }
-            j += 1;
-        }
-        if j - i > 1 {
-            groups.push(i..j);
-        }
-        i = j;
-    }
-    groups
+/// A description without Typewright's trailer, for display.
+pub(crate) fn display_description(description: &str) -> String {
+    let trimmed = description.trim_end();
+    trimmed.strip_suffix(APP_TRAILER).map_or(trimmed, |d| d.trim_end()).to_owned()
 }
 
 /// Changed file paths between two trees with their new values.

@@ -1,0 +1,64 @@
+# typewright-config-version: 1
+#
+# Managed by Typewright. This is the jj repo config of Typewright's library:
+#   {{ROOT}}
+# Typewright rewrites this file when it updates its template, unless you edited it; then it only keeps
+# `snapshot.max-new-file-size` current. Put personal settings (name, editor, colors, your own aliases) in your user
+# config (`jj config edit --user`), not here.
+#
+# For people and AI agents running `jj` in this folder
+# =====================================================
+#
+# What this repository is
+# - Typewright's library: every top-level folder is one space (a Typst project). Folders elsewhere on disk may be
+#   symlinks into it. It has no remote; Typewright syncs between devices on its own.
+# - Typewright commits by itself: after 5 s without changes, or every 60 s while changes keep coming. The working
+#   copy changes under you, and Typewright's operations run concurrently with yours. That's expected: jj merges
+#   concurrent operations automatically. Its commits end in the trailer `Typewright-Commit: auto`.
+# - Autosaves older than the "squash after N days" setting are squashed into one commit per day. Only Typewright's
+#   own linear autosave commits are squashed: never commits with your description, bookmarks or tags, merges,
+#   conflicts, or ancestors of tags. Trees never change, so nothing you can check out changes either.
+#
+# Never touch
+# - `refs/typewright/shares/*` in the backing git repo: sync state. Don't delete or rewrite them, and don't run
+#   `git gc --prune=now` or similar on `.jj/repo/store/git`.
+# - `.jj/typewright/`: Typewright's own state (LFS file list, sync heads).
+# - Deleting `.jj`, adding a `.git` at the root or colocating (`jj git init --colocate`, `jj git colocation`),
+#   `jj sparse set` (Typewright resets sparse patterns to everything), `jj workspace forget default`.
+#
+# LFS files
+# - Files above {{LIMIT_HUMAN}} and binary files (images, PDFs, fonts, anything with a NUL byte) are deliberately
+#   NOT tracked: Typewright syncs them whole. They're listed in the backing repo's `info/exclude`, so `jj status`
+#   ignores them too. Don't `jj file track` them.
+#
+# Conflicts
+# - Sync merges can leave jj conflicts in @ (`jj resolve --list`). Resolve by editing the file and removing the
+#   conflict markers (git style, `<<<<<<<`), or with `jj resolve`. Typewright picks the resolution up with its
+#   next commit and publishes it. Don't `jj abandon` the conflicted commit.
+#
+# Safe
+# - `jj log`, `jj diff`, `jj show`, `jj file show`, `jj evolog`, `jj op log`.
+# - `jj describe` (Typewright keeps your description), `jj new`, `jj edit` (Typewright keeps committing on top of
+#   whatever @ is), bookmarks and tags (they also protect commits from squashing), `jj restore`, `jj undo`,
+#   `jj op restore` (sync state lives outside jj's view and is unaffected).
+# - Extra workspaces (`jj workspace add <path>`): put them OUTSIDE this folder (a workspace inside it is a folder
+#   with its own `.jj`, which the library skips). Typewright refreshes their working-copy state in place after its
+#   own rewrites when their files are unchanged; otherwise run `jj workspace update-stale` there.
+#
+# Helpers: `jj tw-help` prints this file, `jj tw-log` shows the library's history without autosave noise,
+# `jj log -r 'tw_autosaves()'` lists Typewright's autosaves.
+
+[ui]
+# Typewright reads this file too, so the app and the CLI write and parse conflict markers the same way.
+conflict-marker-style = "git"
+
+[snapshot]
+# The LFS limit (Settings › Devices); larger new files stay untracked. Kept current by Typewright.
+max-new-file-size = {{LIMIT}}
+
+[revset-aliases]
+"tw_autosaves()" = 'description(substring:"Typewright-Commit: auto")'
+
+[aliases]
+tw-help = ["util", "exec", "--", "cat", "{{CONFIG_PATH}}"]
+tw-log = ["log", "-r", "all() ~ (tw_autosaves() ~ heads(all()))"]

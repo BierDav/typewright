@@ -4,32 +4,50 @@
 
 /// The one internal jj repository holding every space as a top-level folder; see `jjBridge/src/lib.rs`.
 /// Paths are relative to the repository root with `/` separators (`Thesis/main.typ`); a space is its first component.
-/// Every call returning `char *` returns JSON (free with `twj_string_free`); failures are `{"error": "…"}`.
+/// Every call returning `char *` returns JSON (free with `twj_string_free`); failures are `{"error": "…"}`, with
+/// `"busy": true` when another jj process (the CLI) holds the working copy lock for over 2 s: retry later.
 /// Calls block; the app calls them off the main thread. One repo handle may be used from one thread at a time.
+/// The user may run the jj CLI on the repo at any time. Every mutating call first loads at head (merging concurrent
+/// operations) and normalizes: recreates a forgotten workspace, resets sparse patterns to everything, and recovers a
+/// stale working copy by snapshotting the disk and carrying its edits onto the current @ (the disk wins where both
+/// changed), or with jj's recovery commit if the working copy's operation is gone. Files on disk are never lost.
+/// Other workspaces whose @ a call rewrote are refreshed in place when their files still match; otherwise they're
+/// left stale and the result gains `"staleWorkspaces": ["name", …]` (`jj workspace update-stale` fixes them).
+/// Folders containing their own `.jj` or `.git` (nested workspaces or repos) are never tracked (jj skips them).
 typedef struct TWJRepo TWJRepo;
 
-/// Opens the repository at `root`, creating it (git backend, not colocated) if missing. NULL if it can't.
+/// Opens the repository at `root`, creating it (git backend, not colocated) if missing, and tracking the files there.
+/// A `.jj` that can't be loaded is moved to `.jj.broken-<YYYYMMDD-HHMMSS>` and replaced by a fresh repository; files
+/// are untouched. Writes the managed repo config where jj 0.46 reads it (`jj config path --repo`:
+/// `$XDG_CONFIG_HOME/jj` or `~/.config/jj` + `/repos/<id>/config.toml`) unless the user edited it, and lists LFS files and
+/// Finder litter in the backing repo's `info/exclude` so the CLI ignores them too. NULL if it can't.
 TWJRepo *_Nullable twj_open(const char *_Nonnull root);
 void twj_close(TWJRepo *_Nonnull repo);
 
-/// Files above `bytes` are LFS files: never tracked by jj (no history, no diffs), synced whole by hash.
+/// Files above `bytes` are LFS files: never tracked by jj (no history, no diffs), synced whole by hash. Also written
+/// to the repo config as `snapshot.max-new-file-size` for the CLI.
 void twj_set_lfs_limit(TWJRepo *_Nonnull repo, uint64_t bytes);
 
-/// Snapshots the working copy and, if anything changed, commits it with `message` and starts a new empty change.
+/// Snapshots the working copy and, if anything changed, commits @ with `message` and starts a new empty change on it.
+/// Commits on top of wherever the user moved @ (`jj new`/`jj edit`, merges); a description the user gave @ is kept,
+/// otherwise the message gets the trailer `Typewright-Commit: auto` (hidden in `twj_file_history`).
 /// `{"commit": "<id>" | null, "changed": ["Space/a.typ", …]}`; `changed` also lists LFS files that changed on disk
 /// (with `commit` null if only those did). Finder and editor litter (`.DS_Store`, `._*`, swap files) is ignored.
 /// Binary files (by extension or a NUL byte) and files above the LFS limit are LFS files, also when a tracked file grows
 /// past it; they're listed in `.jj/typewright/state.json`, not in the user's folders.
 char *_Nonnull twj_commit(TWJRepo *_Nonnull repo, const char *_Nonnull message);
 
-/// Squashes commits older than `days` into one commit per calendar day (local time). `{"squashed": n}`.
+/// Squashes commits older than `days` (author time) into one commit per calendar day (local time). `{"squashed": n}`.
+/// Only Typewright's own linear autosaves along @'s first parents: never commits with the user's description,
+/// bookmarks or tags, merges, conflicts, divergent changes or ancestors of tags and remote bookmarks. Trees and
+/// timestamps don't change; descendants and bookmarks follow.
 char *_Nonnull twj_squash(TWJRepo *_Nonnull repo, uint32_t days);
 
-/// Versions of a file, newest first, at most `limit`:
+/// Versions of a file along the app workspace's @ (first parents, whichever workspace made them), newest first, at most `limit`:
 /// `[{"commit", "time" (unix seconds), "description", "kind": "added"|"modified"|"deleted"|"renamed", "from"?: old path,
 ///    "added": lines, "removed": lines}]`. Follows the file across renames inside one commit.
 char *_Nonnull twj_file_history(TWJRepo *_Nonnull repo, const char *_Nonnull path, uint32_t limit);
-/// The file's content in `commit`: `{"text": "…"}` for UTF-8, `{"data": "<base64>"}` otherwise, `{"missing": true}` if absent
+/// The file's content in `commit` (any commit, also hidden or abandoned ones): `{"text": "…"}` for UTF-8, `{"data": "<base64>"}` otherwise, `{"missing": true}` if absent
 /// (LFS files are always missing). A conflicted file comes with conflict markers.
 char *_Nonnull twj_file_at(TWJRepo *_Nonnull repo, const char *_Nonnull commit, const char *_Nonnull path);
 /// Writes the file's content from `commit` into the working copy (atomically) and commits "Restore <path>". `{"commit"}`.

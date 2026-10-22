@@ -7,7 +7,22 @@ use crate::repo::{Repo, millis};
 
 const DAY: i64 = 86_400_000;
 
-fn open(dir: &Path) -> Repo { Repo::open(dir).unwrap() }
+/// Keeps jj's config root (the managed repo config) out of the real home.
+pub(crate) fn setup() -> &'static Path {
+    static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: runs once, before any test reads the environment through the bridge.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+        dir
+    })
+    .path()
+}
+
+fn open(dir: &Path) -> Repo {
+    setup();
+    Repo::open(dir).unwrap()
+}
 
 fn write(repo: &Repo, path: &str, text: impl AsRef<[u8]>) {
     let disk = repo.root().join(path);
@@ -325,6 +340,7 @@ fn conflict_names() {
 #[test]
 fn ffi_json_and_git_validity() {
     use std::ffi::{CStr, CString};
+    setup();
     let dir = tempfile::tempdir().unwrap();
     let c = |s: &str| CString::new(s).unwrap();
     let take = |ptr: *mut std::ffi::c_char| -> Value {
@@ -360,4 +376,10 @@ fn ffi_json_and_git_validity() {
         let text = String::from_utf8_lossy(&show.stdout);
         assert!(text.contains("author Typewright Sync <sync@typewright.invalid> 1767225600 +0000"), "{text}");
     }
+}
+
+#[test]
+fn exclude_patterns_are_escaped() {
+    assert_eq!(crate::config::test_pattern("S/a[1]*.png"), "/S/a\\[1\\]\\*.png");
+    assert_eq!(crate::config::test_pattern("S/#x !y "), "/S/\\#x \\!y\\ ");
 }

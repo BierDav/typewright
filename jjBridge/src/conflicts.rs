@@ -98,7 +98,7 @@ impl Repo {
 
     /// Writes the resolution (text, or side `side` of a binary conflict) and commits it.
     pub fn resolve(&mut self, path: &str, text: Option<&str>, side: i32) -> Result<Value> {
-        let repo = self.head()?;
+        let repo = self.prepare()?;
         let store = repo.store().clone();
         let tree = self.wc_commit(&repo)?.tree();
         let rpath = repo_path(path)?;
