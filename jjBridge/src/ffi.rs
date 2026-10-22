@@ -1,96 +1,159 @@
-//! C interface, see `include/JJBridge.h`. Stubs until the jj-lib implementation lands.
-use std::ffi::{CString, c_char};
+//! C interface, see `include/JJBridge.h`: a thin JSON layer over `Repo`.
+#![allow(clippy::missing_safety_doc)]
+use std::ffi::{CStr, CString, c_char};
 
-pub struct TWJRepo;
-fn json(value: serde_json::Value) -> *mut c_char { CString::new(value.to_string()).unwrap().into_raw() }
-fn unimplemented() -> *mut c_char { json(serde_json::json!({"error": "unimplemented"})) }
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_open(_root: *const c_char) -> *mut TWJRepo {
-    Box::into_raw(Box::new(TWJRepo))
+use crate::repo::Repo;
+
+pub struct TWJRepo(Repo);
+
+fn to_c(value: Value) -> *mut c_char {
+    CString::new(value.to_string()).unwrap_or_else(|_| CString::new("{\"error\":\"nul in output\"}").unwrap()).into_raw()
+}
+
+fn respond(result: Result<Value>) -> *mut c_char {
+    to_c(result.unwrap_or_else(|e| json!({"error": format!("{e:#}")})))
+}
+
+unsafe fn text<'a>(ptr: *const c_char) -> Result<&'a str> {
+    if ptr.is_null() {
+        return Err(anyhow!("missing argument"));
+    }
+    Ok(unsafe { CStr::from_ptr(ptr) }.to_str()?)
+}
+
+unsafe fn repo<'a>(ptr: *mut TWJRepo) -> &'a mut Repo { &mut unsafe { &mut *ptr }.0 }
+
+/// Runs `body`, turning panics into errors so they never unwind into Swift.
+fn guard(body: impl FnOnce() -> Result<Value>) -> *mut c_char {
+    respond(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).unwrap_or_else(|panic| {
+        let message = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()));
+        Err(anyhow!("panic: {}", message.unwrap_or_default()))
+    }))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_close(_repo: *mut TWJRepo) {
-    if !_repo.is_null() { drop(unsafe { Box::from_raw(_repo) }); }
+pub unsafe extern "C" fn twj_open(root: *const c_char) -> *mut TWJRepo {
+    let Ok(root) = (unsafe { text(root) }) else { return std::ptr::null_mut() };
+    match std::panic::catch_unwind(|| Repo::open(std::path::Path::new(root))) {
+        Ok(Ok(repo)) => Box::into_raw(Box::new(TWJRepo(repo))),
+        Ok(Err(e)) => {
+            eprintln!("jj: open {root}: {e:#}");
+            std::ptr::null_mut()
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_set_lfs_limit(_repo: *mut TWJRepo, _bytes: u64) {
-    
+pub unsafe extern "C" fn twj_close(repo: *mut TWJRepo) {
+    if !repo.is_null() {
+        drop(unsafe { Box::from_raw(repo) });
+    }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_commit(_repo: *mut TWJRepo, _message: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_set_lfs_limit(repo: *mut TWJRepo, bytes: u64) { unsafe { self::repo(repo) }.set_lfs_limit(bytes) }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn twj_commit(repo: *mut TWJRepo, message: *const c_char) -> *mut c_char {
+    guard(|| {
+        let c = unsafe { self::repo(repo) }.commit(unsafe { text(message) }?)?;
+        Ok(json!({"commit": c.commit, "changed": c.changed}))
+    })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_squash(_repo: *mut TWJRepo, _days: u32) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_squash(repo: *mut TWJRepo, days: u32) -> *mut c_char {
+    guard(|| Ok(json!({"squashed": unsafe { self::repo(repo) }.squash(days)?})))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_file_history(_repo: *mut TWJRepo, _path: *const c_char, _limit: u32) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_file_history(repo: *mut TWJRepo, path: *const c_char, limit: u32) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.file_history(unsafe { text(path) }?, limit))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_file_at(_repo: *mut TWJRepo, _commit: *const c_char, _path: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_file_at(repo: *mut TWJRepo, commit: *const c_char, path: *const c_char) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.file_at(unsafe { text(commit) }?, unsafe { text(path) }?))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_restore_file(_repo: *mut TWJRepo, _commit: *const c_char, _path: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_restore_file(repo: *mut TWJRepo, commit: *const c_char, path: *const c_char) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.restore_file(unsafe { text(commit) }?, unsafe { text(path) }?))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_conflicts(_repo: *mut TWJRepo, _prefix: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_conflicts(repo: *mut TWJRepo, prefix: *const c_char) -> *mut c_char {
+    guard(|| Ok(json!(unsafe { self::repo(repo) }.conflicts(unsafe { text(prefix) }?)?)))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_conflict(_repo: *mut TWJRepo, _path: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_conflict(repo: *mut TWJRepo, path: *const c_char) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.conflict(unsafe { text(path) }?))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_resolve(_repo: *mut TWJRepo, _path: *const c_char, _text: *const c_char, _side: i32) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_resolve(repo: *mut TWJRepo, path: *const c_char, text: *const c_char, side: i32) -> *mut c_char {
+    guard(|| {
+        let resolution = if text.is_null() { None } else { Some(unsafe { self::text(text) }?) };
+        unsafe { self::repo(repo) }.resolve(unsafe { self::text(path) }?, resolution, side)
+    })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_export_node(_repo: *mut TWJRepo, _share: *const c_char, _path: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_export_node(repo: *mut TWJRepo, share: *const c_char, path: *const c_char) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.export_node(unsafe { text(share) }?, unsafe { text(path) }?))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_node(_repo: *mut TWJRepo, _share: *const c_char, _node: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_node(repo: *mut TWJRepo, share: *const c_char, node: *const c_char) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.node(unsafe { text(share) }?, unsafe { text(node) }?))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_missing_objects(_repo: *mut TWJRepo, _manifest: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_missing_objects(repo: *mut TWJRepo, manifest: *const c_char) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.missing_objects(unsafe { text(manifest) }?))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_write_objects(_repo: *mut TWJRepo, _oids: *const c_char, _dir: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_write_objects(repo: *mut TWJRepo, oids: *const c_char, dir: *const c_char) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.write_objects(unsafe { text(oids) }?, unsafe { text(dir) }?))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_import_node(_repo: *mut TWJRepo, _share: *const c_char, _manifest: *const c_char, _dir: *const c_char, _label: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_import_node(
+    repo: *mut TWJRepo,
+    share: *const c_char,
+    manifest: *const c_char,
+    dir: *const c_char,
+    label: *const c_char,
+) -> *mut c_char {
+    guard(|| {
+        let r = unsafe { self::repo(repo) };
+        r.import_node(unsafe { text(share) }?, unsafe { text(manifest) }?, unsafe { text(dir) }?, unsafe { text(label) }?)
+    })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_merge_node(_repo: *mut TWJRepo, _share: *const c_char, _path: *const c_char, _node: *const c_char, _lfs_dir: *const c_char) -> *mut c_char {
-    unimplemented()
+pub unsafe extern "C" fn twj_merge_node(
+    repo: *mut TWJRepo,
+    share: *const c_char,
+    path: *const c_char,
+    node: *const c_char,
+    lfs_dir: *const c_char,
+) -> *mut c_char {
+    guard(|| {
+        let r = unsafe { self::repo(repo) };
+        r.merge_node(unsafe { text(share) }?, unsafe { text(path) }?, unsafe { text(node) }?, unsafe { text(lfs_dir) }?)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_string_free(string: *mut c_char) {
-    if !string.is_null() { drop(unsafe { CString::from_raw(string) }); }
+    if !string.is_null() {
+        drop(unsafe { CString::from_raw(string) });
+    }
 }

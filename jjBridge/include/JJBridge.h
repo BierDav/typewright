@@ -16,7 +16,10 @@ void twj_close(TWJRepo *_Nonnull repo);
 void twj_set_lfs_limit(TWJRepo *_Nonnull repo, uint64_t bytes);
 
 /// Snapshots the working copy and, if anything changed, commits it with `message` and starts a new empty change.
-/// `{"commit": "<id>" | null, "changed": ["Space/a.typ", …]}`.
+/// `{"commit": "<id>" | null, "changed": ["Space/a.typ", …]}`; `changed` also lists LFS files that changed on disk
+/// (with `commit` null if only those did). Finder and editor litter (`.DS_Store`, `._*`, swap files) is ignored.
+/// Binary files (by extension or a NUL byte) and files above the LFS limit are LFS files, also when a tracked file grows
+/// past it; they're listed in `.jj/typewright/state.json`, not in the user's folders.
 char *_Nonnull twj_commit(TWJRepo *_Nonnull repo, const char *_Nonnull message);
 
 /// Squashes commits older than `days` into one commit per calendar day (local time). `{"squashed": n}`.
@@ -26,7 +29,8 @@ char *_Nonnull twj_squash(TWJRepo *_Nonnull repo, uint32_t days);
 /// `[{"commit", "time" (unix seconds), "description", "kind": "added"|"modified"|"deleted"|"renamed", "from"?: old path,
 ///    "added": lines, "removed": lines}]`. Follows the file across renames inside one commit.
 char *_Nonnull twj_file_history(TWJRepo *_Nonnull repo, const char *_Nonnull path, uint32_t limit);
-/// The file's content in `commit`: `{"text": "…"}` for UTF-8, `{"data": "<base64>"}` otherwise, `{"missing": true}` if absent.
+/// The file's content in `commit`: `{"text": "…"}` for UTF-8, `{"data": "<base64>"}` otherwise, `{"missing": true}` if absent
+/// (LFS files are always missing). A conflicted file comes with conflict markers.
 char *_Nonnull twj_file_at(TWJRepo *_Nonnull repo, const char *_Nonnull commit, const char *_Nonnull path);
 /// Writes the file's content from `commit` into the working copy (atomically) and commits "Restore <path>". `{"commit"}`.
 char *_Nonnull twj_restore_file(TWJRepo *_Nonnull repo, const char *_Nonnull commit, const char *_Nonnull path);
@@ -34,7 +38,8 @@ char *_Nonnull twj_restore_file(TWJRepo *_Nonnull repo, const char *_Nonnull com
 /// Conflicted files of the working-copy commit under `prefix` ("" for all): `["Space/a.typ", …]`.
 char *_Nonnull twj_conflicts(TWJRepo *_Nonnull repo, const char *_Nonnull prefix);
 /// A conflicted file split into hunks: `{"path", "binary": bool, "sides": ["This Mac", "Laptop"], "hunks": [
-///   {"text": "…"} | {"conflict": {"base": "…", "sides": ["…", "…"]}}]}`; more than two sides are possible.
+///   {"text": "…"} | {"conflict": {"base": "…", "sides": ["…", "…"]}}]}`; more than two sides are possible (`base` is then
+///   the first base). Side 0 is this device ("This Mac"), the others are labelled by `twj_import_node`'s `label`.
 char *_Nonnull twj_conflict(TWJRepo *_Nonnull repo, const char *_Nonnull path);
 /// Resolves a conflict with `text` (or for binary files `side` index if `text` is NULL) and commits "Resolve <path>".
 char *_Nonnull twj_resolve(TWJRepo *_Nonnull repo, const char *_Nonnull path, const char *_Nullable text, int32_t side);
@@ -48,22 +53,29 @@ char *_Nonnull twj_resolve(TWJRepo *_Nonnull repo, const char *_Nonnull path, co
 /// Exports the current content of `path` as a node on top of the share's last synced node(s); returns the manifest:
 /// `{"node", "tree", "parents": [..], "files": {"rel/path": {"mode": "100644"|"100755", "size", "oid", "lfs": bool,
 ///   "blake3"?: hex for LFS files}}}`; `"unchanged": true` if equal to the last synced node.
+/// Commits pending changes first; fails while `path` has conflicts. A file share's tree holds the file as `@file`, so
+/// its name doesn't matter. LFS files aren't in the tree: they have no `oid` but `blake3` and `time` (when the content
+/// was first exported, to pick the newest on conflicts) and are listed in the node's message. `"objects"` lists the
+/// objects the parents don't have (node first), `"ancestry"` as in `twj_node`.
 char *_Nonnull twj_export_node(TWJRepo *_Nonnull repo, const char *_Nonnull share, const char *_Nonnull path);
 /// A stored node's manifest (same shape), including its ancestors' ids in `"ancestry"` (newest first, up to 64).
 char *_Nonnull twj_node(TWJRepo *_Nonnull repo, const char *_Nonnull share, const char *_Nonnull node);
-/// Git objects a manifest needs that the repo lacks: `["<oid>", …]` (LFS files never appear here).
+/// Git objects a manifest needs that the repo lacks: `["<oid>", …]` (LFS files never appear here). A missing parent
+/// shows up as its commit id; `twj_write_objects` sends a commit together with its whole tree.
 char *_Nonnull twj_missing_objects(TWJRepo *_Nonnull repo, const char *_Nonnull manifest);
 /// Writes the raw objects (zlib-free canonical bytes: `blob <len>\0…`, trees, commits) named by `oids` (JSON array)
-/// into `dir` as files named by oid, for transport. `{"written": n}`.
+/// into `dir` as files named by oid, for transport; node commits bring their tree's objects along. `{"written": n}`.
 char *_Nonnull twj_write_objects(TWJRepo *_Nonnull repo, const char *_Nonnull oids, const char *_Nonnull dir);
 /// Imports a remote node: `manifest` plus objects as files named by oid in `dir`; verifies the ids. `{"node"}`.
 char *_Nonnull twj_import_node(TWJRepo *_Nonnull repo, const char *_Nonnull share, const char *_Nonnull manifest,
                                const char *_Nonnull dir, const char *_Nonnull label);
 /// Merges an imported node into the share's local content at `path` (3-way, base = the nodes' merge base), writes
-/// changed files atomically (LFS files: the newest by node order wins, the other is kept as `name (conflict).ext`;
+/// changed files atomically (LFS files: the newest by `time` wins, the other is kept as `name (conflict).ext`;
 /// their bytes must already be at the path given in `lfs_dir/<blake3>`), and commits "Sync <share>".
-/// `{"node": merged node id | null if conflicted, "changed": [..], "conflicts": [..]}`; with conflicts the merged
-/// content stays a jj conflict in the working copy until `twj_resolve`, after which `twj_export_node` publishes it.
+/// Fast-forwards when one node descends from the other; a merge node's parents are sorted, so devices merging the
+/// same two nodes get the same id. `{"node": merged node id | null if conflicted, "changed": [..], "conflicts": [..]}`;
+/// with conflicts the merged content stays a jj conflict in the working copy until `twj_resolve`, after which
+/// `twj_export_node` publishes it with both parents. Fails while `path` already has unresolved conflicts.
 char *_Nonnull twj_merge_node(TWJRepo *_Nonnull repo, const char *_Nonnull share, const char *_Nonnull path,
                               const char *_Nonnull node, const char *_Nonnull lfs_dir);
 
