@@ -160,7 +160,9 @@ final class PreviewController {
         scroll.drawsBackground = false
         // Light knobs vanish over white pages in dark mode.
         scroll.scrollerKnobStyle = .dark
-        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 76, right: 0)
+        // PDFKit's clip is flipped, so `top` is the space under the glass bar; a bottom inset would
+        // reserve it above the pages and shrink the scroll range, which breaks every restored spot.
+        scroll.contentInsets = NSEdgeInsets(top: 76, left: 0, bottom: 0, right: 0)
     }
 
     func state() -> PreviewState? {
