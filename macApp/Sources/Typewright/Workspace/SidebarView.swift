@@ -188,6 +188,12 @@ struct SidebarView: View {
             items.append(.init("Open in New Window", "macwindow.badge.plus") {
                 Opener.shared.openInNewWindow(workspace.root, file: node.url)
             })
+            if FileHistory.isAvailable(for: node.url) {
+                items.append(.init("Show History…", "clock.arrow.circlepath") { FileHistory.show(node.url, in: workspace) })
+            }
+            if SpaceRepository.shared.hasConflict(node.url) {
+                items.append(.init("Resolve Conflict…", "arrow.triangle.merge") { FileHistory.resolve(node.url, in: workspace) })
+            }
         }
         items.append(.divider)
         items.append(.init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) })
@@ -666,6 +672,7 @@ private struct FileRow: View {
                     .gesture(TapGesture().onEnded(onStartRename), including: canClickToRename ? .all : .none)
             }
             Spacer(minLength: 0)
+            if SpaceRepository.shared.hasConflict(node.url) && !(isFolder && (hovered || menuOpen)) { ConflictBadge() }
             if isFolder && !isRenaming && (hovered || menuOpen) {
                 ZenMenuButton(systemName: "ellipsis", onOpenChange: { menuOpen = $0 }, items: menuItems)
                     .help("More")

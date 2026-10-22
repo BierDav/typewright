@@ -179,6 +179,11 @@ final class Opener {
 
     func previewCurrentFile() { keyState?.workspace?.previewSelectedFile() }
 
+    func showFileHistory() {
+        guard let ws = keyState?.workspace, let file = ws.selectedFile else { return }
+        FileHistory.show(file, in: ws)
+    }
+
     /// Slides to the space at `index` in the list, in the direction of its place relative to the current one.
     func switchToSpace(at index: Int, in state: WindowState) {
         let spaces = SpaceList.all

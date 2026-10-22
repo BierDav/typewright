@@ -37,6 +37,7 @@ struct SpaceView: View {
     var body: some View {
         content
             .ignoresSafeArea(.container, edges: .top)
+            .modifier(HistoryPresenter(workspace: workspace))
             .onAppear {
                 workspace.scheduleCompile(delay: 0)
             }
@@ -269,6 +270,11 @@ struct SpaceView: View {
                 .animation(.smooth(duration: 0.2), value: workspace.find.isVisible)
             } else {
                 ContentUnavailableView("No file selected", systemImage: "doc")
+            }
+            if let file = workspace.selectedFile, SpaceRepository.shared.hasConflict(file) {
+                Divider()
+                ConflictBar(onShowHistory: { FileHistory.show(file, in: workspace) },
+                            onResolve: { FileHistory.resolve(file, in: workspace) })
             }
             Divider()
             HStack(spacing: 12) {

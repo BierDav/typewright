@@ -471,6 +471,16 @@ struct CommandPalette: View {
                                      section: "File", keywords: ["references", "imports", "includes", "where used"],
                                      action: .page(PalettePage(title: "Usages of \(name)", placeholder: "Filter usages…",
                                                                kind: .list { usageItems(of: file, ws) }))))
+            if FileHistory.isAvailable(for: file) {
+                items.append(PaletteItem(id: "file.history", title: "Show History of \(name)…", icon: "clock.arrow.circlepath",
+                                         section: "File", keywords: ["versions", "restore", "diff", "time machine"],
+                                         action: .run { FileHistory.show(file, in: ws) }))
+            }
+            if SpaceRepository.shared.hasConflict(file) {
+                items.append(PaletteItem(id: "file.conflict", title: "Resolve Conflict in \(name)…", icon: "arrow.triangle.merge",
+                                         section: "File", keywords: ["merge", "sync"],
+                                         action: .run { FileHistory.resolve(file, in: ws) }))
+            }
             items.append(PaletteItem(id: "file.rename", title: "Rename \(name)…", icon: "pencil", section: "File",
                                      action: .page(PalettePage(title: "Rename \(name)", placeholder: "New name",
                                                                kind: .input(initial: name) { new in

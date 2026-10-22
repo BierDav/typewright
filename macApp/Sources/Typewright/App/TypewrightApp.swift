@@ -96,6 +96,7 @@ struct AppCommands: Commands {
         CommandGroup(after: .saveItem) {
             Button("Move File…") { Opener.shared.showPalette(page: "file.move") }
                 .keyboardShortcut(keys.moveFile)
+            Button("Show File History…") { Opener.shared.showFileHistory() }
             Button("Close Space") { Opener.shared.closeSpace() }
                 .keyboardShortcut(keys.closeSpace)
         }
