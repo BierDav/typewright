@@ -179,6 +179,17 @@ final class Workspace: EditorLanguage {
                 guard (note.object as? URL)?.standardizedFileURL == root else { return }
                 MainActor.assumeIsolated { self?.refreshFromDisk() }
             },
+            // Restores, resolves and repairs of a stale working copy rewrite files under open editors.
+            NotificationCenter.default.addObserver(forName: SpaceRepository.didCommit, object: nil, queue: .main) { [weak self] note in
+                guard note.userInfo?["wrote"] as? Bool == true else { return }
+                let changed = note.userInfo?["changed"] as? [String] ?? []
+                MainActor.assumeIsolated {
+                    guard let space = SpaceRepository.shared.relativePath(of: root),
+                          changed.isEmpty || changed.contains(where: { $0.hasPrefix(space + "/") })
+                    else { return }
+                    self?.refreshFromDisk()
+                }
+            },
             NotificationCenter.default.addObserver(forName: SyncService.syncedSpacesDidChange, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.live.close()

@@ -50,5 +50,15 @@ struct HistorySettings: View {
             }
         }
         .formStyle(.grouped)
+        .safeAreaInset(edge: .bottom) {
+            if let error = SpaceRepository.shared.lastError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .symbolRenderingMode(.multicolor)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .padding()
+            }
+        }
     }
 }

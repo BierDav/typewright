@@ -51,9 +51,7 @@ struct FileHistoryView: View {
             ContentUnavailableView {
                 Label("No History", systemImage: "clock.arrow.circlepath")
             } description: {
-                Text(FileHistory.isAvailable(for: model.file) || workspace == nil
-                     ? "Versions appear here a few seconds after the file changes."
-                     : "History is kept for spaces in Typewright's library.")
+                Text(emptyDescription)
             }
         } else {
             List(selection: $model.selection) {
@@ -68,6 +66,16 @@ struct FileHistoryView: View {
             }
             .listStyle(.sidebar)
         }
+    }
+
+    private var emptyDescription: String {
+        if FileHistory.isAvailable(for: model.file) || workspace == nil {
+            return "Versions appear here a few seconds after the file changes."
+        }
+        if SpaceFolders.gitRepository(containing: model.file, below: SpaceRepository.shared.root) != nil {
+            return SpaceFolders.gitRepositoryNote
+        }
+        return "History is kept for spaces in Typewright's library."
     }
 
     static func dayTitle(_ day: Date, calendar: Calendar = .current) -> String {
@@ -200,13 +208,16 @@ struct FileHistoryView: View {
             case .data(let data)?: restored = (try? data.write(to: model.file, options: .atomic)) != nil
             default: break
             }
-            if restored { await repository.commit("Restore \(model.path)") }
+            if restored {
+                await repository.commit("Restore \(model.path)")
+                workspace.refreshFromDisk()
+            }
         }
         guard restored else {
             failure = "The version couldn't be written back. Try again in a moment."
             return
         }
-        workspace.refreshFromDisk()
+        // `restore` reloads editors through `didCommit`.
         dismiss()
     }
 }

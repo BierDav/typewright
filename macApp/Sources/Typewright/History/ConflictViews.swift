@@ -289,7 +289,7 @@ struct ConflictResolveView: View {
             failed = true
             return
         }
-        workspace?.refreshFromDisk()
+        // `resolve` reloads editors through `didCommit`.
         dismiss()
     }
 }

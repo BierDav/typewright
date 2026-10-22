@@ -58,7 +58,8 @@ struct FileConflict: Equatable {
 final class SpaceRepository {
     static let shared = SpaceRepository()
 
-    /// Posted after a commit with `changed` (repo-relative paths) in `userInfo`.
+    /// Posted after a commit with `changed` (repo-relative paths) in `userInfo`, and `wrote: true` when files on disk
+    /// were rewritten (restore, resolve, a repaired stale working copy), so editors reload.
     static let didCommit = Notification.Name("SpaceRepositoryDidCommit")
     /// Posted when the set of conflicted files changed.
     static let conflictsDidChange = Notification.Name("SpaceRepositoryConflictsDidChange")
@@ -67,6 +68,15 @@ final class SpaceRepository {
     let root: URL
     /// Conflicted files, as file URLs inside `root`.
     private(set) var conflicted: Set<URL> = []
+    /// The last error the bridge reported, cleared by the next call that works.
+    private(set) var lastError: String?
+
+    /// What a commit did; `busy` means the jj CLI held the repository, so try again shortly.
+    enum CommitOutcome: Equatable {
+        case committed([String])
+        case busy
+        case failed
+    }
 
     @ObservationIgnored private let queue = DispatchQueue(label: "Typewright.SpaceRepository")
     @ObservationIgnored nonisolated(unsafe) private var handle: OpaquePointer?
@@ -78,6 +88,16 @@ final class SpaceRepository {
     }
 
     nonisolated static var defaultRoot: URL {
+        // The test host must never open the real library; a fixed path keeps it one repo across runs.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("TypewrightTests/Spaces", isDirectory: true)
+        }
+        #if DEBUG
+        // Lets a dev run use a scratch library instead of the real one.
+        if let path = ProcessInfo.processInfo.environment["TYPEWRIGHT_SPACES_ROOT"], !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        #endif
         // The sandbox's home is the container; links into it would need other apps to pass App Data protection.
         let home = getpwuid(getuid()).flatMap { $0.pointee.pw_dir.map { String(cString: $0) } } ?? NSHomeDirectory()
         return URL(fileURLWithPath: home, isDirectory: true)
@@ -110,21 +130,28 @@ final class SpaceRepository {
 
     // MARK: - History
 
-    /// Commits whatever changed on disk; returns the changed paths.
+    /// Commits whatever changed on disk.
     @discardableResult
-    func commit(_ message: String = "Edit") async -> [String] {
+    func commit(_ message: String = "Edit") async -> CommitOutcome {
         struct Result: Decodable { let commit: String?; let changed: [String] }
-        guard let result: Result = await call({ twj_commit($0, message) }) else { return [] }
-        if !result.changed.isEmpty {
-            NotificationCenter.default.post(name: Self.didCommit, object: self, userInfo: ["changed": result.changed])
-            await refreshConflicts()
+        switch await reply({ twj_commit($0, message) }) as Reply<Result> {
+        case .busy: return .busy
+        case .failed: return .failed
+        case .ok(let result):
+            if !result.changed.isEmpty {
+                postDidCommit(result.changed, wrote: false)
+                await refreshConflicts()
+            }
+            return .committed(result.changed)
         }
-        return result.changed
     }
 
-    func squash(olderThan days: Int) async {
+    /// Whether the squash ran (false when it failed or the CLI held the repository).
+    @discardableResult
+    func squash(olderThan days: Int) async -> Bool {
         struct Result: Decodable { let squashed: Int }
-        let _: Result? = await call { twj_squash($0, UInt32(clamping: days)) }
+        let result: Result? = await call { twj_squash($0, UInt32(clamping: days)) }
+        return result != nil
     }
 
     func history(of url: URL, limit: Int = 500) async -> [FileVersion] {
@@ -146,7 +173,7 @@ final class SpaceRepository {
         struct Result: Decodable { let commit: String? }
         guard let path = relativePath(of: url), let _: Result = await call({ twj_restore_file($0, commit, path) })
         else { return false }
-        NotificationCenter.default.post(name: Self.didCommit, object: self, userInfo: ["changed": [path]])
+        postDidCommit([path], wrote: true)
         return true
     }
 
@@ -191,7 +218,7 @@ final class SpaceRepository {
             return twj_resolve(repo, path, nil, Int32(side))
         }
         guard result != nil else { return false }
-        NotificationCenter.default.post(name: Self.didCommit, object: self, userInfo: ["changed": [path]])
+        postDidCommit([path], wrote: true)
         await refreshConflicts()
         return true
     }
@@ -213,15 +240,45 @@ final class SpaceRepository {
         }
     }
 
-    private struct BridgeError: Decodable { let error: String }
+    private func postDidCommit(_ changed: [String], wrote: Bool) {
+        NotificationCenter.default.post(name: Self.didCommit, object: self, userInfo: ["changed": changed, "wrote": wrote])
+    }
+
+    /// The fields the bridge may add to any object result.
+    private struct Meta: Decodable {
+        let error: String?
+        let busy: Bool?
+        let staleWorkspaces: [String]?
+        let wrote: Bool?
+    }
+
+    private enum Reply<T> {
+        case ok(T)
+        case busy
+        case failed
+    }
+
+    private func reply<T: Decodable>(_ body: @escaping @Sendable (OpaquePointer) -> UnsafeMutablePointer<CChar>?) async -> Reply<T> {
+        guard let data = await json(body) else { return .failed }
+        let meta = try? JSONDecoder().decode(Meta.self, from: data)
+        if let stale = meta?.staleWorkspaces, !stale.isEmpty {
+            NSLog("jj: left stale, run `jj workspace update-stale` there: %@", stale.joined(separator: ", "))
+        }
+        if meta?.wrote == true { postDidCommit([], wrote: true) }
+        if let error = meta?.error {
+            NSLog("jj: %@", error)
+            if meta?.busy == true { return .busy }
+            lastError = error
+            return .failed
+        }
+        guard let value = try? JSONDecoder().decode(T.self, from: data) else { return .failed }
+        lastError = nil
+        return .ok(value)
+    }
 
     private func call<T: Decodable>(_ body: @escaping @Sendable (OpaquePointer) -> UnsafeMutablePointer<CChar>?) async -> T? {
-        guard let data = await json(body) else { return nil }
-        if let error = try? JSONDecoder().decode(BridgeError.self, from: data) {
-            NSLog("jj: %@", error.error)
-            return nil
-        }
-        return try? JSONDecoder().decode(T.self, from: data)
+        if case .ok(let value) = await reply(body) as Reply<T> { return value }
+        return nil
     }
 
     private func run(_ body: @escaping @Sendable (OpaquePointer) -> Void) {
