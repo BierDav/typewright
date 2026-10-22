@@ -570,6 +570,12 @@ private struct SpaceRow: View {
                     .foregroundStyle(.tertiary)
                     .help(isShared ? "Shared with others" : "Synced across your devices")
             }
+            if shortcut == nil, SpaceFolders.isGitRepository(url) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .help(SpaceFolders.gitRepositoryNote)
+            }
         }
         .font(.system(size: 13))
         .foregroundStyle(isCurrent ? .primary : .secondary)

@@ -66,7 +66,7 @@ enum SpaceMigration {
             case .leaveAsIs:
                 markAnswered(url)
             case .replaceWithLink, .keepOriginal:
-                if await Opener.shared.importSpace(url, replace: choice == .replaceWithLink) != nil { markAnswered(url) }
+                if await Opener.shared.importSpace(url, replace: choice == .replaceWithLink, warnAboutGit: false) != nil { markAnswered(url) }
             }
         }
     }
@@ -97,6 +97,11 @@ private struct MigrationSheet: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
+                            if SpaceFolders.isGitRepository(url) {
+                                Label(SpaceFolders.gitRepositoryNote, systemImage: "exclamationmark.triangle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }

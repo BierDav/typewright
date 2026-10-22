@@ -14,16 +14,40 @@ enum SpaceFolders {
         }
     }
 
-    /// The repository's top-level folders; hidden ones like `.jj` aren't spaces.
+    /// The repository's top-level folders; hidden ones like `.jj` (or a `.jj.broken-…` moved aside) aren't spaces.
     static func spaces(in root: URL) -> [URL] {
         let items = (try? FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles])) ?? []
         return items.filter { url in
             let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            return values?.isDirectory == true && values?.isSymbolicLink != true
+            return values?.isDirectory == true && values?.isSymbolicLink != true && !isWorkspace(url)
         }
         .map(\.standardizedFileURL)
         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    /// A jj workspace added inside the library: jj never tracks it, and it isn't a space.
+    static func isWorkspace(_ url: URL) -> Bool { has(".jj", in: url) }
+
+    /// jj skips folders holding a `.git`, so a git checkout gets no history and doesn't sync.
+    static func isGitRepository(_ url: URL) -> Bool { has(".git", in: url) }
+
+    /// The git checkout `url` lies in, looking up to (not including) `root`.
+    static func gitRepository(containing url: URL, below root: URL) -> URL? {
+        let base = root.resolvingSymlinksInPath().standardizedFileURL.path
+        var dir = url.resolvingSymlinksInPath().standardizedFileURL
+        while dir.path.hasPrefix(base + "/") {
+            if isGitRepository(dir) { return dir }
+            dir = dir.deletingLastPathComponent()
+        }
+        return nil
+    }
+
+    /// Shown wherever a git checkout's missing history would surprise.
+    static let gitRepositoryNote = "Git repository: Typewright keeps no history for it and won't sync it."
+
+    private static func has(_ name: String, in url: URL) -> Bool {
+        (try? url.appendingPathComponent(name).checkResourceIsReachable()) == true
     }
 
     /// `name`, or `name 2`, `name 3`… when taken in `dir` (case-insensitively, like APFS).

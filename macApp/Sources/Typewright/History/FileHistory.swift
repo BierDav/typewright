@@ -14,8 +14,11 @@ enum FileHistory {
         NotificationCenter.default.post(name: showConflict, object: workspace, userInfo: ["file": file])
     }
 
-    /// History is only kept for files in the space repository.
-    static func isAvailable(for file: URL) -> Bool { SpaceRepository.shared.contains(file) }
+    /// History is only kept for files in the space repository, outside git checkouts (jj skips those).
+    static func isAvailable(for file: URL) -> Bool {
+        let repository = SpaceRepository.shared
+        return repository.contains(file) && SpaceFolders.gitRepository(containing: file, below: repository.root) == nil
+    }
 }
 
 extension SpaceRepository {

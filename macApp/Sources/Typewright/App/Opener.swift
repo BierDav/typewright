@@ -179,8 +179,10 @@ final class Opener {
 
     func previewCurrentFile() { keyState?.workspace?.previewSelectedFile() }
 
+    /// The menu can't follow the key window, so files without history (git checkouts, outside the library) beep.
     func showFileHistory() {
         guard let ws = keyState?.workspace, let file = ws.selectedFile else { return }
+        guard FileHistory.isAvailable(for: file) else { return NSSound.beep() }
         FileHistory.show(file, in: ws)
     }
 
@@ -314,8 +316,18 @@ final class Opener {
     }
 
     /// Copies a folder into the repository, asking whether a link replaces the original. Returns the new space.
-    func importSpace(_ source: URL, replace: Bool? = nil) async -> URL? {
+    /// `warnAboutGit` is off where the caller already told the user (the migration sheet).
+    func importSpace(_ source: URL, replace: Bool? = nil, warnAboutGit: Bool = true) async -> URL? {
         let source = source.standardizedFileURL
+        if warnAboutGit, SpaceFolders.isGitRepository(source) {
+            let alert = NSAlert()
+            alert.messageText = "“\(source.lastPathComponent)” is a Git repository"
+            alert.informativeText = "Typewright keeps no history for Git repositories and won't sync them, since Git "
+                + "already tracks their changes. You can still edit and preview it in Typewright."
+            alert.addButton(withTitle: "Import Anyway")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        }
         var replace = replace
         if replace == nil {
             let alert = NSAlert()

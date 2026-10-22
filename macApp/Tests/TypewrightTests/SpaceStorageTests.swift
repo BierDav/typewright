@@ -54,6 +54,16 @@ final class SpaceStorageTests: XCTestCase {
         XCTAssertEqual(timing.deadline, t0.addingTimeInterval(75))
     }
 
+    func testRetriesWhenTheRepositoryIsBusy() {
+        let t0 = Date(timeIntervalSince1970: 1000)
+        var timing = CommitTiming()
+        timing.retry(at: t0.addingTimeInterval(2))
+        XCTAssertEqual(timing.deadline, t0.addingTimeInterval(2))
+        XCTAssertFalse(timing.isDue(at: t0.addingTimeInterval(1)))
+        timing.change(at: t0.addingTimeInterval(1))
+        XCTAssertEqual(timing.deadline, t0.addingTimeInterval(6))
+    }
+
     func testIgnoresJJAndFinderMetadata() {
         let root = "/repo"
         XCTAssertTrue(CommitTiming.counts("/repo/Thesis/main.typ", root: root))
@@ -96,7 +106,35 @@ final class SpaceStorageTests: XCTestCase {
         try FileManager.default.createDirectory(at: root.appendingPathComponent(".jj"), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: root.appendingPathComponent("loose.txt").path, contents: Data())
         try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("Link"), withDestinationURL: first)
+        // A workspace added inside the library isn't a space, nor is a `.jj` moved aside.
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("ws/.jj"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".jj.broken-20261023-101010"),
+                                                withIntermediateDirectories: true)
         XCTAssertEqual(SpaceFolders.spaces(in: root).map(\.lastPathComponent), ["a-b", "Thesis", "thesis 2", "Untitled Space"])
+    }
+
+    func testDetectsGitRepositories() throws {
+        let root = dir.appendingPathComponent("Spaces")
+        let plain = try SpaceFolders.create(named: "Plain", in: root)
+        let git = try SpaceFolders.create(named: "Checkout", in: root)
+        try FileManager.default.createDirectory(at: git.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        // A worktree or submodule has a `.git` file instead of a folder.
+        let nested = git.appendingPathComponent("docs/sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: plain.appendingPathComponent("vendor"), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: plain.appendingPathComponent("vendor/.git").path, contents: Data("gitdir: x".utf8))
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+
+        XCTAssertTrue(SpaceFolders.isGitRepository(git))
+        XCTAssertFalse(SpaceFolders.isGitRepository(plain))
+        XCTAssertEqual(SpaceFolders.spaces(in: root).map(\.lastPathComponent), ["Checkout", "Plain"], "git checkouts stay spaces")
+        XCTAssertEqual(SpaceFolders.gitRepository(containing: nested.appendingPathComponent("a.typ"), below: root)?.path,
+                       git.resolvingSymlinksInPath().path)
+        XCTAssertEqual(SpaceFolders.gitRepository(containing: plain.appendingPathComponent("vendor/x.typ"), below: root)?.path,
+                       plain.appendingPathComponent("vendor").resolvingSymlinksInPath().path)
+        XCTAssertNil(SpaceFolders.gitRepository(containing: plain.appendingPathComponent("main.typ"), below: root))
+        // The library itself may be a git checkout; only folders below it count.
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        XCTAssertNil(SpaceFolders.gitRepository(containing: plain.appendingPathComponent("main.typ"), below: root))
     }
 
     func testImportKeepingTheOriginal() throws {
