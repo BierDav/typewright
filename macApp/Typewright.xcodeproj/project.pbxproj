@@ -304,10 +304,11 @@
 			name = "Build Iroh Bridge";
 			outputPaths = (
 				"$(BUILT_PRODUCTS_DIR)/libiroh_bridge.a",
+				"$(BUILT_PRODUCTS_DIR)/libjj_bridge.a",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# The typst bridge is built by the Quick Look extension, which builds first.\n\"$SRCROOT/../scripts/build-rust-bridge.sh\" irohBridge iroh_bridge\n";
+			shellScript = "# The typst bridge is built by the Quick Look extension, which builds first.\n\"$SRCROOT/../scripts/build-rust-bridge.sh\" irohBridge iroh_bridge\n\"$SRCROOT/../scripts/build-rust-bridge.sh\" jjBridge jj_bridge\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -419,7 +420,7 @@
 				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.Typewright;
 				SDKROOT = macosx;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include $(SRCROOT)/../irohBridge/include $(BUILT_PRODUCTS_DIR)/TypewrightCoreFFI";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include $(SRCROOT)/../irohBridge/include $(SRCROOT)/../jjBridge/include $(BUILT_PRODUCTS_DIR)/TypewrightCoreFFI";
 				TYPEWRIGHT_PASSKEY_DOMAIN = bierdav.github.io;
 			};
 			name = Release;
@@ -438,7 +439,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.TypewrightTests;
 				SDKROOT = macosx;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include $(SRCROOT)/../irohBridge/include $(BUILT_PRODUCTS_DIR)/TypewrightCoreFFI";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include $(SRCROOT)/../irohBridge/include $(SRCROOT)/../jjBridge/include $(BUILT_PRODUCTS_DIR)/TypewrightCoreFFI";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Typewright.app/Contents/MacOS/Typewright";
 			};
 			name = Release;
@@ -529,7 +530,7 @@
 				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.Typewright;
 				SDKROOT = macosx;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include $(SRCROOT)/../irohBridge/include $(BUILT_PRODUCTS_DIR)/TypewrightCoreFFI";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include $(SRCROOT)/../irohBridge/include $(SRCROOT)/../jjBridge/include $(BUILT_PRODUCTS_DIR)/TypewrightCoreFFI";
 				TYPEWRIGHT_PASSKEY_DOMAIN = bierdav.github.io;
 			};
 			name = Debug;
@@ -548,7 +549,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.bierdav.TypewrightTests;
 				SDKROOT = macosx;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include $(SRCROOT)/../irohBridge/include $(BUILT_PRODUCTS_DIR)/TypewrightCoreFFI";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/../typstBridge/include $(SRCROOT)/../irohBridge/include $(SRCROOT)/../jjBridge/include $(BUILT_PRODUCTS_DIR)/TypewrightCoreFFI";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Typewright.app/Contents/MacOS/Typewright";
 			};
 			name = Debug;

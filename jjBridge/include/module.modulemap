@@ -1,0 +1,7 @@
+module JJBridge {
+    header "JJBridge.h"
+    link "jj_bridge"
+    link framework "Security"
+    link framework "CoreFoundation"
+    export *
+}
