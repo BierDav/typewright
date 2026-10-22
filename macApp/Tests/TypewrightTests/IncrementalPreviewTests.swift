@@ -31,6 +31,16 @@ final class IncrementalPreviewTests: XCTestCase {
         NSApp.activate()
     }
 
+    /// Waits until the preview stopped re-aligning, since PDFKit lays swapped pages out after the call.
+    private func settle(_ preview: PreviewController) async throws {
+        try await Task.sleep(for: .milliseconds(50))
+        for _ in 0..<20 {
+            let before = preview.position()
+            try await Task.sleep(for: .milliseconds(20))
+            if preview.position() == before { return }
+        }
+    }
+
     private func pages(_ text: String) async throws -> [CompiledPage] {
         let result = await compiler.compile(main: "main.typ", buffers: ["main.typ": text], format: .pdf, incremental: true)
         return try XCTUnwrap(result.previewPages, result.log)
@@ -81,7 +91,7 @@ final class IncrementalPreviewTests: XCTestCase {
         let before = try await pages(source)
         preview.pendingPosition = DocumentPosition(page: 1.25, zoom: 4, pan: 0.7)
         preview.showPages(before)
-        try await Task.sleep(for: .milliseconds(100))
+        try await settle(preview)
         let position = try XCTUnwrap(preview.position())
         let document = try XCTUnwrap(preview.view.document)
         let first = document.page(at: 0)
@@ -89,6 +99,7 @@ final class IncrementalPreviewTests: XCTestCase {
         let after = try await pages(source + ", edited")
         XCTAssertTrue(after[0] === before[0])
         preview.showPages(after)
+        try await settle(preview)
         XCTAssertTrue(document === preview.view.document)
         XCTAssertTrue(first === document.page(at: 0))
         XCTAssertFalse(second === document.page(at: 1))
@@ -106,12 +117,13 @@ final class IncrementalPreviewTests: XCTestCase {
         let preview = PreviewController()
         attach(preview)
         preview.showPages(try await pages(source))
-        try await Task.sleep(for: .milliseconds(100))
+        try await settle(preview)
         let cursor = NSPoint(x: 200, y: 200)
         let page = try XCTUnwrap(preview.view.page(for: cursor, nearest: true))
         let anchor = preview.view.convert(cursor, to: page)
         preview.zoom(by: 100 / preview.view.scaleFactor, at: preview.view.convert(cursor, to: nil))
         XCTAssertEqual(preview.view.scaleFactor, 100, accuracy: 0.001)
+        try await settle(preview)
         let zoomed = preview.view.convert(anchor, from: page)
         XCTAssertEqual(zoomed.x, cursor.x, accuracy: 1)
         XCTAssertEqual(zoomed.y, cursor.y, accuracy: 1)
@@ -131,12 +143,12 @@ final class IncrementalPreviewTests: XCTestCase {
             attach(pdf)
             pdf.pendingPosition = DocumentPosition(page: 1.25, zoom: zoom, pan: 0.7)
             pdf.show(document.copy() as? PDFDocument)
-            try await Task.sleep(for: .milliseconds(100))
+            try await settle(pdf)
             let position = try XCTUnwrap(pdf.position())
             attach(fast)
             fast.pendingPosition = position
             fast.showPages(incremental)
-            try await Task.sleep(for: .milliseconds(100))
+            try await settle(fast)
             let transferred = try XCTUnwrap(fast.position())
             XCTAssertEqual(transferred.page, position.page, accuracy: 0.001)
             XCTAssertEqual(transferred.pan, position.pan, accuracy: 0.001)
@@ -144,7 +156,7 @@ final class IncrementalPreviewTests: XCTestCase {
             attach(pdf)
             pdf.pendingPosition = transferred
             pdf.show(document.copy() as? PDFDocument)
-            try await Task.sleep(for: .milliseconds(100))
+            try await settle(pdf)
             let restored = try XCTUnwrap(pdf.position())
             XCTAssertEqual(restored.page, position.page, accuracy: 0.001)
             XCTAssertEqual(restored.pan, position.pan, accuracy: 0.001)

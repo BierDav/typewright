@@ -184,9 +184,8 @@ final class PreviewController {
     }
 
     private func topDestination() -> PDFDestination? {
-        let top = NSPoint(x: view.bounds.midX, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY)
-        guard let page = view.page(for: top, nearest: true) else { return nil }
-        return PDFDestination(page: page, at: view.convert(top, to: page))
+        guard let page = view.page(for: visibleTop, nearest: true) else { return nil }
+        return PDFDestination(page: page, at: view.convert(visibleTop, to: page))
     }
 
     private static func state(for position: DocumentPosition, in doc: PDFDocument) -> PreviewState {
@@ -200,19 +199,43 @@ final class PreviewController {
         guard let doc = view.document, doc.pageCount > 0 else { return }
         if let scale = state.scale { view.scaleFactor = scale } else { view.autoScales = true }
         view.layoutDocumentView()
-        guard let page = doc.page(at: min(state.page, doc.pageCount - 1)) else { return }
+        let index = min(state.page, doc.pageCount - 1)
+        guard let page = doc.page(at: index) else { return }
         view.go(to: PDFDestination(page: page, at: NSPoint(x: state.x, y: state.y)))
-        // Use the visible top edge instead of PDFKit's inset-adjusted destination.
-        keep(NSPoint(x: state.x, y: state.y), on: page,
-             at: NSPoint(x: view.bounds.minX, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY))
-        if let pan, let scroll = view.documentView?.enclosingScrollView, let width = view.documentView?.frame.width {
-            let clip = scroll.contentView
-            var origin = clip.bounds.origin
-            origin.x = clip.documentRect.minX + pan * max(width - clip.bounds.width, 0)
-            clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
-            scroll.reflectScrolledClipView(clip)
-        }
+        align(index: index, to: NSPoint(x: state.x, y: state.y), pan: pan, attempt: 0)
         sync()
+    }
+
+    /// Puts `point` on the page at the pane's top edge, and keeps it there once PDFKit has laid the pages out.
+    private func align(index: Int, to point: NSPoint, pan: Double?, attempt: Int) {
+        guard let doc = view.document, let page = doc.page(at: min(index, max(doc.pageCount - 1, 0))) else { return }
+        // Use the visible top edge instead of PDFKit's inset-adjusted destination.
+        keep(point, on: page, at: visibleTop)
+        applyPan(pan)
+        // PDFKit scrolls to its own destination after the next layout, which would undo this alignment.
+        guard attempt < 2 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let page = self.view.document?.page(at: index) else { return }
+            let bounds = page.bounds(for: self.view.displayBox)
+            guard bounds.height > 0, let now = self.position() else { return }
+            let target = Double(index) + (bounds.maxY - point.y) / bounds.height
+            guard abs(now.page - target) * bounds.height > 1 else { return }
+            self.align(index: index, to: point, pan: pan, attempt: attempt + 1)
+        }
+    }
+
+    private var visibleTop: NSPoint {
+        NSPoint(x: view.bounds.midX, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY)
+    }
+
+    private func applyPan(_ pan: Double?) {
+        guard let pan, let scroll = view.documentView?.enclosingScrollView,
+              let width = view.documentView?.frame.width else { return }
+        let clip = scroll.contentView
+        var origin = clip.bounds.origin
+        origin.x = clip.documentRect.minX + pan * max(width - clip.bounds.width, 0)
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
+        scroll.reflectScrolledClipView(clip)
     }
 
     /// Keeps the spot under `windowPoint` in place while the scale changes.
@@ -220,10 +243,25 @@ final class PreviewController {
         let point = view.convert(windowPoint, from: nil)
         guard let page = view.page(for: point, nearest: true) else { return }
         let pagePoint = view.convert(point, to: page)
+        let index = view.document?.index(for: page) ?? 0
         view.autoScales = false
         view.scaleFactor = min(max(view.scaleFactor * factor, view.minScaleFactor), view.maxScaleFactor)
         keep(pagePoint, on: page, at: point)
+        settleZoom(index: index, point: pagePoint, at: point)
         sync()
+    }
+
+    /// Puts the zoomed spot back under the pointer, which PDFKit moves when it relays the pages.
+    private func settleZoom(index: Int, point: NSPoint, at target: NSPoint) {
+        let scale = view.scaleFactor
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.view.scaleFactor == scale, let page = self.view.document?.page(at: index) else { return }
+            self.view.layoutDocumentView()
+            let now = self.view.convert(point, from: page)
+            guard abs(now.x - target.x) > 1 || abs(now.y - target.y) > 1 else { return }
+            self.keep(point, on: page, at: target)
+            self.sync()
+        }
     }
 
     func zoomIn() { animateZoom(to: zoomTarget * 1.25) }
