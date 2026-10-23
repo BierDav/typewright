@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn value_supports_editor_features_in_strings_and_math() {
-        for expression in [r#""U_2 / 2 = mV""#, "$U_2 / 2 = mV$"] {
+        for expression in [r#""U_2 / 2 = mV""#, r#"$U_2 / 2 = "mV"$"#] {
             let doc = format!("#show: worksheet\n$U_2 := 5 V$\nVoltage: #value({expression}).");
             let context = serde_json::json!({"path": "main.typ", "main": true}).to_string();
             let at = doc[..doc.rfind("U_2").unwrap()].encode_utf16().count() as u32;
@@ -182,7 +182,8 @@ mod tests {
             let items = json("complete", at + 1);
             assert!(items["items"].as_array().unwrap().iter().any(|i| i["insert"] == "U_2"), "{items}");
             let tokens = json("documentTokens", 0);
-            let unit = doc[..doc.rfind("mV").unwrap()].encode_utf16().count() as u32;
+            // in math the quoted unit's token starts at its quote
+            let unit = doc[..doc.rfind("mV").unwrap() - usize::from(expression.starts_with('$'))].encode_utf16().count() as u32;
             assert!(tokens.as_array().unwrap().chunks_exact(3).any(|t| t[0] == unit && t[2] == solveng_ide::TokenKind::UNIT));
         }
         let function: Value = serde_json::from_str(&call("function", "value", "", 0)).unwrap();
@@ -226,7 +227,7 @@ mod tests {
 
     #[test]
     fn documents_transitive_dependencies_without_parameters_or_units() {
-        let doc = "#show: worksheet\n$a := 2 A$\n$b := a + 3 A$\n$f(x: A) := b + x$\n$f(1 A) =$";
+        let doc = "#show: worksheet\n$a := 2 \"A\"$\n$b := a + 3 \"A\"$\n$f(x: A) := b + x$\n$f(1 \"A\") =$";
         let at = doc.rfind("f(").unwrap() as u32;
         let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
         let markdown = hover["markdown"].as_str().unwrap();

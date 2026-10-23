@@ -444,10 +444,10 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(color(tagged, "5 V"), Highlighter.stringColor)
 
         // By default math in a worksheet is coloured like solveng code.
-        let math = NSTextStorage(string: "#show: worksheet\n$I := 30 mA$\n")
+        let math = NSTextStorage(string: "#import units: mA\n#show: worksheet\n$I := 30 mA$\n")
         Highlighter.apply(to: math, font: font)
         XCTAssertEqual(color(math, "30"), Highlighter.numberColor)
-        XCTAssertEqual(color(math, "mA"), Highlighter.unitColor)
+        XCTAssertEqual(color(math, "mA$"), Highlighter.unitColor)
         XCTAssertEqual(color(math, "I :="), Highlighter.paramColor)
 
         // The strings of solveng's calls are calculations too.
@@ -474,12 +474,13 @@ final class EditorTests: XCTestCase {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         for body in ["$f(x) := sin(x) + cos(x)$ $y := f(tri(1)) + rect(2)$",
                      "```solveng\nf(x) := sin(x) + cos(x)\ny := f(tri(1)) + rect(2)\n```"] {
-            let storage = NSTextStorage(string: "#show: worksheet\n" + body)
+            // solveng's own operations are Typst names in math only where imported
+            let storage = NSTextStorage(string: "#import functions: tri, rect\n#show: worksheet\n" + body)
             Highlighter.apply(to: storage, font: font)
             let source = storage.string as NSString
             for (needle, color) in [("f(x) :=", Highlighter.functionColor), ("f(tri", NSColor.textColor),
                                     ("sin", Highlighter.typeColor), ("cos", Highlighter.typeColor),
-                                    ("tri", Highlighter.typeColor), ("rect", Highlighter.typeColor)] {
+                                    ("tri(1)", Highlighter.typeColor), ("rect(2)", Highlighter.typeColor)] {
                 XCTAssertEqual(storage.attribute(.foregroundColor, at: source.range(of: needle).location, effectiveRange: nil) as? NSColor, color, needle)
             }
         }
@@ -496,10 +497,10 @@ final class EditorTests: XCTestCase {
     }
 
     func testUnitVisibilityAndTypstBindings() {
-        let source = "#show: worksheet.with(units: (s: none, to: \"10km\"))\n#let to = unit(\"m\")\n$x := 2s$ $y := 2ms$ $z := 23to$"
+        let source = "#show: worksheet.with(units: (s: none, to: \"10km\"))\n#let to = unit(\"m\")\n$x := 2s$ $y := 2\"ms\"$ $z := 23to$"
         let storage = NSTextStorage(string: source)
         Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
-        for (needle, color) in [("s$", Highlighter.paramColor), ("ms$", Highlighter.unitColor), ("to$", Highlighter.unitColor)] {
+        for (needle, color) in [("s$", Highlighter.paramColor), ("ms\"$", Highlighter.unitColor), ("to$", Highlighter.unitColor)] {
             let at = (source as NSString).range(of: needle).location
             XCTAssertEqual(storage.attribute(.foregroundColor, at: at, effectiveRange: nil) as? NSColor, color)
         }
@@ -508,7 +509,7 @@ final class EditorTests: XCTestCase {
     }
 
     func testExplicitUnitBindingHashAndCompletion() throws {
-        let source = "#show: worksheet.with(builtin-units: false, units: (s: \"s\"))\n#let s = unit(\"s\")\n$x := 34#s$"
+        let source = "#show: worksheet.with(builtin-units: false, units: (s: auto))\n#let s = unit(\"s\")\n$x := 34#s$"
         let storage = NSTextStorage(string: source)
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         Highlighter.apply(to: storage, font: font)
@@ -537,7 +538,7 @@ final class EditorTests: XCTestCase {
     func testSolvengResultsAreBold() {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         // The = and -> that show a result stand out as in Mathcad; = in a definition or a step doesn't.
-        let storage = NSTextStorage(string: "#show: worksheet\n$t := Q_0/I = 1 \"h\"$ $V := 2 \"A\" = 2000 mA$ $x^2 = 4 -> solve(x)$\n")
+        let storage = NSTextStorage(string: "#show: worksheet\n$t := Q_0/I = 1 \"h\"$ $V := 2 \"A\" = 2000 \"mA\"$ $x^2 = 4 -> solve(x)$\n")
         Highlighter.apply(to: storage, font: font)
         let s = storage.string as NSString
         func isBold(_ needle: String, from: String) -> Bool {

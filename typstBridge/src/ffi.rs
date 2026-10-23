@@ -651,8 +651,8 @@ mod solveng_tests {
         if !root.join("solveng/lib.typ").exists() { return; }
         let main = r#"#import "solveng/lib.typ": *
 #show: worksheet
-$U := 5 V$
-$U + 2 s =$
+$U := 5 "V"$
+$U + 2 "s" =$
 ```solveng
 x := U + 3 s =
 ```
@@ -672,6 +672,7 @@ Bad: #value("q + 1"), #value($r + 2$).
             let raw = CStr::from_ptr(report).to_str().unwrap();
             let context = serde_json::json!({"path": "main.typ", "main": true, "report": raw}).to_string();
             let problems: serde_json::Value = serde_json::from_str(&crate::solveng::call("diagnostics", main, &context, 0)).unwrap();
+            // V plus s twice, q and r
             assert_eq!(problems.as_array().unwrap().iter().filter(|p| p["severity"] == "error").count(), 4, "{raw}\n{problems}");
             let source: Vec<u16> = main.encode_utf16().collect();
             for problem in problems.as_array().unwrap() {

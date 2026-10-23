@@ -75,7 +75,7 @@ final class SolvengContextTests: XCTestCase {
     }
 
     func testValueEditorFeatures() throws {
-        for expression in ["\"U_2 / 2 = mV\"", "$U_2 / 2 = mV$"] {
+        for expression in ["\"U_2 / 2 = mV\"", "$U_2 / 2 = \"mV\"$"] {
             let document = "#show: worksheet\n$U_2 := 5 V$\nVoltage: #value(\(expression))."
             let source = document as NSString
             let at = source.range(of: "U_2", options: .backwards).location
