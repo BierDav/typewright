@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createResource, createSignal, For, type JSX, on, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, type JSX, on, onCleanup, onMount, Show } from "solid-js";
 import { editorView, openSpace, setOverlay, shortcut, showRecentlyDeleted, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { fuzzyScore } from "~/lib/core";
@@ -7,7 +7,7 @@ import { conversions, Solveng } from "~/lib/editor/solveng";
 import * as fonts from "~/lib/fonts";
 import { isEditable, isMarkdown, isPreviewable } from "~/lib/kinds";
 import { type RenderMode, setSettings, settings } from "~/lib/settings";
-import { download, spaces, zipSpace } from "~/lib/spaces";
+import { download, SPACES, spaces, uniqueName, zipSpace } from "~/lib/spaces";
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
 import type { Workspace } from "~/lib/workspace";
@@ -273,14 +273,21 @@ async function rootItems(): Promise<Item[]> {
     }
     if (syncService.isRunning()) {
       items.push({
-        id: "space.invite",
-        title: `Copy Invite Link to ${ws.name}…`,
+        id: "space.share",
+        title: `Share ${ws.name}…`,
         section: "Space",
-        keywords: ["share", "collaborate", "invite", "link"],
-        action: { run: () => void commands.copyInviteLink(ws.folder) },
+        keywords: ["sync", "collaborate", "invite", "link"],
+        action: { run: () => void commands.share(ws.folder) },
       });
-      if (!syncService.isSynced(ws.folder)) {
-        items.push({ id: "space.sync", title: `Sync ${ws.name} to My Devices`, section: "Space", action: { run: () => syncService.share(ws.folder) } });
+      const file = ws.state.selected;
+      if (file) {
+        items.push({
+          id: "file.share",
+          title: `Share ${fs.basename(file)}…`,
+          section: "File",
+          keywords: ["sync", "collaborate", "invite", "link"],
+          action: { run: () => void commands.share(ws.repoPath(file)) },
+        });
       }
     }
     items.push(
@@ -330,8 +337,60 @@ async function rootItems(): Promise<Item[]> {
   return items;
 }
 
+/** Every folder of the library (spaces and the folders in them), skipping hidden ones like `.jj`. */
+async function libraryFolders(): Promise<string[]> {
+  const out: string[] = [];
+  const visit = async (dir: string) => {
+    for (const entry of await fs.list(fs.join(SPACES, dir))) {
+      const name = fs.basename(entry.path);
+      if (entry.kind !== "dir" || name.startsWith(".")) continue;
+      const path = dir ? `${dir}/${name}` : name;
+      out.push(path);
+      await visit(path);
+    }
+  };
+  await visit("");
+  return out.sort((a, b) => a.localeCompare(b));
+}
+
+/** Where a joined share goes: a new space, or a folder of the library (files only into spaces). */
+function destinationPage(): Page {
+  const request = commands.pendingDestination();
+  const name = request?.name ?? "Shared";
+  const file = request?.file ?? false;
+  const pick = async (parent: string) => {
+    const dot = name.lastIndexOf(".");
+    const [stem, ext] = file && dot > 0 ? [name.slice(0, dot), name.slice(dot + 1)] : [name, null];
+    const free = await uniqueName(fs.join(SPACES, parent), stem, ext);
+    commands.settleDestination(parent ? `${parent}/${free}` : free);
+    setOverlay(null);
+  };
+  return {
+    title: `Where should “${name}” go?`,
+    placeholder: "Choose a folder…",
+    kind: "list",
+    items: async () => {
+      const items: Item[] = [];
+      if (!file) items.push({ id: "dest:new", title: `New Space “${name}”`, section: "New Space", icon: "space", action: { stay: () => void pick("") } });
+      for (const folder of await libraryFolders()) {
+        const space = !folder.includes("/");
+        items.push({
+          id: `dest:${folder}`,
+          title: fs.basename(folder),
+          subtitle: space ? undefined : folder,
+          section: "Into a Folder",
+          icon: space ? "space" : "folder",
+          action: { stay: () => void pick(folder) },
+        });
+      }
+      return items;
+    },
+  };
+}
+
 /** Opens a page by name, for menus that land inside the palette. */
 function startPage(name: string | undefined): Page | null {
+  if (name === "destination") return destinationPage();
   const ws = workspace();
   if (!name || !ws) return null;
   if (name.startsWith("move:")) return movePage(ws, name.slice(5));
@@ -353,6 +412,8 @@ export default function CommandPalette(props: { page?: string }) {
     async ({ page }) => (page ? (page.kind === "list" ? page.items() : []) : rootItems()),
   );
   const close = () => setOverlay(null);
+  // A destination page closed without a choice answers "none".
+  onCleanup(() => commands.settleDestination(null));
 
   const results = createMemo(() => {
     const items = source() ?? source.latest ?? [];

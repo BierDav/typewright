@@ -65,6 +65,33 @@ const commitListeners = new Set<(changed: string[]) => void>();
 /** Paths this tab announced after the repository wrote them; their echo isn't an edit. */
 const echoes = new Set<string>();
 
+const moveListeners = new Set<(from: string, to: string) => void>();
+const deleteListeners = new Set<(paths: string[]) => void>();
+const restoreListeners = new Set<(from: string, to: string) => void>();
+
+/** Calls `listener` when a file or folder was renamed or moved in the app (repo-relative paths). */
+export function onMove(listener: (from: string, to: string) => void): () => void {
+  moveListeners.add(listener);
+  return () => moveListeners.delete(listener);
+}
+
+/** Calls `listener` with the paths deleted in the app. */
+export function onDelete(listener: (paths: string[]) => void): () => void {
+  deleteListeners.add(listener);
+  return () => deleteListeners.delete(listener);
+}
+
+/** Calls `listener` when a deleted item came back (`from` its old path, `to` where it is now). */
+export function onRestore(listener: (from: string, to: string) => void): () => void {
+  restoreListeners.add(listener);
+  return () => restoreListeners.delete(listener);
+}
+
+/** Tells listeners (sync, so shares follow) that the app moved `from` to `to`. */
+export function noteMoved(from: string, to: string) {
+  if (from !== to) moveListeners.forEach((l) => l(from, to));
+}
+
 /** Calls `listener` with the repo-relative paths of every commit, restore and resolve. */
 export function onCommit(listener: (changed: string[]) => void): () => void {
   commitListeners.add(listener);
@@ -90,7 +117,7 @@ function startWorker(): Worker {
       announce(response.written);
       p?.resolve(response.mode ? { mode: response.mode } : response.value);
     } else {
-      p?.reject(new Error(response.error));
+      p?.reject(Object.assign(new Error(response.error), { busy: response.busy === true }));
       if (response.fatal) void restart();
     }
   };
@@ -157,6 +184,7 @@ async function open() {
     const value = await post({ op: "open", lfsLimit: lfsLimit(), stale });
     removeUnseen(stale);
     setRepository({ status: "open", mode: value?.mode ?? null });
+    opened();
     await refreshConflicts();
   } catch (err) {
     setRepository({ status: "failed", error: (err as Error).message });
@@ -164,6 +192,13 @@ async function open() {
 }
 
 let started = false;
+let opened: () => void = () => {};
+const openedOnce = new Promise<void>((resolve) => (opened = resolve));
+
+/** Resolves once this tab runs the repository (never, while another tab does). */
+export function whenOpen(): Promise<void> {
+  return openedOnce;
+}
 
 /** Opens the repository in this tab once it holds the lock; until then status is "elsewhere". */
 export function start() {
@@ -191,6 +226,38 @@ async function call<T>(fn: string, ...args: Arg[]): Promise<T | null> {
 /** Raw JSON call, for the sync engine. */
 export function json<T = unknown>(fn: string, ...args: Arg[]): Promise<T | null> {
   return call<T>(fn, ...args);
+}
+
+/** An error the repository reported; `busy` while the jj CLI or another process holds it. */
+export type RepositoryError = Error & { busy?: boolean };
+
+/** Like `json`, but failures throw (a `RepositoryError`), as the sync engine tells them apart. */
+export function request<T = unknown>(fn: string, ...args: Arg[]): Promise<T> {
+  if (repository.status !== "open") return Promise.reject(new Error("The repository isn't open in this tab"));
+  return post({ op: "call", fn, args });
+}
+
+/** The git objects of a node (its commit and whole tree), as `[oid, bytes]` pairs for its bundle. */
+export function nodeObjects(node: string): Promise<[string, Uint8Array][]> {
+  return post({ op: "nodeObjects", node });
+}
+
+export type MergeResult = { node: string | null; changed?: string[]; conflicts?: string[] };
+
+/** Imports another device's node and merges it into the share at `path`, leaving the `keep` paths as they are. */
+export async function mergeNode(args: {
+  share: string;
+  path: string;
+  manifest: string;
+  objects: [string, Uint8Array][];
+  lfs: [string, Uint8Array][];
+  label: string;
+  keep: string[];
+}): Promise<MergeResult> {
+  const result = (await post({ op: "mergeNode", ...args })) as MergeResult;
+  if (result.changed?.length) commitListeners.forEach((l) => l(result.changed!));
+  await refreshConflicts();
+  return result;
 }
 
 function lfsLimit(): number {
@@ -250,6 +317,7 @@ export async function deleteItems(paths: string[], message: string): Promise<Del
   clearTimers();
   const result = await call<{ deleted: (DeletedItem & { time: number })[] }>("twj_delete", JSON.stringify(paths), message);
   if (!result) return null;
+  deleteListeners.forEach((l) => l(paths));
   commitListeners.forEach((l) => l(paths));
   return result.deleted.map(fromWire);
 }
@@ -269,6 +337,7 @@ export async function restoreDeleted(item: DeletedItem, dest: string): Promise<"
   const result = await call<{ commit?: string | null; exists?: boolean }>("twj_restore_deleted", entry, dest);
   if (!result) return "failed";
   if (result.exists) return "exists";
+  restoreListeners.forEach((l) => l(item.path, dest));
   commitListeners.forEach((l) => l([dest]));
   return "restored";
 }

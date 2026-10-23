@@ -113,28 +113,27 @@ export async function exportPDF() {
   download(name, result, "application/pdf");
 }
 
-export async function copyInviteLink(folder: string) {
+/** Share… for a space, folder or file (repository path): sync it to this account's devices, or invite others. */
+export async function share(path: string) {
   if (!syncService.isRunning()) {
     return alert("Syncing isn't running.", "Sign in with your passkey in Settings › Devices first.");
   }
-  if (!syncService.isSynced(folder)) {
-    const ok = await choose(`Sync “${folder}” to invite others?`, "Invites work for synced spaces. Turn on syncing for this space?", [
-      { label: "Cancel", value: "cancel", role: "cancel" },
-      { label: "Sync and Invite", value: "ok", role: "default" },
-    ]);
-    if (ok !== "ok") return;
-    syncService.share(folder);
-  }
-  const ok = await choose(
-    `Invite others to “${folder}”?`,
-    "Anyone with the link can download this space and edit its files, so only send it to people you trust. They need a Typewright account (a passkey) to join, in the Mac app or in the browser.",
+  const name = fs.basename(path);
+  const synced = syncService.isSynced(path);
+  const choice = await choose(
+    `Share “${name}”`,
+    "Syncing keeps it the same on every device of your account. An invite link lets other people's accounts sync and edit it too, so only send it to people you trust; they need a Typewright account, in the Mac app or in the browser.",
     [
       { label: "Cancel", value: "cancel", role: "cancel" },
-      { label: "Copy Invite Link", value: "ok", role: "default" },
+      synced ? { label: "Stop Syncing on This Device", value: "stop" } : { label: "Sync to My Devices", value: "sync" },
+      { label: "Copy Invite Link", value: "invite", role: "default" },
     ],
   );
-  if (ok !== "ok") return;
-  const link = syncService.inviteLink(folder);
+  if (choice === "stop") return syncService.stopSyncing(path);
+  if (choice === "sync") return void (await syncService.share(path));
+  if (choice !== "invite") return;
+  if (!synced && !(await syncService.share(path))) return alert(`Couldn't share “${name}”.`);
+  const link = syncService.inviteLink(path);
   if (!link) return alert("Couldn't create an invite link.", "Syncing has to be running; check Settings › Devices.");
   await copyText(link, "Invite link copied");
   await alert("Invite link copied", "Send it to the people you invite. The first link opens in the Mac app; the second joins in the browser.", [
@@ -143,6 +142,31 @@ export async function copyInviteLink(folder: string) {
   ]);
 }
 
+type DestinationRequest = { name: string; file: boolean; resolve: (path: string | null) => void };
+let destinationRequest: DestinationRequest | null = null;
+
+/** What the destination page asks for, while it's open. */
+export function pendingDestination(): { name: string; file: boolean } | null {
+  return destinationRequest;
+}
+
+/** Asks where a share goes in the library: a new space, or into a folder (a file always goes into a space). */
+export function pickDestination(name: string, file: boolean): Promise<string | null> {
+  destinationRequest?.resolve(null);
+  return new Promise((resolve) => {
+    destinationRequest = { name, file, resolve };
+    setOverlay({ type: "palette", page: "destination" });
+  });
+}
+
+/** Answers `pickDestination`; null when the page closed without a choice. */
+export function settleDestination(path: string | null) {
+  const request = destinationRequest;
+  destinationRequest = null;
+  request?.resolve(path);
+}
+
+/** Joins an invite link (asking for a destination); returns the space folder to open. */
 export async function joinFromLink(text?: string): Promise<string | null> {
   const link = text ?? (await prompt("Join a Shared Space", "", "Join", "Paste the invite link someone sent you.", "typewright://join/…"));
   if (!link) return null;
@@ -158,5 +182,11 @@ export async function joinFromLink(text?: string): Promise<string | null> {
     await alert(`Sign in to join “${invite.name}”`, "Shared spaces sync through a Typewright account. Create a passkey or sign in with yours in Settings › Devices, then open the link again.");
     return null;
   }
-  return syncService.joinInvite(invite);
+  const existing = syncService.pathOf(invite.id);
+  if (existing) return fs.split(existing)[0];
+  const dest = await pickDestination(invite.name, !!invite.file);
+  if (!dest) return null;
+  const path = await syncService.joinInvite(invite, dest);
+  if (!path) await alert(`Couldn't join “${invite.name}”`, syncService.sync.lastError ?? undefined);
+  return path ? fs.split(path)[0] : null;
 }

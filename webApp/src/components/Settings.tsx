@@ -5,7 +5,6 @@ import { compiler } from "~/lib/compiler";
 import * as fontLib from "~/lib/fonts";
 import { createPasskey, identity, passkeysSupported, relyingParty, sharesMacPasskeys, signInWithPasskey, signOut } from "~/lib/identity";
 import { DEFAULT_RETENTION, type RetentionPolicy, setSettings, settings } from "~/lib/settings";
-import { spacePath } from "~/lib/spaces";
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
@@ -125,33 +124,8 @@ function Retention() {
 }
 
 function General() {
-  const [trash, { refetch }] = createResource(async () => {
-    const stamps = (await fs.list("trash")).filter((e) => e.kind === "dir").map((e) => fs.basename(e.path)).sort().reverse();
-    const items: { stamp: string; space: string; path: string }[] = [];
-    for (const stamp of stamps) {
-      for (const space of await fs.list(fs.join("trash", stamp))) {
-        for (const item of await fs.walk(space.path)) {
-          if (item.kind === "file") items.push({ stamp, space: fs.basename(space.path), path: item.path });
-        }
-      }
-    }
-    return items;
-  });
   const [persisted, { refetch: recheck }] = createResource(() => navigator.storage.persisted().catch(() => false));
   const [estimate] = createResource(() => navigator.storage.estimate().catch(() => null));
-
-  async function restore(item: { stamp: string; space: string; path: string }) {
-    const target = spacePath(item.space, item.path);
-    const free = (await fs.exists(target)) ? target.replace(/(\.[^./]+)?$/, " (restored)$1") : target;
-    await fs.move(fs.join("trash", item.stamp, item.space, item.path), free);
-    void refetch();
-  }
-
-  async function empty() {
-    if (!(await confirm("Empty the trash?", "The files in it are deleted for good.", "Empty Trash", true))) return;
-    await fs.remove("trash", true);
-    void refetch();
-  }
 
   return (
     <>
@@ -205,41 +179,18 @@ function General() {
               onChange={(e) => {
                 const value = Math.max(0.1, Number(e.currentTarget.value) || 1);
                 setSettings("lfsThresholdMB", value);
-                syncService.setLfsThreshold(value);
               }}
             />
             <span>MB</span>
           </div>
         </Row>
       </Section>
-      <Section title="Recently Deleted" footer="Files you delete stay in the history, where Recently Deleted finds them again.">
+      <Section title="Recently Deleted" footer="Files deleted here, on another device or by someone you share with stay in the history, where Recently Deleted finds them again.">
         <Row label="Deleted files">
           <button class="button small" onClick={() => showRecentlyDeleted(null)}>
             Show Recently Deleted…
           </button>
         </Row>
-      </Section>
-      <Section title="Deleted by Sync" footer="Files other devices deleted wait here.">
-        <Show when={trash()?.length} fallback={<div class="form-row secondary">The trash is empty.</div>}>
-          <For each={trash()!.slice(0, 100)}>
-            {(item) => (
-              <div class="form-row">
-                <span class="form-label ellipsis" title={`${item.space}/${item.path}`}>
-                  {item.path} <span class="secondary">· {item.space}</span>
-                </span>
-                <button class="button small" onClick={() => void restore(item)}>
-                  Put Back
-                </button>
-              </div>
-            )}
-          </For>
-          <div class="form-row">
-            <span />
-            <button class="button small destructive" onClick={() => void empty()}>
-              Empty Trash
-            </button>
-          </div>
-        </Show>
       </Section>
     </>
   );
@@ -468,7 +419,11 @@ function short(id: string | null): string {
 
 function Devices() {
   const [name, setName] = createSignal("");
-  const synced = createMemo(() => Object.entries(sync.spaces).filter(([, folder]) => folder));
+  const synced = createMemo(() =>
+    Object.entries(sync.shares)
+      .filter(([, share]) => share)
+      .sort(([, a], [, b]) => a.path.localeCompare(b.path)),
+  );
 
   return (
     <>
@@ -545,26 +500,27 @@ function Devices() {
           </Show>
         </Section>
         <Section
-          title="Synced Spaces"
-          footer="The whole space syncs, except what its .gitignore files exclude. Invite links let other people's accounts sync a space too; anyone with a link can edit it."
+          title="Shares"
+          footer="A share is a space, or any folder or file in one, kept the same on your devices. Invite links let other people's accounts sync it too; anyone with a link can edit it."
         >
-          <For each={synced()} fallback={<div class="form-row secondary">Turn on syncing from a space's menu in the spaces sidebar.</div>}>
-            {([id, folder]) => (
+          <For each={synced()} fallback={<div class="form-row secondary">Share a space, folder or file from its menu.</div>}>
+            {([id, share]) => (
               <div class="form-row">
                 <span class="form-label">
-                  {folder}{" "}
-                  <Show when={sync.accountSpaces.find((s) => s.id === id)?.shared}>
+                  {share.path}{" "}
+                  <Show when={sync.accountShares.find((s) => s.id === id)?.shared}>
                     <Users size={12} class="secondary" />
                   </Show>
+                  <span class="secondary"> · {sync.problems[id] ?? sync.statuses[id] ?? "Starting"}</span>
                 </span>
                 <div class="button-row">
-                  <button class="button small" onClick={() => { openSpace(folder); setOverlay(null); }}>
+                  <button class="button small" onClick={() => { openSpace(share.path.split("/")[0]); setOverlay(null); }}>
                     Open
                   </button>
-                  <button class="icon-button" title="Copy invite link" onClick={() => void commands.copyInviteLink(folder)}>
+                  <button class="icon-button" title="Share…" onClick={() => void commands.share(share.path)}>
                     <Link size={14} />
                   </button>
-                  <button class="button small" onClick={() => syncService.stopSyncing(folder)}>
+                  <button class="button small" onClick={() => syncService.stopSyncingId(id)}>
                     Stop Syncing
                   </button>
                 </div>

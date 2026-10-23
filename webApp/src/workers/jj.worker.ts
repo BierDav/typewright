@@ -10,10 +10,12 @@ export type Arg = string | number | null;
 export type Request =
   | { id: number; op: "open"; lfsLimit: number; stale: string[] }
   | { id: number; op: "call"; fn: string; args: Arg[] }
-  | { id: number; op: "invalidate"; paths: string[] };
+  | { id: number; op: "invalidate"; paths: string[] }
+  | { id: number; op: "nodeObjects"; node: string }
+  | { id: number; op: "mergeNode"; share: string; path: string; manifest: string; objects: [string, Uint8Array][]; lfs: [string, Uint8Array][]; label: string; keep: string[] };
 export type Response =
   | { id: number; ok: true; value: unknown; written: string[]; mode?: "jspi" | "asyncify" }
-  | { id: number; ok: false; error: string; fatal?: boolean };
+  | { id: number; ok: false; error: string; fatal?: boolean; busy?: boolean };
 
 export const ROOT = "spaces";
 const HOST = "jj-host";
@@ -40,7 +42,11 @@ const SIGNATURES: Record<string, { args: ("str" | "str?" | "u32" | "i32" | "u64"
   twj_write_objects: { args: ["str", "str"] },
   twj_import_node: { args: ["str", "str", "str", "str"] },
   twj_merge_node: { args: ["str", "str", "str", "str"] },
+  twj_merge_node_keeping: { args: ["str", "str", "str", "str", "str?"] },
 };
+
+/** Where node objects and LFS files pass between the module and sync, inside `.jj` so no snapshot sees them. */
+const TRANSPORT = [".jj", "typewright", "transport"];
 
 type Exports = {
   memory: WebAssembly.Memory;
@@ -169,10 +175,75 @@ async function call(fn: string, args: Arg[]): Promise<unknown> {
     exports.twj_string_free(result);
     const value = JSON.parse(text);
     // A taken destination is an answer, not a failure.
-    if (value && typeof value === "object" && "error" in value && typeof value.error === "string" && !value.exists) throw new Error(value.error);
+    if (value && typeof value === "object" && "error" in value && typeof value.error === "string" && !value.exists) {
+      throw Object.assign(new Error(value.error), { busy: value.busy === true });
+    }
     return value;
   } finally {
     for (const [ptr, len] of allocated) exports.twj_dealloc(ptr, len);
+  }
+}
+
+/** A fresh transport folder: [parts relative to the root, path the module sees]. */
+async function transportDir(): Promise<[string[], string]> {
+  const parts = [...TRANSPORT, crypto.randomUUID()];
+  await fs!.dir(parts, true);
+  return [parts, [GUEST_ROOT, ...parts].join("/")];
+}
+
+/** Writes files the module reads, past the host's caches (they're then forgotten for the folder). */
+async function writeFiles(parts: string[], files: [string, Uint8Array][]) {
+  const dir = await fs!.dir(parts, true);
+  for (const [name, bytes] of files) {
+    const access = await unlocked(async () => (await dir.getFileHandle(name, { create: true })).createSyncAccessHandle());
+    try {
+      access.truncate(0);
+      access.write(bytes, { at: 0 });
+      access.flush();
+    } finally {
+      access.close();
+    }
+  }
+  fs!.invalidate([parts.join("/")]);
+}
+
+/** Reads what the module wrote into a folder. */
+async function readFiles(parts: string[]): Promise<[string, Uint8Array][]> {
+  const dir = await fs!.dir(parts);
+  const out: [string, Uint8Array][] = [];
+  for await (const [name, handle] of (dir as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
+    if (handle.kind === "file") out.push([name, new Uint8Array(await (await (handle as FileSystemFileHandle).getFile()).arrayBuffer())]);
+  }
+  return out;
+}
+
+async function removeDir(parts: string[]) {
+  const parent = await fs!.dir(parts.slice(0, -1));
+  await parent.removeEntry(parts[parts.length - 1], { recursive: true }).catch(() => {});
+  fs!.invalidate([parts.join("/")]);
+}
+
+/** The git objects of a node (its commit and whole tree), for its bundle. */
+async function nodeObjects(node: string): Promise<[string, Uint8Array][]> {
+  const [parts, guest] = await transportDir();
+  try {
+    await call("twj_write_objects", [JSON.stringify([node]), guest]);
+    return await readFiles(parts);
+  } finally {
+    await removeDir(parts);
+  }
+}
+
+/** Imports another device's node from its bundle's parts and merges it into the share at `path`. */
+async function mergeNode(request: Extract<Request, { op: "mergeNode" }>): Promise<unknown> {
+  const [parts, guest] = await transportDir();
+  try {
+    await writeFiles([...parts, "objects"], request.objects);
+    await writeFiles([...parts, "lfs"], request.lfs);
+    const imported = (await call("twj_import_node", [request.share, request.manifest, `${guest}/objects`, request.label])) as { node: string };
+    return await call("twj_merge_node_keeping", [request.share, request.path, imported.node, `${guest}/lfs`, JSON.stringify(request.keep)]);
+  } finally {
+    await removeDir(parts);
   }
 }
 
@@ -188,6 +259,8 @@ self.onmessage = (event: MessageEvent<Request>) => {
       let mode: "jspi" | "asyncify" | undefined;
       if (request.op === "open") mode = await open(request.lfsLimit, request.stale);
       else if (request.op === "invalidate") fs?.invalidate(request.paths);
+      else if (request.op === "nodeObjects") value = await nodeObjects(request.node);
+      else if (request.op === "mergeNode") value = await mergeNode(request);
       else value = await call(request.fn, request.args);
       await saveState();
       response = { id: request.id, ok: true, value, written: fs?.takeWritten() ?? [], mode };
@@ -195,7 +268,8 @@ self.onmessage = (event: MessageEvent<Request>) => {
       // A trap leaves the module's memory unusable; the client starts a new worker.
       const fatal = err instanceof WebAssembly.RuntimeError;
       await saveState().catch(() => {});
-      response = { id: request.id, ok: false, error: err instanceof Error ? err.message : String(err), fatal };
+      const busy = (err as { busy?: boolean }).busy === true;
+      response = { id: request.id, ok: false, error: err instanceof Error ? err.message : String(err), fatal, busy };
     }
     self.postMessage(response);
   });

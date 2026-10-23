@@ -7,8 +7,9 @@ import { cleanName, download, renameSpace, spacePath, zipSpace } from "~/lib/spa
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
 import { type FileNode, Workspace } from "~/lib/workspace";
-import { ChevronRight, Ellipsis, Eye, File, FileCode, FileImage, FilePlus, FileText, Folder, FolderPlus, Type, Upload, Users } from "./icons";
+import { ChevronRight, Ellipsis, Eye, File, FileCode, FileImage, FilePlus, FileText, Folder, FolderPlus, Type, Upload } from "./icons";
 import { type MenuItem, showMenu } from "./Menu";
+import { SyncBadge } from "./SyncBadge";
 
 const DRAG_TYPE = "application/x-typewright-path";
 
@@ -126,7 +127,11 @@ export default function FileSidebar(props: { workspace: Workspace }) {
       { separator: true },
     );
     if (node.children) items.push({ label: "Show Recently Deleted in This Folder", action: () => showRecentlyDeleted(ws.repoPath(node.path)) });
-    items.push({ label: "Delete", destructive: true, action: () => void remove(node) });
+    items.push(
+      { label: "Share…", disabled: !syncService.isRunning(), action: () => void commands.share(ws.repoPath(node.path)) },
+      { separator: true },
+      { label: "Delete", destructive: true, action: () => void remove(node) },
+    );
     return items;
   }
 
@@ -148,10 +153,8 @@ export default function FileSidebar(props: { workspace: Workspace }) {
       { label: "Show Recently Deleted", action: () => showRecentlyDeleted(ws.folder) },
       { label: "Download Space as Zip", action: async () => download(`${ws.folder}.zip`, await zipSpace(ws.folder), "application/zip") },
       { separator: true },
-      synced
-        ? { label: "Stop Syncing on This Device", action: () => syncService.stopSyncing(ws.folder) }
-        : { label: "Sync to My Devices", disabled: !syncService.isRunning(), action: () => syncService.share(ws.folder) },
-      { label: "Copy Invite Link…", action: () => void commands.copyInviteLink(ws.folder) },
+      { label: "Share…", disabled: !syncService.isRunning(), action: () => void commands.share(ws.folder) },
+      ...(synced ? [{ label: "Stop Syncing on This Device", action: () => syncService.stopSyncing(ws.folder) }] : []),
     ];
   }
 
@@ -203,6 +206,7 @@ export default function FileSidebar(props: { workspace: Workspace }) {
           </span>
           <NodeIcon node={node} open={open()} />
           <span class="tree-name">{node.name}</span>
+          <SyncBadge path={ws.repoPath(node.path)} />
           <Show when={ws.state.preview === node.path}>
             <Eye size={13} class="tree-badge" />
           </Show>
@@ -220,9 +224,7 @@ export default function FileSidebar(props: { workspace: Workspace }) {
         <button class="space-name" title="Rename space" onClick={() => void renameCurrentSpace(ws)}>
           {ws.name}
         </button>
-        <Show when={syncService.isShared(ws.folder)}>
-          <Users size={13} class="secondary" />
-        </Show>
+        <SyncBadge path={ws.folder} />
         <div class="spacer" />
         <button class="icon-button" title="New file" onClick={() => void newFile()}>
           <FilePlus size={15} />
@@ -267,10 +269,8 @@ export async function renameCurrentSpace(ws: Workspace) {
   await ws.flushSaves();
   const old = ws.folder;
   openSpace(null);
-  // Sync follows the new name before the folder moves, so it never sees the space vanish.
-  syncService.renamed(old, clean);
+  // Sync follows the move (`renameSpace` reports it), so the share never looks deleted.
   const renamed = await renameSpace(old, clean);
   if (renamed) Workspace.renameState(old, renamed);
-  else syncService.renamed(clean, old);
   openSpace(renamed ?? old);
 }

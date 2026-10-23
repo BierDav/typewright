@@ -7,6 +7,7 @@ import { createSpace, deleteSpace, download, importFiles, moveSpace, restoreSpac
 import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
 import { Cloud, CloudOff, Download, Layers, Link, Plus, Settings, Users } from "./icons";
+import { SyncBadge } from "./SyncBadge";
 import { renameCurrentSpace } from "./FileSidebar";
 import { type MenuItem, showMenu } from "./Menu";
 
@@ -35,18 +36,17 @@ export async function importFolder() {
 }
 
 async function removeSpace(folder: string) {
-  const synced = syncService.isSynced(folder);
+  const synced = syncService.syncsAnything(folder);
   const ok = await confirm(
     `Delete “${folder}”?`,
     synced
-      ? "It stops syncing here first, so your other devices and the people you invited keep their copies. You can get it back from Recently Deleted."
+      ? "It stops syncing here, so your other devices and the people you invited keep their copies. You can get it back from Recently Deleted, and it syncs again then."
       : "You can undo this, or get it back later from Recently Deleted.",
     "Delete",
     true,
   );
   if (!ok) return;
-  // Stopping first keeps the deletion from syncing to everyone else.
-  if (synced) syncService.stopSyncing(folder);
+  // Deleting parks its shares first, so the deletion doesn't reach everyone else.
   if (workspace()?.folder === folder) openSpace(null);
   const item = await deleteSpace(folder);
   if (item) {
@@ -69,7 +69,7 @@ async function removeEverywhere(id: string, name: string) {
 
 function spaceMenu(folder: string): MenuItem[] {
   const synced = syncService.isSynced(folder);
-  const id = syncService.spaceId(folder);
+  const id = syncService.shareId(folder);
   const items: MenuItem[] = [
     { label: "Open", action: () => openSpace(folder) },
     {
@@ -83,13 +83,10 @@ function spaceMenu(folder: string): MenuItem[] {
     { label: "Download as Zip", action: async () => download(`${folder}.zip`, await zipSpace(folder), "application/zip") },
     { separator: true },
   ];
+  items.push({ label: "Share…", disabled: !syncService.isRunning(), action: () => void commands.share(folder) });
   if (synced) {
-    items.push({ label: "Copy Invite Link…", action: () => void commands.copyInviteLink(folder) });
     items.push({ label: "Stop Syncing on This Device", action: () => syncService.stopSyncing(folder) });
     if (id) items.push({ label: "Remove From All Devices…", destructive: true, action: () => void removeEverywhere(id, folder) });
-  } else {
-    items.push({ label: "Sync to My Devices", disabled: !syncService.isRunning(), action: () => syncService.share(folder) });
-    items.push({ label: "Copy Invite Link…", disabled: !syncService.isRunning(), action: () => void commands.copyInviteLink(folder) });
   }
   items.push(
     { separator: true },
@@ -116,14 +113,19 @@ export default function SpacesSidebar() {
   const [dragging, setDragging] = createSignal<string | null>(null);
   const [over, setOver] = createSignal<number | null>(null);
 
-  async function fetchSpace(space: syncService.AccountSpace) {
-    const ok = await choose(`Download “${space.name}”?`, "Its files download from your other devices into a new space here and stay in sync.", [
-      { label: "Cancel", value: "cancel", role: "cancel" },
-      { label: "Download", value: "ok", role: "default" },
-    ]);
-    if (ok !== "ok") return;
-    const folder = await syncService.join(space);
-    if (folder) openSpace(folder);
+  async function fetchSpace(share: syncService.AccountShare) {
+    if (share.kind === "space") {
+      const ok = await choose(`Download “${share.name}”?`, "Its files download from your other devices into a new space here and stay in sync.", [
+        { label: "Cancel", value: "cancel", role: "cancel" },
+        { label: "Download", value: "ok", role: "default" },
+      ]);
+      if (ok !== "ok") return;
+    }
+    // Own spaces land next to the others; folders and files go where the user picks.
+    const dest = share.kind === "space" ? await syncService.suggestedDestination(share) : await commands.pickDestination(share.name, share.kind === "file");
+    if (!dest) return;
+    const path = await syncService.join(share, dest);
+    if (path) openSpace(path.split("/")[0]);
   }
 
   return (
@@ -168,12 +170,7 @@ export default function SpacesSidebar() {
             >
               <Layers size={15} class="space-icon" />
               <span class="space-label">{folder}</span>
-              <Show when={syncService.isShared(folder)}>
-                <Users size={13} class="secondary" aria-label="Shared" />
-              </Show>
-              <Show when={syncService.isSynced(folder) && !syncService.isShared(folder)}>
-                <Cloud size={13} class="secondary" aria-label="Synced" />
-              </Show>
+              <SyncBadge path={folder} />
             </button>
           )}
         </For>

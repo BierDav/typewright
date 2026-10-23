@@ -1874,6 +1874,23 @@ button.issue:hover:not(:disabled) {
   cursor: pointer;
 }
 
+/* A share syncing right now. */
+.syncing {
+  animation: syncing 1.6s linear infinite;
+}
+
+@keyframes syncing {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .syncing {
+    animation: none;
+  }
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;

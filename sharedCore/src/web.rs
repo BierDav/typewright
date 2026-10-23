@@ -1,15 +1,11 @@
 //! The web app's API (wasm-bindgen); the Mac app's comes from UniFFI.
 use crate::invites::SpaceInvite;
 use crate::merge::MergeResult;
-use crate::sync::{LocalFile, RemoteEntry, SyncAction};
+use crate::shares::{PeerHead, SharePath, SharePlace, ShareStatus};
 use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 type Js<T> = Result<T, JsError>;
-
-fn actions(actions: Vec<SyncAction>) -> Js<Vec<Ts<SyncAction>>> {
-    actions.iter().map(|a| Ok(Ts::from_rust(a)?)).collect()
-}
 
 fn check(f: &js_sys::Function) -> impl Fn(&str) -> bool {
     |path| f.call1(&JsValue::NULL, &JsValue::from_str(path)).is_ok_and(|v| v.is_truthy())
@@ -90,104 +86,39 @@ pub fn merge3(base: &str, local: &str, remote: &str) -> Js<Ts<MergeResult>> {
     Ok(crate::merge::merge3(base, local, remote).into_ts()?)
 }
 
-#[wasm_bindgen]
-#[derive(Default)]
-pub struct IgnoreRules(crate::ignore::IgnoreRules);
-
-#[wasm_bindgen]
-impl IgnoreRules {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn add(&mut self, dir: &str, content: &str) {
-        self.0.add(dir, content);
-    }
-
-    #[wasm_bindgen(js_name = isIgnored)]
-    pub fn is_ignored(&self, path: &str, is_dir: bool) -> bool {
-        self.0.is_ignored(path, is_dir)
-    }
-
-    pub fn matches(&self, path: &str, is_dir: bool) -> bool {
-        self.0.matches(path, is_dir)
-    }
+fn shares(shares: Vec<Ts<SharePath>>) -> Js<Vec<SharePath>> {
+    shares.iter().map(|s| Ok(s.to_rust()?)).collect()
 }
 
-#[wasm_bindgen]
-pub struct SpaceSync(crate::sync::SpaceSync);
+/// The innermost share holding the repository `path`, with the path inside it (as live sessions name files).
+#[wasm_bindgen(js_name = sharePlace)]
+pub fn share_place(list: Vec<Ts<SharePath>>, path: &str) -> Js<Option<Ts<SharePlace>>> {
+    Ok(match crate::shares::share_place(shares(list)?, path) {
+        Some(place) => Some(Ts::from_rust(&place)?),
+        None => None,
+    })
+}
 
-#[wasm_bindgen]
-impl SpaceSync {
-    #[wasm_bindgen(constructor)]
-    pub fn new(lfs_threshold: Option<f64>) -> Self {
-        Self(crate::sync::SpaceSync::new(lfs_threshold.unwrap_or(crate::sync::DEFAULT_LFS_THRESHOLD)))
-    }
+/// The repository path of `inside` (as `sharePlace` names it) in a share.
+#[wasm_bindgen(js_name = shareFilePath)]
+pub fn share_file_path(share: Ts<SharePath>, inside: &str) -> Js<String> {
+    Ok(crate::shares::share_file_path(share.to_rust()?, inside))
+}
 
-    #[wasm_bindgen(getter = lfsThreshold)]
-    pub fn lfs_threshold(&self) -> f64 {
-        self.0.lfs_threshold
-    }
+/// Ids of the shares any of the commit's `changed` repository paths touch.
+#[wasm_bindgen(js_name = sharesTouched)]
+pub fn shares_touched(list: Vec<Ts<SharePath>>, changed: Vec<String>) -> Js<Vec<String>> {
+    Ok(crate::shares::shares_touched(shares(list)?, changed))
+}
 
-    #[wasm_bindgen(setter = lfsThreshold)]
-    pub fn set_lfs_threshold(&mut self, bytes: f64) {
-        self.0.lfs_threshold = bytes;
-    }
+/// Whether a remote head is news: neither this device's node nor one of its ancestors.
+#[wasm_bindgen(js_name = needsMerge)]
+pub fn needs_merge(head: Option<String>, ancestry: Vec<String>, remote: &str) -> bool {
+    crate::shares::needs_merge(head, ancestry, remote)
+}
 
-    pub fn load(&mut self, state: &str) {
-        self.0.load(state);
-    }
-
-    pub fn save(&self) -> String {
-        self.0.save()
-    }
-
-    #[wasm_bindgen(getter = syncedPaths)]
-    pub fn synced_paths(&self) -> Vec<String> {
-        self.0.synced_paths()
-    }
-
-    pub fn scan(&mut self, files: Vec<Ts<LocalFile>>, ignore: &IgnoreRules) -> Js<Vec<Ts<SyncAction>>> {
-        let files = files.iter().map(Ts::to_rust).collect::<Result<Vec<_>, _>>()?;
-        actions(self.0.scan(&files, &ignore.0))
-    }
-
-    pub fn remote(
-        &mut self,
-        entry: Ts<RemoteEntry>,
-        local: Option<Ts<LocalFile>>,
-        ignore: &IgnoreRules,
-        #[wasm_bindgen(unchecked_param_type = "(path: string) => boolean")] exists: &js_sys::Function,
-    ) -> Js<Vec<Ts<SyncAction>>> {
-        let local = local.map(|l| l.to_rust()).transpose()?;
-        actions(self.0.remote(&entry.to_rust()?, local.as_ref(), &ignore.0, check(exists)))
-    }
-
-    #[wasm_bindgen(js_name = mergeFailed)]
-    pub fn merge_failed(
-        &mut self,
-        path: &str,
-        remote_hash: &str,
-        size: f64,
-        #[wasm_bindgen(unchecked_param_type = "(path: string) => boolean")] exists: &js_sys::Function,
-    ) -> Js<Vec<Ts<SyncAction>>> {
-        actions(self.0.merge_failed(path, remote_hash, size, check(exists)))
-    }
-
-    pub fn merged(&mut self, path: &str, remote_hash: &str) {
-        self.0.merged(path, remote_hash);
-    }
-
-    pub fn accepted(&mut self, path: &str, hash: &str) {
-        self.0.accepted(path, hash);
-    }
-
-    pub fn wrote(&mut self, path: &str, hash: &str, ok: bool) {
-        self.0.wrote(path, hash, ok);
-    }
-
-    pub fn published(&mut self, path: &str, hash: &str, deleted: bool) {
-        self.0.published(path, hash, deleted);
-    }
+#[wasm_bindgen(js_name = shareStatus)]
+pub fn share_status(head: Option<String>, peers: Vec<Ts<PeerHead>>, others: u32, conflicted: bool, working: bool) -> Js<Ts<ShareStatus>> {
+    let peers = peers.iter().map(Ts::to_rust).collect::<Result<Vec<_>, _>>()?;
+    Ok(Ts::from_rust(&crate::shares::share_status(head, peers, others, conflicted, working))?)
 }

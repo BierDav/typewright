@@ -389,6 +389,7 @@ export class Workspace {
     }
     const live = this.state.selected;
     await fs.move(fs.join(this.root, from), fs.join(this.root, to));
+    jj.noteMoved(this.repoPath(from), this.repoPath(to));
     batch(() => {
       if (live) this.setState("selected", moved(live));
       if (this.state.preview) this.setState("preview", moved(this.state.preview));
@@ -630,7 +631,7 @@ export class Workspace {
   /** Edits reach storage every 30 s and on switches; synced spaces save within a second so other devices keep up. */
   private scheduleAutosave() {
     if (this.autosave) return;
-    const delay = syncService.isSynced(this.folder) ? 1000 : 30_000;
+    const delay = syncService.syncsAnything(this.folder) ? 1000 : 30_000;
     this.autosave = setTimeout(() => void this.flushSaves(), delay);
   }
 

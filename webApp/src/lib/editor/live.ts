@@ -80,7 +80,7 @@ function difference(old: string, next: string) {
   return { from: prefix, to: old.length - suffix, insert: next.slice(prefix, next.length - suffix) };
 }
 
-/** Live editing of `path` in the space `folder`; inactive while the space doesn't sync. */
+/** Live editing of `path` in the space `folder`; inactive while no share holds the file. */
 export function liveEditing(folder: string, path: string): Extension {
   const plugin = ViewPlugin.fromClass(
     class {
@@ -90,12 +90,12 @@ export function liveEditing(folder: string, path: string): Extension {
 
       constructor(readonly view: EditorView) {
         const text = view.state.doc.toString();
-        if (syncService.isRunning() && syncService.isSynced(folder) && text.length <= syncService.LIVE_LIMIT) {
+        if (syncService.canEditLive(folder, path) && text.length <= syncService.LIVE_LIMIT) {
           syncService.liveOpen(folder, path, text);
           this.active = true;
         }
-        this.unsubscribe = syncService.onLive((id, livePath) => {
-          if (this.active && livePath === path && syncService.spaceId(folder) === id) queueMicrotask(() => this.sync());
+        this.unsubscribe = syncService.onLive((liveFolder, livePath) => {
+          if (this.active && livePath === path && liveFolder === folder) queueMicrotask(() => this.sync());
         });
       }
 

@@ -4,11 +4,11 @@
 
 use std::{str::FromStr, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use iroh::{Endpoint, EndpointId, SecretKey, endpoint::presets};
 use iroh_blobs::{Hash, store::mem::MemStore};
 use iroh_docs::{
-    Author, AuthorId, Capability, ContentStatus, NamespaceSecret, Record, RecordIdentifier,
+    AuthorId, Capability, ContentStatus, NamespaceSecret, Record, RecordIdentifier,
     engine::{DefaultAuthorStorage, Engine},
     protocol::Docs,
     store::{Query, Store},
@@ -19,13 +19,14 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    Inner, MAX_GOSSIP_MESSAGE, Parts, TOMBSTONE, account_author, account_namespace, begin_join, hex, invite,
-    join_space, leave_space, list_space, live, open_space, parse_hex32, publish_bytes, remove_space, share_space,
-    space_author, unpublish,
+    Inner, MAX_GOSSIP_MESSAGE, Parts, account_author, account_namespace, begin_join, bundle, hex, live, parse_hex32,
+    shares, space_author,
 };
 
-/// Blobs up to this size ride along in snapshots: account entries, and the bases of text merges.
+/// Blobs up to this size ride along in snapshots: account entries and small node bundles.
 const SNAPSHOT_BLOB_LIMIT: u64 = 256 * 1024;
+/// Snapshots since shares start with this; older ones (account and space replicas) still read.
+const SNAPSHOT_MAGIC: &[u8] = b"tws snapshot v2\n";
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
@@ -35,9 +36,39 @@ struct Snapshot {
 
 #[derive(Serialize, Deserialize)]
 struct ReplicaSnapshot {
-    secret: [u8; 32],
+    namespace: [u8; 32],
+    /// Secret of the author the replica's entries are written as (beside the account's).
+    author: [u8; 32],
     /// Author, key, content hash, length and timestamp of every entry.
     entries: Vec<([u8; 32], Vec<u8>, [u8; 32], u64, u64)>,
+}
+
+/// Before shares: each replica's namespace secret also derived its author.
+#[derive(Deserialize)]
+struct OldSnapshot {
+    replicas: Vec<OldReplica>,
+    blobs: Vec<Vec<u8>>,
+}
+
+#[derive(Deserialize)]
+struct OldReplica {
+    secret: [u8; 32],
+    entries: Vec<([u8; 32], Vec<u8>, [u8; 32], u64, u64)>,
+}
+
+fn read_snapshot(bytes: &[u8]) -> Result<Snapshot> {
+    if let Some(rest) = bytes.strip_prefix(SNAPSHOT_MAGIC) {
+        return Ok(postcard::from_bytes(rest)?);
+    }
+    let old: OldSnapshot = postcard::from_bytes(bytes)?;
+    Ok(Snapshot {
+        replicas: old
+            .replicas
+            .into_iter()
+            .map(|r| ReplicaSnapshot { namespace: r.secret, author: r.secret, entries: r.entries })
+            .collect(),
+        blobs: old.blobs,
+    })
 }
 
 #[wasm_bindgen]
@@ -53,18 +84,13 @@ fn key32(bytes: &[u8], what: &str) -> Result<[u8; 32], JsError> {
     bytes.try_into().map_err(|_| JsError::new(&format!("{what} must be 32 bytes")))
 }
 
-/// Authors this account can sign as: its own, and every replica's space author.
-fn authors(account: &[u8; 32], secrets: &[[u8; 32]]) -> Vec<Author> {
-    std::iter::once(account_author(account)).chain(secrets.iter().map(space_author)).collect()
-}
-
 /// Rebuilds the replicas a snapshot describes; returns the blobs it carried.
 async fn restore(store: &mut Store, account: &[u8; 32], bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let snapshot: Snapshot = postcard::from_bytes(bytes)?;
-    let secrets: Vec<[u8; 32]> = snapshot.replicas.iter().map(|r| r.secret).collect();
-    let authors = authors(account, &secrets);
+    let snapshot = read_snapshot(bytes)?;
+    let own = account_author(account);
     for replica in &snapshot.replicas {
-        let namespace = NamespaceSecret::from_bytes(&replica.secret);
+        let namespace = NamespaceSecret::from_bytes(&replica.namespace);
+        let authors = [own.clone(), space_author(&replica.author)];
         store.import_namespace(Capability::Write(namespace.clone()))?;
         let mut open = store.open_replica(&namespace.id())?;
         for (author, key, hash, len, timestamp) in &replica.entries {
@@ -78,6 +104,26 @@ async fn restore(store: &mut Store, account: &[u8; 32], bytes: &[u8]) -> Result<
     }
     store.flush()?;
     Ok(snapshot.blobs)
+}
+
+/// `[[id, bytes], …]` pairs from JavaScript.
+fn pairs(array: &js_sys::Array, what: &str) -> Result<Vec<(String, Vec<u8>)>, JsError> {
+    let mut out = Vec::with_capacity(array.length() as usize);
+    for item in array.iter() {
+        let pair = js_sys::Array::from(&item);
+        let id = pair.get(0).as_string().ok_or_else(|| JsError::new(&format!("{what}: an id isn't a string")))?;
+        let bytes = js_sys::Uint8Array::new(&pair.get(1)).to_vec();
+        out.push((id, bytes));
+    }
+    Ok(out)
+}
+
+fn to_pairs(items: impl IntoIterator<Item = (String, Vec<u8>)>) -> js_sys::Array {
+    let out = js_sys::Array::new();
+    for (id, bytes) in items {
+        out.push(&js_sys::Array::of2(&JsValue::from_str(&id), &js_sys::Uint8Array::from(bytes.as_slice())));
+    }
+    out
 }
 
 #[wasm_bindgen]
@@ -104,7 +150,6 @@ impl SyncNode {
                 Err(err) => warn(&format!("Typewright: discarded sync snapshot: {err:#}")),
             }
         }
-        blobs.add_bytes(TOMBSTONE.to_vec()).await.map_err(|e| js(e.into()))?;
         for blob in carried {
             blobs.add_bytes(blob).await.map_err(|e| js(e.into()))?;
         }
@@ -140,116 +185,153 @@ impl SyncNode {
         });
     }
 
-    /// Lists the space for all devices of the account and starts syncing it here.
-    #[wasm_bindgen(js_name = shareSpace)]
-    pub fn share_space(&self, space: String, name: String) {
-        self.spawn("share space", share_space(self.inner.clone(), space, name));
+    /// Lists the share (`kind` "space", "folder" or "file") for all devices of the account and starts syncing it
+    /// here; `device` labels this device's side of conflicts elsewhere.
+    #[wasm_bindgen(js_name = addShare)]
+    pub fn add_share(&self, share: String, name: String, kind: String, device: String) {
+        self.spawn("add share", shares::add_share(self.inner.clone(), share, name, kind, device));
     }
 
-    /// The hex secret an invite link carries; marks the space shared for all devices of the account.
-    pub fn invite(&self, space: String, name: String) -> String {
-        let secret = self.inner.namespace(&space);
-        self.spawn("invite", invite(self.inner.clone(), space, name));
+    /// The hex secret an invite link to the share carries; marks it shared for all devices of the account.
+    #[wasm_bindgen(js_name = shareInvite)]
+    pub fn share_invite(&self, share: String, name: String, kind: String) -> String {
+        let secret = self.inner.namespace(&share);
+        self.spawn("invite", shares::invite_share(self.inner.clone(), share, name, kind));
         hex(&secret)
     }
 
-    /// Starts syncing a space from another account's invite; `hints` are endpoint ids to dial first.
-    #[wasm_bindgen(js_name = joinSpace)]
-    pub fn join_space(&self, space: String, name: String, secret: String, hints: Vec<String>) -> Result<(), JsError> {
+    /// Starts syncing a share from another account's invite; `hints` are endpoint ids to dial first.
+    #[wasm_bindgen(js_name = joinShare)]
+    pub fn join_share(
+        &self,
+        share: String,
+        name: String,
+        kind: String,
+        secret: String,
+        hints: Vec<String>,
+        device: String,
+    ) -> Result<(), JsError> {
         let secret = parse_hex32(&secret).ok_or_else(|| JsError::new("invalid secret"))?;
         let hints = hints.iter().filter_map(|h| EndpointId::from_str(h.trim()).ok()).collect();
-        begin_join(&self.inner, &space, secret, hints);
-        self.spawn("join space", join_space(self.inner.clone(), space, name, secret));
+        begin_join(&self.inner, &share, secret, hints);
+        self.spawn("join share", shares::join_share(self.inner.clone(), share, name, kind, secret, device));
         Ok(())
     }
 
-    /// Starts syncing a space listed by the account; answers with an `entries` event.
-    #[wasm_bindgen(js_name = openSpace)]
-    pub fn open_space(&self, space: String) {
-        self.spawn("open space", open_space(self.inner.clone(), space));
+    /// Starts syncing a share listed by the account; answers with `head` events for the other devices' heads.
+    #[wasm_bindgen(js_name = openShare)]
+    pub fn open_share(&self, share: String, device: String) {
+        self.spawn("open share", shares::open_share(self.inner.clone(), share, device));
     }
 
-    #[wasm_bindgen(js_name = closeSpace)]
-    pub fn close_space(&self, space: String) {
-        self.spawn("close space", leave_space(self.inner.clone(), space));
+    /// Stops syncing a share on this device; a share nobody syncs leaves the account.
+    #[wasm_bindgen(js_name = closeShare)]
+    pub fn close_share(&self, share: String) {
+        self.spawn("close share", shares::leave_share(self.inner.clone(), share));
     }
 
-    #[wasm_bindgen(js_name = removeSpace)]
-    pub fn remove_space(&self, space: String) {
-        self.spawn("remove space", remove_space(self.inner.clone(), space));
+    /// Stops syncing a share on every device of the account; the files stay everywhere.
+    #[wasm_bindgen(js_name = removeShare)]
+    pub fn remove_share(&self, share: String) {
+        self.spawn("remove share", shares::remove_share(self.inner.clone(), share));
     }
 
-    #[wasm_bindgen(js_name = listSpace)]
-    pub fn list_space(&self, space: String) {
+    /// Reports the other devices' heads again (`head` events).
+    #[wasm_bindgen(js_name = listHeads)]
+    pub fn list_heads(&self, share: String) {
         let inner = self.inner.clone();
-        self.spawn("list space", async move { list_space(&inner, &space).await });
+        self.spawn("list heads", async move { shares::list_heads(&inner, &share).await });
     }
 
-    /// Writes `bytes` as the space's `path`; answers with a `published` event.
-    pub fn publish(&self, space: String, path: String, bytes: Vec<u8>) {
-        self.spawn("publish", publish_bytes(self.inner.clone(), space, path, bytes));
+    /// Publishes a node as this device's head: `manifest` from `twj_export_node`, `objects` the `[oid, bytes]` pairs
+    /// `twj_write_objects` wrote for it, and `lfs` `[blake3, bytes]` pairs of its LFS files (the browser keeps no
+    /// blobs across reloads, so they're seeded again; ones the replica already lists may be left out).
+    #[wasm_bindgen(js_name = publishNode)]
+    pub async fn publish_node(&self, share: String, manifest: String, objects: js_sys::Array, lfs: js_sys::Array) -> Result<(), JsError> {
+        let manifest: serde_json::Value = serde_json::from_str(&manifest).map_err(|e| js(e.into()))?;
+        let objects = pairs(&objects, "objects")?;
+        let bytes = bundle::encode(&manifest, &objects).map_err(js)?;
+        for (hash, data) in pairs(&lfs, "lfs")? {
+            let tag = self.inner.blobs.add_bytes(data).await.map_err(|e| js(e.into()))?;
+            if tag.hash.to_hex().to_string() != hash {
+                return Err(JsError::new(&format!("LFS file {hash} changed while it was published")));
+            }
+        }
+        // Everything the bundle names was seeded above or is already listed, so nothing gets added here.
+        shares::publish_node(self.inner.clone(), share, bytes, bundle::lfs_hashes(&manifest), |_, _, key| async move {
+            Err(anyhow!("no content for {key}"))
+        })
+        .await
+        .map_err(js)
     }
 
-    pub fn unpublish(&self, space: String, path: String) {
-        self.spawn("unpublish", unpublish(self.inner.clone(), space, path));
+    /// `device`'s current head: `{manifest: string, objects: [oid, bytes][], lfs: [blake3, bytes][]}`, without the
+    /// LFS files in `skip` (this device holds them already).
+    #[wasm_bindgen(js_name = fetchNode)]
+    pub async fn fetch_node(&self, share: String, device: String, skip: Vec<String>) -> Result<JsValue, JsError> {
+        let bundle = shares::head_bundle(&self.inner, &share, &device).await.map_err(js)?;
+        let mut lfs = Vec::new();
+        for hash in bundle::lfs_hashes(&bundle.manifest) {
+            if skip.contains(&hash) {
+                continue;
+            }
+            let parsed = Hash::from_str(&hash).map_err(|e| JsError::new(&e.to_string()))?;
+            let bytes = self.inner.blobs.get_bytes(parsed).await.map_err(|e| js(e.into()))?;
+            lfs.push((hash, bytes.to_vec()));
+        }
+        let out = js_sys::Object::new();
+        let manifest = serde_json::to_string(&bundle.manifest).map_err(|e| js(e.into()))?;
+        js_sys::Reflect::set(&out, &"manifest".into(), &manifest.into()).map_err(|_| JsError::new("fetch"))?;
+        js_sys::Reflect::set(&out, &"objects".into(), &to_pairs(bundle.objects)).map_err(|_| JsError::new("fetch"))?;
+        js_sys::Reflect::set(&out, &"lfs".into(), &to_pairs(lfs)).map_err(|_| JsError::new("fetch"))?;
+        Ok(out.into())
     }
 
-    /// Keeps a local file's content available to other devices, as files are the browser's blob store.
-    pub async fn seed(&self, bytes: Vec<u8>) -> Result<String, JsError> {
-        let tag = self.inner.blobs.add_bytes(bytes).await.map_err(|e| js(e.into()))?;
-        Ok(tag.hash.to_hex().to_string())
-    }
-
-    /// The blob's content; fails while it hasn't arrived.
-    #[wasm_bindgen(js_name = readBlob)]
-    pub async fn read_blob(&self, hash: String) -> Result<Vec<u8>, JsError> {
-        let hash = Hash::from_str(&hash).map_err(|e| JsError::new(&e.to_string()))?;
-        let bytes = self.inner.blobs.get_bytes(hash).await.map_err(|e| js(e.into()))?;
-        Ok(bytes.to_vec())
-    }
-
-    /// Starts live editing of a file shown in an editor; `name` labels this device's cursor elsewhere.
+    /// Starts live editing of a file shown in an editor: `share` and the path inside it (`@file` for a file share);
+    /// `name` labels this device's cursor elsewhere.
     #[wasm_bindgen(js_name = liveOpen)]
-    pub fn live_open(&self, space: String, path: String, text: String, name: String) {
-        live::open(&self.inner, &space, &path, &text, &name);
+    pub fn live_open(&self, share: String, path: String, text: String, name: String) {
+        live::open(&self.inner, &share, &path, &text, &name);
     }
 
     #[wasm_bindgen(js_name = liveClose)]
-    pub fn live_close(&self, space: String, path: String) {
-        live::close(&self.inner, &space, &path);
+    pub fn live_close(&self, share: String, path: String) {
+        live::close(&self.inner, &share, &path);
     }
 
     /// Hands over the editor's text and selection (UTF-16) and returns JSON with remote `edits`, an
     /// `adopted` session to merge into, the other `cursors` and `peers`. `step` 1 undoes, 2 redoes.
     #[wasm_bindgen(js_name = liveSync)]
-    pub fn live_sync(&self, space: String, path: String, text: String, location: u32, length: u32, step: i32) -> String {
+    pub fn live_sync(&self, share: String, path: String, text: String, location: u32, length: u32, step: i32) -> String {
         let step = match step {
             1 => live::Step::Undo,
             2 => live::Step::Redo,
             _ => live::Step::None,
         };
-        live::sync(&self.inner, &space, &path, &text, (location, length), step).to_string()
+        live::sync(&self.inner, &share, &path, &text, (location, length), step).to_string()
     }
 
-    /// The account replica and every open space's, for `start` after the page reloads.
+    /// The account replica and every open share's, for `start` after the page reloads.
     pub async fn snapshot(&self) -> Result<Vec<u8>, JsError> {
         self.snapshot_inner().await.map_err(js)
     }
 
     async fn snapshot_inner(&self) -> Result<Vec<u8>> {
         let inner = &self.inner;
-        let mut docs = vec![(account_namespace(&inner.account).to_bytes(), inner.account_doc.clone())];
+        // (namespace, author secret, replica)
+        let mut docs = vec![(account_namespace(&inner.account).to_bytes(), inner.account, inner.account_doc.clone())];
         let open: Vec<(String, iroh_docs::api::Doc)> =
-            inner.spaces.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.doc.clone())).collect();
+            inner.shares.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.doc.clone())).collect();
         for (id, doc) in open {
-            docs.push((inner.namespace(&id), doc));
+            let secret = inner.namespace(&id);
+            docs.push((shares::share_namespace(&secret).to_bytes(), secret, doc));
         }
-        let secrets: Vec<[u8; 32]> = docs.iter().map(|(s, _)| *s).collect();
-        let signers: Vec<AuthorId> = authors(&inner.account, &secrets).iter().map(|a| a.id()).collect();
         let mut snapshot = Snapshot { replicas: Vec::new(), blobs: Vec::new() };
         let mut carried = std::collections::HashSet::new();
-        for (secret, doc) in docs {
-            let mut replica = ReplicaSnapshot { secret, entries: Vec::new() };
+        let own = account_author(&inner.account).id();
+        for (namespace, author, doc) in docs {
+            let signers: [AuthorId; 2] = [own, space_author(&author).id()];
+            let mut replica = ReplicaSnapshot { namespace, author, entries: Vec::new() };
             let entries = doc.get_many(Query::all().include_empty().build()).await?;
             tokio::pin!(entries);
             while let Some(entry) = entries.next().await {
@@ -274,7 +356,9 @@ impl SyncNode {
             }
             snapshot.replicas.push(replica);
         }
-        Ok(postcard::to_allocvec(&snapshot)?)
+        let mut out = SNAPSHOT_MAGIC.to_vec();
+        out.extend(postcard::to_allocvec(&snapshot)?);
+        Ok(out)
     }
 }
 

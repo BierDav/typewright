@@ -1,22 +1,34 @@
-// Syncs the spaces the user picked across their devices and with the people they invited, like the
-// Mac app's `SyncService`: `irohBridge` (built for wasm) moves the data, `SpaceSync` from the Rust
-// core decides what to do, and this applies it to the space folders in origin storage.
+// Syncs shares (spaces, or any folder or file in one) across the user's devices and with the people they invited,
+// like the Mac app's `SyncService`. Each state of a share travels as a jj node: a commit is exported by the jj worker
+// (`lib/jj.ts`) and published as this device's head through `irohBridge` (built for wasm); other devices' heads are
+// fetched and merged 3-way by jj, and a clean merge is published again, until every device holds the same node.
+// Files open on two connected devices sync live through the CRDT instead, so merges leave them alone.
 //
-// Only one tab per browser runs the node (a Web Lock decides); others still edit the same folders,
-// and their writes reach the syncing tab through the storage change channel.
-import { batch } from "solid-js";
+// Paths are repository paths (`Thesis/main.typ`): a space is a top-level folder of the repository.
+// The tab running the repository runs the node too (Web Locks decide); other tabs say "Syncing in another tab".
+import { batch, createEffect, createRoot } from "solid-js";
 import { createStore } from "solid-js/store";
-import init, { generateDeviceKey, hashBytes, SyncNode } from "~/wasm/sync/sync.js";
+import init, { generateDeviceKey, SyncNode } from "~/wasm/sync/sync.js";
 import syncWasm from "~/wasm/sync/sync_bg.wasm?url";
 import * as core from "./core";
-import { IgnoreRules, type LocalFile, merge3, type RemoteEntry, type SpaceInvite, SpaceSync, type SyncAction } from "./core";
+import type { PeerHead, SharePath, SpaceInvite } from "./core";
 import { identity } from "./identity";
-import { isEditable, kindWithContents } from "./kinds";
+import * as jj from "./jj";
 import { settings } from "./settings";
-import { createSpace, SPACES, spacePath } from "./spaces";
+import { refreshSpaces, SPACES, uniqueName } from "./spaces";
 import * as fs from "./storage";
 
-export type AccountSpace = { id: string; name: string; members: string[]; shared: boolean };
+export type ShareKind = "space" | "folder" | "file";
+export type ShareStatus = "Synced" | "Syncing" | "Conflicts" | "Offline";
+
+/** A share listed by the account, possibly not on this device yet. */
+export type AccountShare = { id: string; name: string; kind: ShareKind; members: string[]; shared: boolean };
+
+/** Where a share lives on this device: its repository path. */
+export type LocalShare = { path: string; kind: ShareKind };
+
+/** A share stopped because its folder or file was deleted; restoring it syncs it again. */
+export type ParkedShare = { share: LocalShare; name: string; shared: boolean; secret?: string; left: boolean };
 
 export type LiveResult = {
   edits: { location: number; length: number; text: string }[];
@@ -28,7 +40,11 @@ export type LiveResult = {
 
 /** Live files above this size sync on save only. */
 export const LIVE_LIMIT = 512 * 1024;
-const SPACES_KEY = "typewright.syncedSpaces";
+const SHARES_KEY = "typewright.syncedShares";
+const PARKED_KEY = "typewright.syncParkedShares";
+const REJOINING_KEY = "typewright.syncRejoiningShares";
+/** Spaces synced path by path before shares: id → folder. */
+const OLD_SPACES_KEY = "typewright.syncedSpaces";
 
 export const [sync, setSync] = createStore({
   status: "off" as "off" | "starting" | "running" | "elsewhere" | "error",
@@ -37,74 +53,137 @@ export const [sync, setSync] = createStore({
   connected: [] as string[],
   /** Every device listed for the account, this one included. */
   devices: [] as string[],
-  accountSpaces: [] as AccountSpace[],
-  /** Synced spaces on this device: id to folder name. */
-  spaces: loadSpaces(),
-  /** Devices of any account listed for each shared space. */
+  accountShares: [] as AccountShare[],
+  /** Shares synced on this device by id. */
+  shares: load<Record<string, LocalShare>>(SHARES_KEY, {}),
+  statuses: {} as Record<string, ShareStatus>,
+  /** Why a share isn't syncing, like its folder having moved away. */
+  problems: {} as Record<string, string>,
+  /** Shares whose root was deleted here, by id. */
+  parked: load<Record<string, ParkedShare>>(PARKED_KEY, {}),
+  /** Devices of any account listed for each shared share. */
   shared: {} as Record<string, string[]>,
   lastError: null as string | null,
 });
 
-function loadSpaces(): Record<string, string> {
+function load<T>(key: string, fallback: T): T {
+  if (typeof localStorage === "undefined") return fallback;
   try {
-    return JSON.parse(localStorage.getItem(SPACES_KEY) ?? "{}");
+    return JSON.parse(localStorage.getItem(key) ?? "null") ?? fallback;
   } catch {
-    return {};
+    return fallback;
   }
 }
 
-type Cached = { size: number; modified: number; hash: string; isText: boolean };
+/** What this device knows about a share's nodes. */
+type Runtime = {
+  /** This device's current node, its ancestors and the LFS files it holds. */
+  head: string | null;
+  ancestry: string[];
+  lfs: Set<string>;
+  /** The node last published as this device's head, and the LFS files seeded since the page loaded. */
+  published: string | null;
+  seeded: Set<string>;
+  /** The other devices' heads. */
+  heads: Map<string, { node: string; name: string | null }>;
+  working: number;
+};
+
+type Manifest = {
+  node?: string;
+  ancestry?: string[];
+  files?: Record<string, { lfs?: boolean; blake3?: string }>;
+};
 
 let node: SyncNode | null = null;
 let wasmReady: Promise<unknown> | null = null;
 let dataDir = "";
 let releaseLock: (() => void) | null = null;
-let unwatch: (() => void) | null = null;
 let generation = 0;
-const engines = new Map<string, SpaceSync>();
-const ignores = new Map<string, IgnoreRules>();
-/** Paths of each space's last scan, files and folders, for naming conflict copies. */
-const known = new Map<string, Set<string>>();
-const scanning = new Set<string>();
-const scanPending = new Set<string>();
-const scanned = new Set<string>();
-/** Remote changes of a space apply one after another. */
+let rejoining = load<Record<string, ParkedShare>>(REJOINING_KEY, {});
+const runtimes = new Map<string, Runtime>();
 const queues = new Map<string, Promise<void>>();
-const hashes = new Map<string, Cached>();
-const seeded = new Set<string>();
-/** `space/path` of files open here and on another device; file sync leaves them to the live session. */
+const publishTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** `share/inside` of files open here and on another device; merges leave them to the live session. */
 const livePaths = new Set<string>();
 const willChange = new Set<(folder: string) => Promise<void> | void>();
-const liveListeners = new Set<(id: string, path: string) => void>();
-let saveTimer: ReturnType<typeof setTimeout> | undefined;
+const liveListeners = new Set<(folder: string, path: string) => void>();
 let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
+
+migrateSpaces();
+
+/** Spaces synced before shares keep their ids and sync as space shares. */
+function migrateSpaces() {
+  if (typeof localStorage === "undefined") return;
+  const old = load<Record<string, string>>(OLD_SPACES_KEY, {});
+  if (!Object.keys(old).length) return;
+  for (const [id, folder] of Object.entries(old)) {
+    if (folder && !sync.shares[id]) setSync("shares", id, { path: folder, kind: "space" });
+  }
+  localStorage.removeItem(OLD_SPACES_KEY);
+  persist();
+}
+
+function persist() {
+  localStorage.setItem(SHARES_KEY, JSON.stringify(sync.shares));
+  localStorage.setItem(PARKED_KEY, JSON.stringify(sync.parked));
+  localStorage.setItem(REJOINING_KEY, JSON.stringify(rejoining));
+}
+
+function runtime(id: string): Runtime {
+  let r = runtimes.get(id);
+  if (!r) {
+    r = { head: null, ancestry: [], lfs: new Set(), published: null, seeded: new Set(), heads: new Map(), working: 0 };
+    runtimes.set(id, r);
+  }
+  return r;
+}
+
+// MARK: - Lookups
+
+function sharePaths(): SharePath[] {
+  return Object.entries(sync.shares)
+    .filter(([, s]) => s)
+    .map(([id, s]) => ({ id, path: s.path, file: s.kind === "file" }));
+}
+
+function sharePath(id: string): SharePath | null {
+  const share = sync.shares[id];
+  return share ? { id, path: share.path, file: share.kind === "file" } : null;
+}
 
 export function isRunning(): boolean {
   return node !== null;
 }
 
-/** Hashes like blobs are (BLAKE3 hex); needs the module, which `restart` loads. */
-export function blake3(bytes: Uint8Array): string {
-  return hashBytes(bytes);
+/** The share whose root is exactly `path`. */
+export function shareId(path: string): string | undefined {
+  return Object.entries(sync.shares).find(([, s]) => s?.path === path)?.[0];
 }
 
-export function spaceId(folder: string): string | undefined {
-  return Object.entries(sync.spaces).find(([, f]) => f === folder)?.[0];
+export function isSynced(path: string): boolean {
+  return shareId(path) !== undefined;
 }
 
-export function isSynced(folder: string): boolean {
-  return spaceId(folder) !== undefined;
+/** Whether anything in or around `folder` syncs, so its edits should reach storage quickly. */
+export function syncsAnything(folder: string): boolean {
+  return Object.values(sync.shares).some((s) => s && (s.path === folder || s.path.startsWith(`${folder}/`) || folder.startsWith(`${s.path}/`)));
 }
 
-/** Whether other accounts sync the space too. */
-export function isShared(folder: string): boolean {
-  const id = spaceId(folder);
-  return !!id && sync.accountSpaces.some((s) => s.id === id && s.shared);
+/** Whether other accounts sync the share too. */
+export function isShared(path: string): boolean {
+  const id = shareId(path);
+  return !!id && sync.accountShares.some((s) => s.id === id && s.shared);
 }
 
-/** Account spaces another device syncs and this one doesn't. */
-export function elsewhere(): AccountSpace[] {
-  return sync.accountSpaces.filter((s) => !sync.spaces[s.id] && s.members.some((m) => m !== sync.deviceId));
+export function status(path: string): ShareStatus | undefined {
+  const id = shareId(path);
+  return id ? sync.statuses[id] : undefined;
+}
+
+/** Account shares another device syncs and this one doesn't. */
+export function elsewhere(): AccountShare[] {
+  return sync.accountShares.filter((s) => !sync.shares[s.id] && s.members.some((m) => m !== sync.deviceId));
 }
 
 /** Runs before sync replaces files of a space, so editors save their edits first. */
@@ -113,14 +192,14 @@ export function onWillChange(hook: (folder: string) => Promise<void> | void): ()
   return () => willChange.delete(hook);
 }
 
-/** Called when another device edited a file open in a live session here. */
-export function onLive(listener: (id: string, path: string) => void): () => void {
+/** Called with the space folder and the path inside it when another device edited a file open in a live session. */
+export function onLive(listener: (folder: string, path: string) => void): () => void {
   liveListeners.add(listener);
   return () => liveListeners.delete(listener);
 }
 
-function persistSpaces() {
-  localStorage.setItem(SPACES_KEY, JSON.stringify(sync.spaces));
+function spaceOf(path: string): string {
+  return path.split("/")[0];
 }
 
 // MARK: - Lifecycle
@@ -129,28 +208,21 @@ function persistSpaces() {
 export async function restart() {
   await stop();
   const account = identity.account;
-  if (!account || !identity.fingerprint) return;
+  const fingerprint = identity.fingerprint;
+  if (!account || !fingerprint) return;
   const run = ++generation;
-  setSync({ status: "starting", lastError: null });
-  if (!navigator.locks) return start(account, identity.fingerprint, run);
-  // One tab per browser runs the node; the lock passes on when it closes.
-  navigator.locks.request("typewright-sync", { ifAvailable: true }, async (lock) => {
-    if (!lock) {
-      setSync("status", "elsewhere");
-      navigator.locks.request("typewright-sync", async () => {
-        if (run !== generation) return;
-        await holdWhileRunning(account, identity.fingerprint!, run);
-      });
-      return;
-    }
-    await holdWhileRunning(account, identity.fingerprint!, run);
-  });
-}
-
-async function holdWhileRunning(account: Uint8Array, fingerprint: string, run: number) {
-  await new Promise<void>((resolve) => {
-    releaseLock = resolve;
-    void start(account, fingerprint, run);
+  setSync({ status: jj.repository.status === "elsewhere" ? "elsewhere" : "starting", lastError: null });
+  // Sync runs where the repository does: it exports and merges through it.
+  await jj.whenOpen();
+  if (run !== generation) return;
+  setSync("status", "starting");
+  if (!navigator.locks) return start(account, fingerprint, run);
+  navigator.locks.request("typewright-sync", async () => {
+    if (run !== generation) return;
+    await new Promise<void>((resolve) => {
+      releaseLock = resolve;
+      void start(account, fingerprint, run);
+    });
   });
 }
 
@@ -164,6 +236,8 @@ async function start(account: Uint8Array, fingerprint: string, run: number) {
       key = generateDeviceKey();
       await fs.writeFile(`${dataDir}/device.key`, key, true);
     }
+    // Path-by-path sync kept per-space state here; shares keep theirs in the repository.
+    void fs.remove(`${dataDir}/state`, true).catch(() => {});
     const snapshot = await fs.readFile(`${dataDir}/replicas.bin`);
     const started = await SyncNode.start(key, account, snapshot ?? undefined, (event: string) => handle(event));
     if (run !== generation) {
@@ -172,14 +246,7 @@ async function start(account: Uint8Array, fingerprint: string, run: number) {
     }
     node = started;
     setSync({ status: "running", deviceId: node.deviceId() });
-    unwatch = fs.onChange(({ paths }) => {
-      for (const path of paths) {
-        const folder = fs.split(path)[0] === SPACES ? fs.split(path)[1] : undefined;
-        const id = folder && spaceId(folder);
-        if (id) scheduleScan(id);
-      }
-    });
-    for (const [id, folder] of Object.entries(sync.spaces)) open(id, folder);
+    for (const id of Object.keys(sync.shares)) if (sync.shares[id]) open(id);
   } catch (err) {
     setSync({ status: "error", lastError: `Couldn't start syncing: ${(err as Error).message ?? err}` });
     releaseLock?.();
@@ -190,31 +257,37 @@ export async function stop() {
   generation++;
   const current = node;
   node = null;
-  unwatch?.();
-  unwatch = null;
   if (current) {
-    saveState();
     await saveSnapshot(current);
     await current.stop().catch(() => {});
   }
-  engines.clear();
-  scanned.clear();
+  for (const timer of publishTimers.values()) clearTimeout(timer);
+  publishTimers.clear();
+  runtimes.clear();
+  queues.clear();
   livePaths.clear();
-  setSync({ status: "off", deviceId: null, connected: [], devices: [], accountSpaces: [], shared: {} });
+  setSync({ status: "off", deviceId: null, connected: [], devices: [], accountShares: [], shared: {}, statuses: {} });
   releaseLock?.();
   releaseLock = null;
 }
 
 if (typeof window !== "undefined") {
   // Replicas live in memory; their snapshot brings them back on the next visit.
-  addEventListener("pagehide", () => {
-    saveState();
-    if (node) void saveSnapshot(node);
-  });
+  addEventListener("pagehide", () => node && void saveSnapshot(node));
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden" && node) void saveSnapshot(node);
   });
   setInterval(() => node && void saveSnapshot(node), 30_000);
+  jj.onCommit((changed) => committed(changed));
+  jj.onMove((from, to) => moved(from, to));
+  jj.onDelete((paths) => deleted(paths));
+  jj.onRestore((from, to) => restored(from, to));
+  createRoot(() =>
+    createEffect(() => {
+      void jj.repository.conflicted.length;
+      updateStatuses();
+    }),
+  );
 }
 
 async function saveSnapshot(target: SyncNode) {
@@ -231,58 +304,102 @@ function scheduleSnapshot() {
   snapshotTimer = setTimeout(() => node && void saveSnapshot(node), 3000);
 }
 
-// MARK: - Spaces
+// MARK: - Shares
 
-/** Starts syncing a space; the account lists it for the other devices. */
-export function share(folder: string) {
-  if (!node || isSynced(folder)) return;
+/** Starts syncing a space, or any folder or file in one; the account lists it for the other devices. */
+export async function share(path: string): Promise<string | null> {
+  if (!node) return null;
+  const existing = shareId(path);
+  if (existing) return existing;
+  const entry = await fs.stat(fs.join(SPACES, path));
+  if (!entry) return null;
+  const kind: ShareKind = entry.kind === "file" ? "file" : path.includes("/") ? "folder" : "space";
   const id = crypto.randomUUID().toLowerCase();
-  remember(id, folder);
-  node.shareSpace(id, folder);
-  open(id, folder, false);
+  setSync("shares", id, { path, kind });
+  persist();
+  node.addShare(id, fs.basename(path), kind, settings.deviceName);
+  schedulePublish(id, 0);
+  return id;
 }
 
 /** Stops syncing here; the files stay and the other devices keep syncing. */
-export function stopSyncing(folder: string) {
-  const id = spaceId(folder);
-  if (!id) return;
-  node?.closeSpace(id);
+export function stopSyncing(path: string) {
+  const id = shareId(path);
+  if (id) stopSyncingId(id);
+}
+
+export function stopSyncingId(id: string) {
+  node?.closeShare(id);
   forget(id);
 }
 
-/** Stops syncing a space on every device; each keeps its files. */
+/** Stops syncing a share on every device; each keeps its files. */
 export function removeEverywhere(id: string) {
   if (!node) return;
-  node.removeSpace(id);
-  setSync("accountSpaces", (all) => all.filter((s) => s.id !== id));
+  node.removeShare(id);
+  setSync("accountShares", (all) => all.filter((s) => s.id !== id));
   forget(id);
 }
 
 function forget(id: string) {
-  engines.delete(id);
-  known.delete(id);
-  setSync("spaces", id, undefined!);
-  persistSpaces();
-  void fs.remove(stateFile(id), true);
+  batch(() => {
+    setSync("shares", id, undefined!);
+    setSync("statuses", id, undefined!);
+    setSync("problems", id, undefined!);
+  });
+  runtimes.delete(id);
+  clearTimeout(publishTimers.get(id));
+  publishTimers.delete(id);
+  for (const key of [...livePaths]) if (key.startsWith(`${id}/`)) livePaths.delete(key);
+  persist();
 }
 
-/** Downloads a space from the other devices into a new space folder. */
-export async function join(space: AccountSpace): Promise<string | null> {
+/** Where an own-account share lands by default: a new space under its name. */
+export async function suggestedDestination(share: AccountShare): Promise<string> {
+  return uniqueName(SPACES, share.name);
+}
+
+/** Checks a destination and makes its folder, so a new space shows up before its files. */
+async function prepareDestination(dest: string, file: boolean): Promise<string | null> {
+  const path = fs.split(dest).join("/");
+  if (!path) return fail("Pick a place in the library.");
+  if (file && !path.includes("/")) return fail("A shared file goes into a space.");
+  if (await fs.exists(fs.join(SPACES, path))) return fail(`“${fs.basename(path)}” already exists.`);
+  await fs.makeDirectory(fs.join(SPACES, file ? fs.dirname(path) : path));
+  await refreshSpaces();
+  return path;
+}
+
+function fail(message: string): null {
+  setSync("lastError", message);
+  return null;
+}
+
+/** Starts syncing an account share at `dest` (a repository path not there yet); its files arrive after. */
+export async function join(share: AccountShare, dest: string): Promise<string | null> {
   if (!node) return null;
-  const folder = await createSpace(space.name, false);
-  remember(space.id, folder);
-  open(space.id, folder);
-  return folder;
+  const path = await prepareDestination(dest, share.kind === "file");
+  if (!path) return null;
+  const kind: ShareKind = share.kind === "file" ? "file" : path.includes("/") ? "folder" : "space";
+  batch(() => {
+    setSync("shares", share.id, { path, kind });
+    setSync("parked", share.id, undefined!);
+  });
+  persist();
+  node.openShare(share.id, settings.deviceName);
+  return path;
 }
 
-/** An invite link to the space; anyone holding it can sync and edit the space from their account. */
-export function inviteLink(folder: string): string | null {
-  const id = spaceId(folder);
-  if (!node || !id) return null;
-  const secret = node.invite(id, folder);
-  // This device first: it's online right now, so the first join doesn't wait for the space's record.
+/** An invite link to the share at `path`; anyone holding it can sync and edit it from their account. */
+export function inviteLink(path: string): string | null {
+  const id = shareId(path);
+  const share = id ? sync.shares[id] : undefined;
+  if (!node || !id || !share) return null;
+  const name = fs.basename(path);
+  const secret = node.shareInvite(id, name, share.kind);
+  // This device first: it's online right now, so the first join doesn't wait for the share's record.
   const hints = [sync.deviceId!, ...sync.devices.filter((d) => d !== sync.deviceId)];
-  return core.inviteLink({ id, name: folder, secret, hints }) ?? null;
+  return core.inviteLink({ id, name, secret, hints, file: share.kind === "file" }) ?? null;
 }
 
 /** The web app's address for an invite link, which joins in the browser. */
@@ -294,129 +411,94 @@ export function parseInvite(link: string): SpaceInvite | null {
   return core.parseInvite(link) ?? null;
 }
 
-/** Downloads a space from an invite into a new space folder; the account lists it for the other devices. */
-export async function joinInvite(invite: SpaceInvite): Promise<string | null> {
+/** Where a share is synced already, if it is. */
+export function pathOf(id: string): string | null {
+  return sync.shares[id]?.path ?? null;
+}
+
+/** Starts syncing a share from an invite at `dest`; the account lists it for this user's other devices. */
+export async function joinInvite(invite: SpaceInvite, dest: string): Promise<string | null> {
   if (!node) return null;
-  if (sync.spaces[invite.id]) return sync.spaces[invite.id];
-  const folder = await createSpace(invite.name, false);
-  remember(invite.id, folder);
-  node.joinSpace(invite.id, invite.name, invite.secret, invite.hints);
-  open(invite.id, folder, false);
-  return folder;
+  const existing = pathOf(invite.id);
+  if (existing) return existing;
+  const path = await prepareDestination(dest, !!invite.file);
+  if (!path) return null;
+  const kind: ShareKind = invite.file ? "file" : path.includes("/") ? "folder" : "space";
+  batch(() => {
+    setSync("shares", invite.id, { path, kind });
+    setSync("parked", invite.id, undefined!);
+  });
+  persist();
+  node.joinShare(invite.id, invite.name, kind, invite.secret, invite.hints, settings.deviceName);
+  return path;
 }
 
-/** Follows a space folder that was renamed here. */
-export function renamed(old: string, folder: string) {
-  const id = spaceId(old);
-  if (!id) return;
-  setSync("spaces", id, folder);
-  persistSpaces();
-}
-
-function remember(id: string, folder: string) {
-  setSync("spaces", id, folder);
-  persistSpaces();
-}
-
-function stateFile(id: string): string {
-  return `${dataDir}/state/${id}.txt`;
-}
-
-async function open(id: string, folder: string, announce = true) {
+function open(id: string) {
   if (!node) return;
-  const engine = new SpaceSync(settings.lfsThresholdMB * 1_048_576);
-  const state = await fs.readText(stateFile(id));
-  if (state) engine.load(state);
-  engines.set(id, engine);
-  // The first scan has to finish before replica entries are compared with the folder.
-  scheduleScan(id, 0);
-  if (announce) node.openSpace(id);
-  else node.listSpace(id);
+  const parked = rejoining[id];
+  if (parked) {
+    // It left the account when its folder was deleted; list it again under the same id.
+    delete rejoining[id];
+    if (parked.shared && parked.secret) node.joinShare(id, parked.name, parked.share.kind, parked.secret, [], settings.deviceName);
+    else node.addShare(id, parked.name, parked.share.kind, settings.deviceName);
+    persist();
+  } else {
+    node.openShare(id, settings.deviceName);
+  }
+  schedulePublish(id, 0);
 }
 
-/** Applies a changed merge limit to every open space. */
-export function setLfsThreshold(megabytes: number) {
-  for (const engine of engines.values()) engine.lfsThreshold = megabytes * 1_048_576;
-}
+// MARK: - Moving, deleting and restoring
 
-// MARK: - Local changes
-
-function scheduleScan(id: string, delay = 500) {
-  scanPending.add(id);
-  if (scanning.has(id)) return;
-  scanning.add(id);
-  void (async () => {
-    while (scanPending.has(id)) {
-      await new Promise((r) => setTimeout(r, delay));
-      scanPending.delete(id);
-      await scan(id).catch((err) => setSync("lastError", `Scan: ${err.message}`));
+/** Follows a folder or file renamed or moved here; nothing syncs for the move itself. */
+export function moved(from: string, to: string) {
+  let changed = false;
+  batch(() => {
+    for (const [id, share] of Object.entries(sync.shares)) {
+      if (!share) continue;
+      let path: string | null = null;
+      if (share.path === from) path = to;
+      else if (share.path.startsWith(`${from}/`)) path = to + share.path.slice(from.length);
+      if (path === null) continue;
+      setSync("shares", id, "path", path);
+      setSync("problems", id, undefined!);
+      changed = true;
     }
-    scanning.delete(id);
-  })();
+  });
+  if (changed) persist();
 }
 
-async function describe(abs: string, path: string, file: File): Promise<LocalFile | null> {
-  const cached = hashes.get(abs);
-  if (cached && cached.size === file.size && cached.modified === file.lastModified) {
-    return { path, hash: cached.hash, size: file.size, isText: cached.isText };
+/** Shares whose root went with a deletion stop here (others keep syncing them); ones inside a deleted folder too. */
+function deleted(paths: string[]) {
+  let changed = false;
+  for (const [id, share] of Object.entries(sync.shares)) {
+    if (!share || !paths.some((p) => share.path === p || share.path.startsWith(`${p}/`))) continue;
+    const listed = sync.accountShares.find((s) => s.id === id);
+    const name = listed?.name ?? fs.basename(share.path);
+    const shared = listed?.shared ?? false;
+    const secret = node && shared ? node.shareInvite(id, name, share.kind) : undefined;
+    setSync("parked", id, { share: { ...share }, name, shared, secret, left: node !== null });
+    node?.closeShare(id);
+    forget(id);
+    changed = true;
   }
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const hash = hashBytes(bytes);
-  // Kinds like PDF, Office and images, and contents that sniff as binary, are never diffed.
-  const isText = isEditable(kindWithContents(path, fs.decodeText(bytes) !== null));
-  hashes.set(abs, { size: file.size, modified: file.lastModified, hash, isText });
-  // Browsers keep blobs in memory; the files themselves are what other devices download.
-  if (node && !seeded.has(hash)) {
-    seeded.add(hash);
-    void node.seed(bytes).catch(() => seeded.delete(hash));
+  if (changed) persist();
+}
+
+/** A deleted item came back at `to`: shares parked at or inside it sync again from there. */
+function restored(from: string, to: string) {
+  const resumed: string[] = [];
+  for (const [id, entry] of Object.entries(sync.parked)) {
+    if (!entry || !(entry.share.path === from || entry.share.path.startsWith(`${from}/`))) continue;
+    const path = to + entry.share.path.slice(from.length);
+    setSync("shares", id, { path, kind: entry.share.kind });
+    setSync("parked", id, undefined!);
+    if (entry.left) rejoining[id] = entry;
+    resumed.push(id);
   }
-  return { path, hash, size: file.size, isText };
-}
-
-/** Walks a space like git would: `.gitignore` rules apply and ignored folders aren't entered. */
-async function walk(root: string): Promise<{ files: LocalFile[]; ignore: IgnoreRules; paths: Set<string> }> {
-  const ignore = new IgnoreRules();
-  const files: LocalFile[] = [];
-  const paths = new Set<string>();
-  async function visit(rel: string) {
-    const items = await fs.children(fs.join(root, rel));
-    const gitignore = items.find((i) => i.name === ".gitignore" && i.file);
-    if (gitignore?.file) ignore.add(rel, await gitignore.file.text());
-    for (const item of items) {
-      const path = rel ? `${rel}/${item.name}` : item.name;
-      paths.add(path);
-      if (item.name.endsWith(".crswap")) continue;
-      if (item.dir) {
-        if (!ignore.matches(path, true)) await visit(path);
-      } else if (item.file && !ignore.matches(path, false)) {
-        const local = await describe(fs.join(root, path), path, item.file);
-        if (local) files.push(local);
-      }
-    }
-  }
-  await visit("");
-  return { files, ignore, paths };
-}
-
-async function scan(id: string) {
-  const folder = sync.spaces[id];
-  const engine = engines.get(id);
-  if (!folder || !engine || !node) return;
-  // A missing folder (renamed or deleted meanwhile) must not read as every file deleted.
-  if (!(await fs.exists(spacePath(folder)))) return;
-  const result = await walk(spacePath(folder));
-  ignores.set(id, result.ignore);
-  known.set(id, result.paths);
-  scanned.add(id);
-  const actions = engine.scan(result.files, result.ignore);
-  for (const action of actions) await perform(action, id);
-  if (actions.length) scheduleSave();
-}
-
-async function localFile(id: string, path: string): Promise<LocalFile | null> {
-  const abs = spacePath(sync.spaces[id], path);
-  const file = await fs.readBlob(abs);
-  return file ? describe(abs, path, file) : null;
+  if (!resumed.length) return;
+  persist();
+  resumed.forEach(open);
 }
 
 // MARK: - Events
@@ -424,18 +506,17 @@ async function localFile(id: string, path: string): Promise<LocalFile | null> {
 type Event = {
   type: string;
   message?: string;
-  device?: string;
   peers?: string[];
   devices?: string[];
   shared?: Record<string, string[]>;
-  spaces?: { id: string; name?: string; members?: string[]; shared?: boolean }[];
+  shares?: { id: string; name?: string; kind?: string; members?: string[]; shared?: boolean }[];
   removed?: string[];
+  share?: string;
   space?: string;
-  entries?: { path: string; hash: string; size: number; deleted: boolean }[];
+  device?: string;
+  node?: string;
+  name?: string | null;
   path?: string;
-  hash?: string;
-  size?: number;
-  deleted?: boolean;
 };
 
 function handle(text: string) {
@@ -447,44 +528,56 @@ function handle(text: string) {
   }
   switch (event.type) {
     case "status":
-      batch(() => {
-        setSync({ connected: event.peers ?? [], devices: event.devices ?? [], shared: event.shared ?? {} });
-      });
+      setSync({ connected: event.peers ?? [], devices: event.devices ?? [], shared: event.shared ?? {} });
+      updateStatuses();
       break;
-    case "spaces": {
-      const all = (event.spaces ?? [])
-        .map((s) => ({ id: s.id, name: s.name ?? "Space", members: s.members ?? [], shared: s.shared ?? false }))
+    case "shares": {
+      const all = (event.shares ?? [])
+        .map((s) => ({
+          id: s.id,
+          name: s.name ?? "Space",
+          kind: (["space", "folder", "file"].includes(s.kind ?? "") ? s.kind : "space") as ShareKind,
+          members: s.members ?? [],
+          shared: s.shared ?? false,
+        }))
         .sort((a, b) => a.name.localeCompare(b.name));
-      setSync("accountSpaces", all);
+      setSync("accountShares", all);
       // Removed from all devices elsewhere: stop here too, keeping the files.
       for (const id of event.removed ?? []) {
-        if (sync.spaces[id]) {
-          node?.closeSpace(id);
+        if (sync.shares[id]) {
+          node?.closeShare(id);
           forget(id);
         }
+        if (sync.parked[id] || rejoining[id]) {
+          setSync("parked", id, undefined!);
+          delete rejoining[id];
+          persist();
+        }
       }
+      updateStatuses();
       scheduleSnapshot();
       break;
     }
-    case "live":
-      if (event.space && event.path) liveListeners.forEach((l) => l(event.space!, event.path!));
-      break;
-    case "entries":
-      if (!event.space) return;
-      for (const e of event.entries ?? []) enqueue(event.space, { path: e.path, hash: e.hash, size: e.size, deleted: e.deleted });
+    case "head": {
+      if (!event.share || !event.device || !event.node) return;
+      runtime(event.share).heads.set(event.device, { node: event.node, name: event.name ?? null });
+      mergeHeads(event.share);
+      updateStatus(event.share);
       scheduleSnapshot();
       break;
-    case "remote":
-      if (!event.space || !event.path || !event.hash) return;
-      enqueue(event.space, { path: event.path, hash: event.hash, size: event.size ?? 0, deleted: event.deleted ?? false });
+    }
+    case "published-node":
+      if (event.share) updateStatus(event.share);
       scheduleSnapshot();
       break;
-    case "published":
-      if (!event.space || !event.path || !event.hash) return;
-      engines.get(event.space)?.published(event.path, event.hash, event.deleted ?? false);
-      scheduleSave();
-      scheduleSnapshot();
+    case "live": {
+      const share = event.space ? sharePath(event.space) : null;
+      if (!share || event.path === undefined) return;
+      const path = core.shareFilePath(share, event.path);
+      const folder = spaceOf(path);
+      if (path.length > folder.length) liveListeners.forEach((l) => l(folder, path.slice(folder.length + 1)));
       break;
+    }
     case "error":
       setSync("lastError", event.message ?? null);
       console.warn("Sync:", event.message);
@@ -492,148 +585,199 @@ function handle(text: string) {
   }
 }
 
-function enqueue(id: string, entry: RemoteEntry) {
-  const previous = queues.get(id) ?? Promise.resolve();
-  queues.set(
-    id,
-    previous.then(() => applyRemote(entry, id)).catch((err) => setSync("lastError", `Sync: ${err.message}`)),
-  );
+// MARK: - Nodes
+
+/** Commits reach the shares they touch. */
+function committed(changed: string[]) {
+  if (!node || !changed.length) return;
+  for (const id of core.sharesTouched(sharePaths(), changed)) schedulePublish(id);
 }
 
-async function applyRemote(entry: RemoteEntry, id: string) {
-  // Wait for the first scan, which knows the ignore rules.
-  while (!scanned.has(id) && engines.has(id)) await new Promise((r) => setTimeout(r, 100));
-  const folder = sync.spaces[id];
-  const engine = engines.get(id);
-  if (!folder || !engine) return;
-  for (const hook of willChange) await hook(folder);
-  const local = await localFile(id, entry.path);
-  const ignore = ignores.get(id) ?? new IgnoreRules();
-  // The live session already has this version's edits; writing it could undo newer ones.
-  if (livePaths.has(`${id}/${entry.path}`) && !entry.deleted && local) {
-    engine.accepted(entry.path, entry.hash);
-    scheduleSave();
+function schedulePublish(id: string, delay = 300) {
+  clearTimeout(publishTimers.get(id));
+  publishTimers.set(
+    id,
+    setTimeout(() => {
+      publishTimers.delete(id);
+      enqueue(id, () => publish(id));
+    }, delay),
+  );
+  updateStatus(id);
+}
+
+function enqueue(id: string, work: () => Promise<void>) {
+  const r = runtime(id);
+  r.working++;
+  updateStatus(id);
+  const run = generation;
+  const previous = queues.get(id) ?? Promise.resolve();
+  const next = previous
+    .then(() => (run === generation ? work() : undefined))
+    .catch((err) => setSync("lastError", `Sync: ${(err as Error).message ?? err}`))
+    .finally(() => {
+      r.working--;
+      updateStatus(id);
+    });
+  queues.set(id, next);
+}
+
+/** Merges every head this device doesn't have yet. */
+function mergeHeads(id: string) {
+  const r = runtimes.get(id);
+  if (!r || !sync.shares[id]) return;
+  for (const [device, head] of r.heads) {
+    if (core.needsMerge(r.head ?? undefined, r.ancestry, head.node)) enqueue(id, () => merge(id, device));
+  }
+}
+
+function isBusy(err: unknown): boolean {
+  return (err as jj.RepositoryError)?.busy === true;
+}
+
+function message(err: unknown): string {
+  return (err as Error)?.message ?? String(err);
+}
+
+/** Exports the share's content as a node and publishes it unless the devices already have it. */
+async function publish(id: string) {
+  const share = sync.shares[id];
+  const current = node;
+  if (!current || !share) return;
+  const entry = await fs.stat(fs.join(SPACES, share.path));
+  if (!entry || (entry.kind === "file") !== (share.kind === "file")) {
+    // Exporting nothing would delete the share on every device; a moved folder is no reason for that.
+    setSync("problems", id, `“${fs.basename(share.path)}” moved or was deleted. Put it back, or stop syncing it.`);
     return;
   }
-  const paths = known.get(id) ?? new Set();
-  const actions = engine.remote(entry, local, ignore, (candidate) => paths.has(candidate));
-  for (const action of actions) await perform(action, id);
-  if (actions.length) scheduleSave();
+  setSync("problems", id, undefined!);
+  const r = runtime(id);
+  // A share just joined waits for its first node instead of publishing an empty one.
+  if (r.head === null && entry.kind === "dir") {
+    const children = await fs.list(fs.join(SPACES, share.path));
+    if (children.every((c) => fs.basename(c.path).startsWith("."))) return;
+  }
+  let manifest: Manifest;
+  try {
+    manifest = await jj.request<Manifest>("twj_export_node", id, share.path);
+  } catch (err) {
+    if (isBusy(err)) schedulePublish(id, 2000);
+    // Conflicts block exports until they're resolved; resolving commits and comes back here.
+    else if (!message(err).includes("unresolved conflicts")) setSync("problems", id, message(err));
+    return;
+  }
+  if (!manifest.node) return;
+  r.head = manifest.node;
+  r.ancestry = manifest.ancestry ?? [];
+  const lfs = Object.entries(manifest.files ?? {}).filter(([, f]) => f.lfs && f.blake3);
+  r.lfs = new Set(lfs.map(([, f]) => f.blake3!));
+  if (r.published !== manifest.node) {
+    const objects = await jj.nodeObjects(manifest.node);
+    const sp = sharePath(id)!;
+    const seeds: [string, Uint8Array][] = [];
+    for (const [rel, file] of lfs) {
+      if (r.seeded.has(file.blake3!)) continue;
+      const bytes = await fs.readFile(fs.join(SPACES, core.shareFilePath(sp, rel)));
+      if (bytes) seeds.push([file.blake3!, bytes]);
+    }
+    if (node !== current) return;
+    await current.publishNode(id, JSON.stringify(manifest), objects, seeds);
+    seeds.forEach(([hash]) => r.seeded.add(hash));
+    r.published = manifest.node;
+  }
+  mergeHeads(id);
+}
+
+/** Fetches another device's head and merges it into the share; a clean merge is published right away. */
+async function merge(id: string, device: string) {
+  const share = sync.shares[id];
+  const r = runtimes.get(id);
+  const head = r?.heads.get(device);
+  const current = node;
+  if (!current || !share || !r || !head || !core.needsMerge(r.head ?? undefined, r.ancestry, head.node)) return;
+  const fetched = (await current.fetchNode(id, device, [...r.lfs])) as {
+    manifest: string;
+    objects: [string, Uint8Array][];
+    lfs: [string, Uint8Array][];
+  };
+  const fetchedNode = (JSON.parse(fetched.manifest) as Manifest).node;
+  if (!fetchedNode || !core.needsMerge(r.head ?? undefined, r.ancestry, fetchedNode)) return;
+  const folder = spaceOf(share.path);
+  for (const hook of willChange) await hook(folder);
+  const sp = sharePath(id)!;
+  const keep = [...livePaths].filter((k) => k.startsWith(`${id}/`)).map((k) => core.shareFilePath(sp, k.slice(id.length + 1)));
+  let merged: jj.MergeResult;
+  try {
+    merged = await jj.mergeNode({
+      share: id,
+      path: share.path,
+      manifest: fetched.manifest,
+      objects: fetched.objects,
+      lfs: fetched.lfs,
+      label: head.name ?? "Other Device",
+      keep,
+    });
+  } catch (err) {
+    if (isBusy(err)) setTimeout(() => mergeHeads(id), 2000);
+    // A share waiting on conflicts merges again once they're resolved.
+    else if (!message(err).includes("unresolved conflicts")) setSync("lastError", message(err));
+    return;
+  }
+  // Publishing exports again, on top of the merge when live files kept their own content.
+  if (merged.node) await publish(id);
+}
+
+// MARK: - Status
+
+function updateStatuses() {
+  for (const id of Object.keys(sync.shares)) if (sync.shares[id]) updateStatus(id);
+}
+
+function updateStatus(id: string) {
+  const share = sync.shares[id];
+  if (!share) return;
+  const r = runtimes.get(id);
+  const peers: PeerHead[] = [...(r?.heads ?? [])].map(([device, h]) => ({ device, node: h.node, connected: sync.connected.includes(device) }));
+  const members = new Set([...(sync.accountShares.find((s) => s.id === id)?.members ?? []), ...(r?.heads.keys() ?? [])]);
+  members.delete(sync.deviceId ?? "");
+  const conflicted = jj.repository.conflicted.some((p) => p === share.path || p.startsWith(`${share.path}/`));
+  const working = (r?.working ?? 0) > 0 || publishTimers.has(id);
+  const next = core.shareStatus(r?.head ?? undefined, peers, members.size, conflicted, working) as ShareStatus;
+  if (sync.statuses[id] !== next) setSync("statuses", id, next);
 }
 
 // MARK: - Live editing
 
+/** The share and the path inside it holding `path` of space `folder`, while syncing runs. */
+function livePlace(folder: string, path: string) {
+  if (!node) return null;
+  return core.sharePlace(sharePaths(), `${folder}/${path}`) ?? null;
+}
+
+/** Whether a file can be edited live: it's in a share and syncing runs. */
+export function canEditLive(folder: string, path: string): boolean {
+  return livePlace(folder, path) !== null;
+}
+
 export function liveOpen(folder: string, path: string, text: string) {
-  const id = spaceId(folder);
-  if (node && id) node.liveOpen(id, path, text, settings.deviceName);
+  const place = livePlace(folder, path);
+  if (node && place) node.liveOpen(place.id, place.inside, text, settings.deviceName);
 }
 
 export function liveClose(folder: string, path: string) {
-  const id = spaceId(folder);
-  if (!node || !id) return;
-  livePaths.delete(`${id}/${path}`);
-  node.liveClose(id, path);
+  const place = livePlace(folder, path);
+  if (!node || !place) return;
+  livePaths.delete(`${place.id}/${place.inside}`);
+  node.liveClose(place.id, place.inside);
 }
 
 /** `step` 1 undoes and 2 redoes this device's last edit of the file. */
 export function liveSync(folder: string, path: string, text: string, location: number, length: number, step = 0): LiveResult | null {
-  const id = spaceId(folder);
-  if (!node || !id) return null;
-  const result = JSON.parse(node.liveSync(id, path, text, location, length, step)) as Partial<LiveResult>;
+  const place = livePlace(folder, path);
+  if (!node || !place) return null;
+  const result = JSON.parse(node.liveSync(place.id, place.inside, text, location, length, step)) as Partial<LiveResult>;
   const full: LiveResult = { edits: [], adopted: null, cursors: [], peers: 0, undone: false, ...result };
-  if (full.peers > 0) livePaths.add(`${id}/${path}`);
-  else livePaths.delete(`${id}/${path}`);
+  const key = `${place.id}/${place.inside}`;
+  if (full.peers > 0) livePaths.add(key);
+  else livePaths.delete(key);
   return full;
 }
-
-// MARK: - Actions
-
-async function perform(action: SyncAction, id: string) {
-  const folder = sync.spaces[id];
-  const engine = engines.get(id);
-  if (!node || !folder || !engine) return;
-  const target = spacePath(folder, action.path);
-  switch (action.kind) {
-    case "publish": {
-      const bytes = await fs.readFile(target);
-      // Gone since the scan; the next one unpublishes it.
-      if (bytes) node.publish(id, action.path, bytes);
-      break;
-    }
-    case "unpublish":
-      node.unpublish(id, action.path);
-      break;
-    case "write":
-      engine.wrote(action.path, action.hash, await place(action.hash, action.size, target));
-      break;
-    case "trash":
-      await moveToTrash(folder, action.path);
-      break;
-    case "merge":
-      await performMerge(action, id, folder, engine);
-      break;
-    case "conflictCopy":
-      await place(action.hash, action.size, spacePath(folder, action.copyPath));
-      known.get(id)?.add(action.copyPath);
-      break;
-  }
-}
-
-/** Three-way merge of a small text file both sides edited; leftovers become a conflict copy. */
-async function performMerge(merge: Extract<SyncAction, { kind: "merge" }>, id: string, folder: string, engine: SpaceSync) {
-  const target = spacePath(folder, merge.path);
-  const base = await text(merge.baseHash);
-  const remote = await text(merge.remoteHash);
-  const local = await fs.readText(target);
-  if (base !== null && remote !== null && local !== null) {
-    const result = merge3(base, local, remote);
-    if (result.conflicts === 0) {
-      await fs.writeFile(target, result.text);
-      engine.merged(merge.path, merge.remoteHash);
-      scheduleScan(id);
-      return;
-    }
-  }
-  const size = remote === null ? 0 : new TextEncoder().encode(remote).length;
-  const paths = known.get(id) ?? new Set();
-  const fallback = engine.mergeFailed(merge.path, merge.remoteHash, size, (candidate) => paths.has(candidate));
-  for (const action of fallback) await perform(action, id);
-}
-
-async function place(hash: string, size: number, target: string): Promise<boolean> {
-  try {
-    const bytes = size > 0 ? await node!.readBlob(hash) : new Uint8Array(0);
-    await fs.writeFile(target, bytes);
-    return true;
-  } catch (err) {
-    setSync("lastError", `Couldn't write ${fs.basename(target)}: ${(err as Error).message ?? err}`);
-    return false;
-  }
-}
-
-async function text(hash: string): Promise<string | null> {
-  try {
-    return new TextDecoder().decode(await node!.readBlob(hash));
-  } catch {
-    return null;
-  }
-}
-
-/** Deleted files go to the trash in origin storage, where Settings can bring them back. */
-export async function moveToTrash(folder: string, path: string) {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  await fs.move(spacePath(folder, path), fs.join("trash", stamp, folder, path));
-}
-
-// MARK: - State
-
-function scheduleSave() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveState, 1000);
-}
-
-function saveState() {
-  if (!dataDir) return;
-  for (const [id, engine] of engines) void fs.writeFile(stateFile(id), engine.save(), true);
-}
-

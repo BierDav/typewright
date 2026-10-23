@@ -74,6 +74,7 @@ export async function renameSpace(old: string, name: string): Promise<string | n
   const clean = cleanName(name);
   if (!clean || clean === old || (await fs.exists(spacePath(clean)))) return null;
   await fs.move(spacePath(old), spacePath(clean));
+  jj.noteMoved(old, clean);
   saveOrder(spaceOrderReplace(storedOrder(), old, clean));
   await refreshSpaces();
   return clean;
