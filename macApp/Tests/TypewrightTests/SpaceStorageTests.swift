@@ -158,12 +158,12 @@ final class SpaceStorageTests: XCTestCase {
     func testImportKeepingTheOriginal() throws {
         let root = dir.appendingPathComponent("Spaces")
         let source = try folder("Paper", files: ["main.typ": "= Hi", "img/a.svg": "<svg/>"])
-        let target = try SpaceFolders.importFolder(source, into: root, replace: false) { _ in XCTFail("no trash") }
+        let target = try SpaceFolders.importFolder(source, into: root, mode: .keepOriginal) { _ in XCTFail("no trash") }
         XCTAssertEqual(target, root.appendingPathComponent("Paper", isDirectory: true).standardizedFileURL)
         XCTAssertEqual(try String(contentsOf: target.appendingPathComponent("img/a.svg"), encoding: .utf8), "<svg/>")
         XCTAssertFalse(SpaceFolders.isLink(source))
 
-        let again = try SpaceFolders.importFolder(source, into: root, replace: false)
+        let again = try SpaceFolders.importFolder(source, into: root, mode: .keepOriginal)
         XCTAssertEqual(again.lastPathComponent, "Paper 2")
     }
 
@@ -172,7 +172,7 @@ final class SpaceStorageTests: XCTestCase {
         let source = try folder("Paper", files: ["main.typ": "= Hi"])
         let trash = dir.appendingPathComponent("Trash")
         try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
-        let target = try SpaceFolders.importFolder(source, into: root, replace: true) {
+        let target = try SpaceFolders.importFolder(source, into: root, mode: .replaceWithLink) {
             try FileManager.default.moveItem(at: $0, to: trash.appendingPathComponent($0.lastPathComponent))
         }
         XCTAssertTrue(SpaceFolders.isLink(source))
@@ -181,11 +181,25 @@ final class SpaceStorageTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: trash.appendingPathComponent("Paper/main.typ").path))
     }
 
+    func testImportDeletingTheOriginal() throws {
+        let root = dir.appendingPathComponent("Spaces")
+        let source = try folder("Paper", files: ["main.typ": "= Hi"])
+        let trash = dir.appendingPathComponent("Trash")
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        let target = try SpaceFolders.importFolder(source, into: root, mode: .deleteOriginal) {
+            try FileManager.default.moveItem(at: $0, to: trash.appendingPathComponent($0.lastPathComponent))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertFalse(SpaceFolders.isLink(source))
+        XCTAssertEqual(try String(contentsOf: target.appendingPathComponent("main.typ"), encoding: .utf8), "= Hi")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: trash.appendingPathComponent("Paper/main.typ").path))
+    }
+
     func testFailedTrashLeavesEverythingAsItWas() throws {
         struct Refused: Error {}
         let root = dir.appendingPathComponent("Spaces")
         let source = try folder("Paper", files: ["main.typ": "= Hi"])
-        XCTAssertThrowsError(try SpaceFolders.importFolder(source, into: root, replace: true) { _ in throw Refused() })
+        XCTAssertThrowsError(try SpaceFolders.importFolder(source, into: root, mode: .replaceWithLink) { _ in throw Refused() })
         XCTAssertFalse(SpaceFolders.isLink(source))
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.appendingPathComponent("main.typ").path))
         XCTAssertTrue(SpaceFolders.spaces(in: root).isEmpty)
@@ -194,10 +208,10 @@ final class SpaceStorageTests: XCTestCase {
     func testRefusesToImportTheRepositoryOrWhatsInIt() throws {
         let root = dir.appendingPathComponent("Spaces")
         let space = try SpaceFolders.create(named: "Thesis", in: root)
-        XCTAssertThrowsError(try SpaceFolders.importFolder(space, into: root, replace: false)) {
+        XCTAssertThrowsError(try SpaceFolders.importFolder(space, into: root, mode: .keepOriginal)) {
             XCTAssertEqual($0 as? SpaceFolders.ImportError, .insideRepository)
         }
-        XCTAssertThrowsError(try SpaceFolders.importFolder(dir, into: root, replace: false)) {
+        XCTAssertThrowsError(try SpaceFolders.importFolder(dir, into: root, mode: .keepOriginal)) {
             XCTAssertEqual($0 as? SpaceFolders.ImportError, .containsRepository)
         }
     }

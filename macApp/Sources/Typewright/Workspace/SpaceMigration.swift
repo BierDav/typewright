@@ -4,7 +4,7 @@ import SwiftUI
 /// The one-time question for spaces from before the repository: move them in, or leave them where they are.
 enum SpaceMigration {
     enum Choice: String, CaseIterable, Identifiable {
-        case replaceWithLink, keepOriginal, leaveAsIs
+        case replaceWithLink, keepOriginal, deleteOriginal, leaveAsIs
 
         var id: String { rawValue }
 
@@ -12,7 +12,17 @@ enum SpaceMigration {
             switch self {
             case .replaceWithLink: "Import and Replace With Link"
             case .keepOriginal: "Import and Keep Original"
+            case .deleteOriginal: "Import and Delete Original"
             case .leaveAsIs: "Leave As Is"
+            }
+        }
+
+        var mode: SpaceFolders.ImportMode? {
+            switch self {
+            case .replaceWithLink: .replaceWithLink
+            case .keepOriginal: .keepOriginal
+            case .deleteOriginal: .deleteOriginal
+            case .leaveAsIs: nil
             }
         }
     }
@@ -67,11 +77,10 @@ enum SpaceMigration {
     @MainActor private static func apply(_ choices: [URL: Choice], order: [URL]) async {
         for url in order {
             guard let choice = choices[url] else { continue }
-            switch choice {
-            case .leaveAsIs:
+            if let mode = choice.mode {
+                if await Opener.shared.importSpace(url, mode: mode, warnAboutGit: false) != nil { markAnswered(url) }
+            } else {
                 markAnswered(url)
-            case .replaceWithLink, .keepOriginal:
-                if await Opener.shared.importSpace(url, replace: choice == .replaceWithLink, warnAboutGit: false) != nil { markAnswered(url) }
             }
         }
     }
@@ -87,7 +96,7 @@ private struct MigrationSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Move Spaces Into Typewright?")
                 .font(.headline)
-            Text("Typewright now keeps spaces in its own folder, where every change is kept in a history. A link can take an imported folder's place, so you still find it where it was; the original goes to the Trash.")
+            Text("Typewright now keeps spaces in its own folder, where every change is kept in a history. Importing can leave the original where it is, replace it with a link so you still find it there, or delete it. Originals that go are put in the Trash.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Form {

@@ -14,6 +14,15 @@ enum SpaceFolders {
         }
     }
 
+    /// What happens to the original after it's copied into the library.
+    enum ImportMode: Equatable {
+        case keepOriginal
+        /// The original goes to the Trash and a link to the copy takes its place.
+        case replaceWithLink
+        /// The original goes to the Trash without leaving a link.
+        case deleteOriginal
+    }
+
     /// The repository's top-level folders; hidden ones like `.jj` (or a `.jj.broken-…` moved aside) aren't spaces.
     static func spaces(in root: URL) -> [URL] {
         let items = (try? FileManager.default.contentsOfDirectory(
@@ -68,9 +77,9 @@ enum SpaceFolders {
         return url.standardizedFileURL
     }
 
-    /// Copies `source` into `root` as a new space. With `replace`, the original goes to the Trash and a link to the copy
-    /// takes its place, so it's still found where it was; nothing changes if any step fails.
-    static func importFolder(_ source: URL, into root: URL, replace: Bool,
+    /// Copies `source` into `root` as a new space. `mode` says what becomes of the original; nothing changes if
+    /// any step fails.
+    static func importFolder(_ source: URL, into root: URL, mode: ImportMode,
                              trash: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }) throws -> URL {
         let fm = FileManager.default
         let source = source.standardizedFileURL
@@ -82,14 +91,14 @@ enum SpaceFolders {
         let target = root.appendingPathComponent(uniqueName(source.lastPathComponent, in: root), isDirectory: true)
             .standardizedFileURL
         try fm.copyItem(at: URL(fileURLWithPath: resolved), to: target)
-        guard replace else { return target }
+        guard mode != .keepOriginal else { return target }
         do {
             try trash(source)
         } catch {
             try? fm.removeItem(at: target)
             throw error
         }
-        try fm.createSymbolicLink(at: source, withDestinationURL: target)
+        if mode == .replaceWithLink { try fm.createSymbolicLink(at: source, withDestinationURL: target) }
         return target
     }
 

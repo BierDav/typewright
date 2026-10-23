@@ -483,7 +483,7 @@ private struct SpacesPane: View {
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             Task {
-                guard let imported = await Opener.shared.importSpace(url, replace: true) else { return }
+                guard let imported = await Opener.shared.importSpace(url, mode: .replaceWithLink) else { return }
                 sync.share(imported)
                 onChange()
             }

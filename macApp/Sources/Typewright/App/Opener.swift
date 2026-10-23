@@ -339,10 +339,10 @@ final class Opener {
         if let state { open(url, in: state) } else { open(url) }
     }
 
-    /// Copies a folder into the repository, asking whether a link replaces the original. Returns the new space.
+    /// Copies a folder into the repository, asking what becomes of the original. Returns the new space.
     /// `warnAboutGit` is off where the caller already told the user (the migration sheet).
     @discardableResult
-    func importSpace(_ source: URL, replace: Bool? = nil, warnAboutGit: Bool = true) async -> URL? {
+    func importSpace(_ source: URL, mode: SpaceFolders.ImportMode? = nil, warnAboutGit: Bool = true) async -> URL? {
         let source = source.standardizedFileURL
         if warnAboutGit, SpaceFolders.isGitRepository(source) {
             let alert = NSAlert()
@@ -353,32 +353,34 @@ final class Opener {
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         }
-        var replace = replace
-        if replace == nil {
+        var mode = mode
+        if mode == nil {
             let alert = NSAlert()
             alert.messageText = "Import “\(source.lastPathComponent)” into Typewright?"
             alert.informativeText = "Typewright copies the folder into its spaces, where every change is kept in its history. "
                 + "A link to the copy can take the original's place, so you still find it where it was; the original goes to the Trash."
             alert.addButton(withTitle: "Import and Replace With Link")
             alert.addButton(withTitle: "Import and Keep Original")
+            alert.addButton(withTitle: "Import and Delete Original")
             alert.addButton(withTitle: "Cancel")
             switch alert.runModal() {
-            case .alertFirstButtonReturn: replace = true
-            case .alertSecondButtonReturn: replace = false
+            case .alertFirstButtonReturn: mode = .replaceWithLink
+            case .alertSecondButtonReturn: mode = .keepOriginal
+            case .alertThirdButtonReturn: mode = .deleteOriginal
             default: return nil
             }
         }
         let windows = windows(showing: source.resolvingSymlinksInPath())
         windows.forEach { $0.state.workspace?.flushSaves() }
         let root = SpaceList.repository
-        let link = replace ?? false
-        let result = await Task.detached { Result(catching: { try SpaceFolders.importFolder(source, into: root, replace: link) }) }.value
+        let chosen = mode ?? .keepOriginal
+        let result = await Task.detached { Result(catching: { try SpaceFolders.importFolder(source, into: root, mode: chosen) }) }.value
         switch result {
         case .failure(let error):
             NSAlert(error: error).runModal()
             return nil
         case .success(let target):
-            if link { SpaceLinks.shared.record(source, to: target) }
+            if chosen == .replaceWithLink { SpaceLinks.shared.record(source, to: target) }
             relocate(windows, from: source.resolvingSymlinksInPath(), to: target)
             // Keeps the space where it was in the list.
             SpaceList.replace(source, with: target)
