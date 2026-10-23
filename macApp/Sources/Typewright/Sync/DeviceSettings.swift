@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Account, devices, synced spaces and the LFS limit.
+/// Account, devices, synced shares and the LFS limit.
 struct DeviceSettings: View {
     @Bindable private var identity = SyncIdentity.shared
     @Bindable private var sync = SyncService.shared
@@ -60,37 +60,50 @@ struct DeviceSettings: View {
                 }
 
                 Section {
-                    ForEach(sync.spaces.sorted { $0.value.lastPathComponent < $1.value.lastPathComponent }, id: \.key) { id, root in
+                    ForEach(sync.shares.sorted { $0.value.path.localizedStandardCompare($1.value.path) == .orderedAscending }, id: \.key) { id, share in
+                        let url = sync.repository.url(of: share.path)
                         LabeledContent {
                             HStack {
-                                Button { NSWorkspace.shared.activateFileViewerSelecting([root]) } label: { Image(systemName: "folder") }
+                                Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: { Image(systemName: "folder") }
                                     .buttonStyle(.borderless)
-                                Button { Invites.copyLink(for: root) } label: { Image(systemName: "person.badge.plus") }
+                                    .help("Reveal in Finder")
+                                Button { Invites.share(url) } label: { Image(systemName: "person.badge.plus") }
                                     .buttonStyle(.borderless)
-                                    .help("Copy Invite Link")
+                                    .help("Share…")
                                 Menu("Stop Syncing") {
-                                    Button("On This Mac") { sync.stopSyncing(root) }
+                                    Button("On This Mac") { sync.stopSyncing(id: id) }
                                     Button("On All Devices") { sync.removeEverywhere(id) }
                                 }
                                 .fixedSize()
                             }
                         } label: {
-                            Text(root.lastPathComponent)
-                            Text((sync.isShared(root) ? "Shared · " : "") + root.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                            Text(url.lastPathComponent)
+                            Text(Self.detail(sync, id: id, share: share))
                         }
                     }
-                    if sync.spaces.isEmpty {
-                        Text("Turn on syncing from a space's context menu in the spaces overview.")
+                    ForEach(sync.unmigrated.sorted { $0.value.path < $1.value.path }, id: \.key) { id, url in
+                        LabeledContent {
+                            HStack {
+                                Button("Import…") { Task { await Opener.shared.importSpace(url) } }
+                                Button("Stop Syncing") { sync.forgetUnmigrated(id) }
+                            }
+                        } label: {
+                            Text(url.lastPathComponent)
+                            Text("Not syncing until it's in Typewright's library · " + url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                        }
+                    }
+                    if sync.shares.isEmpty && sync.unmigrated.isEmpty {
+                        Text("Share a space, folder or file from its context menu to sync it.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 } header: {
-                    Text("Synced Spaces")
+                    Text("Synced")
                 } footer: {
                     if let error = sync.lastError {
                         Text(error).foregroundStyle(.secondary)
                     } else {
-                        Text("The whole folder syncs, except what its .gitignore files exclude. Invite links let other people's accounts sync a space too; anyone with a link can edit it.")
+                        Text("Shares sync through their history: edits on several devices merge, and conflicts wait for you to resolve them. Files open on two connected devices update as you type. Invite links let other people's accounts sync a share too; anyone with a link can edit it.")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -115,6 +128,19 @@ struct DeviceSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// Status, kind and place of a share.
+    private static func detail(_ sync: SyncService, id: String, share: LocalShare) -> String {
+        var parts: [String] = []
+        if let problem = sync.problems[id] {
+            parts.append(problem)
+        } else if let status = sync.statuses[id] {
+            parts.append(SyncStatusLabel.title(status))
+        }
+        if sync.accountShares.contains(where: { $0.id == id && $0.shared }) { parts.append("Shared") }
+        if share.kind != .space { parts.append((share.path as NSString).deletingLastPathComponent) }
+        return parts.joined(separator: " · ")
     }
 
     private static func short(_ id: String?) -> String {

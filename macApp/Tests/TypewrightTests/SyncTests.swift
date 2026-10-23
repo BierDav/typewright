@@ -3,47 +3,77 @@ import TypewrightCore
 import XCTest
 @testable import Typewright
 
+/// Shares on one device, without the network.
+@MainActor
 final class SyncTests: XCTestCase {
-    private var root: URL!
+    private var dir: URL!
 
     override func setUpWithError() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let fm = FileManager.default
-        try fm.createDirectory(at: root.appendingPathComponent("build"), withIntermediateDirectories: true)
-        try fm.createDirectory(at: root.appendingPathComponent("chapters/.git"), withIntermediateDirectories: true)
-        try "build/\n*.pdf\n!keep.pdf\n".write(to: root.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
-        try "= Hi".write(to: root.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
-        try "x".write(to: root.appendingPathComponent("build/out.typ"), atomically: true, encoding: .utf8)
-        try "%PDF".write(to: root.appendingPathComponent("draft.pdf"), atomically: true, encoding: .utf8)
-        try "%PDF".write(to: root.appendingPathComponent("keep.pdf"), atomically: true, encoding: .utf8)
-        try "ref".write(to: root.appendingPathComponent("chapters/.git/HEAD"), atomically: true, encoding: .utf8)
-        try "intro".write(to: root.appendingPathComponent("chapters/intro.typ"), atomically: true, encoding: .utf8)
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("sync-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
     override func tearDownWithError() throws {
-        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: dir)
     }
 
-    func testScanFollowsGitignoreAndMarksBinariesForLFS() {
-        let result = FolderScanner().scan(root)
-        XCTAssertEqual(Set(result.files.keys), [".gitignore", "main.typ", "keep.pdf", "chapters/intro.typ"])
-        XCTAssertEqual(result.files["main.typ"]?.isText, true)
-        let pdf = result.files["keep.pdf"]!
-        XCTAssertFalse(pdf.isText)
-        XCTAssertEqual(syncMode(isText: pdf.isText, size: pdf.size, lfsThreshold: 1_000_000), .lfs)
-        XCTAssertTrue(result.ignore.isIgnored(path: "build/new.typ", isDir: false))
+    private func defaults() -> UserDefaults {
+        UserDefaults(suiteName: "typewright-test-\(UUID().uuidString)")!
     }
 
-    func testHashesMatchBlobHashes() throws {
-        try Data().write(to: root.appendingPathComponent("empty.typ"))
-        // BLAKE3 of nothing, which iroh-blobs also uses as the empty blob's hash.
-        XCTAssertEqual(FolderScanner().file(root, path: "empty.typ")?.hash,
-                       "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
-        XCTAssertNil(FolderScanner().file(root, path: "missing.typ"))
+    func testSpacesSyncedBeforeSharesKeepSyncing() throws {
+        let repository = SpaceRepository(root: dir.appendingPathComponent("Library"))
+        let thesis = repository.url(of: "Thesis")
+        try FileManager.default.createDirectory(at: thesis, withIntermediateDirectories: true)
+        let outside = dir.appendingPathComponent("Elsewhere/Paper", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let store = defaults()
+        store.set(["thesis-id": thesis.path, "paper-id": outside.path], forKey: "syncedSpaces")
+
+        let sync = SyncService(defaults: store, repository: repository, deviceName: "Test")
+        XCTAssertEqual(sync.shares["thesis-id"], LocalShare(path: "Thesis", kind: .space))
+        XCTAssertEqual(sync.unmigrated["paper-id"]?.path, outside.standardizedFileURL.path)
+        XCTAssertEqual(sync.shareID(for: thesis), "thesis-id")
+
+        // Importing the outside space into the library picks its sync back up.
+        let imported = repository.url(of: "Paper")
+        try FileManager.default.createDirectory(at: imported, withIntermediateDirectories: true)
+        sync.moved(from: outside, to: imported)
+        XCTAssertEqual(sync.shares["paper-id"], LocalShare(path: "Paper", kind: .space))
+        XCTAssertTrue(sync.unmigrated.isEmpty)
+
+        // Both survive a relaunch, and the old list holds nothing anymore.
+        let again = SyncService(defaults: store, repository: repository, deviceName: "Test")
+        XCTAssertEqual(again.shares.count, 2)
+        XCTAssertEqual(store.dictionary(forKey: "syncedSpaces")?.count, 0)
+    }
+
+    func testSharePathsFollowRenames() throws {
+        let repository = SpaceRepository(root: dir.appendingPathComponent("Library"))
+        let store = defaults()
+        let thesis = repository.url(of: "Thesis")
+        try FileManager.default.createDirectory(at: thesis.appendingPathComponent("chapters"), withIntermediateDirectories: true)
+        store.set(["s": thesis.path, "c": thesis.appendingPathComponent("chapters").path], forKey: "syncedSpaces")
+        let sync = SyncService(defaults: store, repository: repository, deviceName: "Test")
+        XCTAssertEqual(sync.shares["c"]?.kind, .folder)
+        XCTAssertTrue(sync.syncsAnything(in: thesis))
+        XCTAssertFalse(sync.syncsAnything(in: repository.url(of: "Other")))
+
+        sync.moved(from: thesis, to: repository.url(of: "Dissertation"))
+        XCTAssertEqual(sync.shares["s"]?.path, "Dissertation")
+        XCTAssertEqual(sync.shares["c"]?.path, "Dissertation/chapters")
+    }
+
+    func testFindsTheShareOfAFile() {
+        let shares = [SharePath(id: "s", path: "Thesis", file: false), SharePath(id: "f", path: "Thesis/notes.typ", file: true)]
+        XCTAssertEqual(sharePlace(shares: shares, path: "Thesis/main.typ"), SharePlace(id: "s", inside: "main.typ"))
+        XCTAssertEqual(sharePlace(shares: shares, path: "Thesis/notes.typ"), SharePlace(id: "f", inside: "@file"))
+        XCTAssertNil(sharePlace(shares: shares, path: "Other/main.typ"))
+        XCTAssertEqual(sharesTouched(shares: shares, changed: ["Thesis/notes.typ"]), ["f", "s"])
     }
 }
 
-/// Two devices of one account in this process, over the real n0 relays.
+/// Two devices in this process, each with its own library, over the real n0 relays.
 /// Run with `TEST_RUNNER_TYPEWRIGHT_NETWORK_TESTS=1 xcodebuild … test`.
 @MainActor
 final class SyncNetworkTests: XCTestCase {
@@ -61,13 +91,16 @@ final class SyncNetworkTests: XCTestCase {
     }
 
     private func device(_ name: String, account: Data) async throws -> SyncService {
-        let suite = "typewright-test-\(UUID().uuidString)"
-        let service = SyncService(defaults: UserDefaults(suiteName: suite)!)
+        let repository = SpaceRepository(root: dir.appendingPathComponent("\(name)-library", isDirectory: true))
+        let service = SyncService(defaults: UserDefaults(suiteName: "typewright-test-\(UUID().uuidString)")!,
+                                  repository: repository, deviceName: name.uppercased())
         let ok = await service.start(account: account, in: dir.appendingPathComponent("\(name)-data"))
         XCTAssertTrue(ok)
         devices.append(service)
         return service
     }
+
+    private func account() -> Data { Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }) }
 
     private func eventually(_ what: String, timeout: Double = 120, _ condition: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
@@ -79,35 +112,59 @@ final class SyncNetworkTests: XCTestCase {
 
     private func read(_ url: URL) -> String? { try? String(contentsOf: url, encoding: .utf8) }
 
-    func testSyncsAFolderBetweenTwoDevices() async throws {
-        let account = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+    private func write(_ text: String, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// What the app's commit scheduler does a few seconds after an edit.
+    private func commit(_ devices: SyncService...) async {
+        for device in devices { await device.repository.commit() }
+    }
+
+    /// A space of `a` with `main.typ`, downloaded by a second device `b` of the same account.
+    private func sharedSpace(_ text: String) async throws -> (SyncService, URL, SyncService, URL) {
+        let account = account()
+        let a = try await device("a", account: account)
+        let b = try await device("b", account: account)
+        let rootA = a.repository.url(of: "Notes")
+        try write(text, to: rootA.appendingPathComponent("main.typ"))
+        await commit(a)
+        XCTAssertNotNil(a.share(rootA))
+        try await eventually("space listed on b") { !b.elsewhere.isEmpty }
+        let share = b.elsewhere[0]
+        XCTAssertEqual(share.kind, .space)
+        let rootB = try XCTUnwrap(b.join(share, at: b.suggestedDestination(for: share)))
+        try await eventually("file on b") { read(rootB.appendingPathComponent("main.typ")) == text }
+        return (a, rootA, b, rootB)
+    }
+
+    func testSyncsASpaceBetweenTwoDevices() async throws {
+        let account = account()
         let a = try await device("a", account: account)
         let b = try await device("b", account: account)
 
-        let rootA = dir.appendingPathComponent("A/Thesis", isDirectory: true)
+        let rootA = a.repository.url(of: "Thesis")
+        try write("one\ntwo\nthree\nfour\nfive\n", to: rootA.appendingPathComponent("main.typ"))
         try FileManager.default.createDirectory(at: rootA.appendingPathComponent("figures"), withIntermediateDirectories: true)
-        try "out/\n".write(to: rootA.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
-        try "one\ntwo\nthree\nfour\nfive\n".write(to: rootA.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
+        // Binary, so an LFS file that travels as its own blob.
         try Data([0x25, 0x50, 0x44, 0x46, 0, 1, 2]).write(to: rootA.appendingPathComponent("figures/plot.pdf"))
-        try FileManager.default.createDirectory(at: rootA.appendingPathComponent("out"), withIntermediateDirectories: true)
-        try "ignored".write(to: rootA.appendingPathComponent("out/build.typ"), atomically: true, encoding: .utf8)
+        await commit(a)
         a.share(rootA)
 
         try await eventually("space listed on b") { !b.elsewhere.isEmpty }
-        let parentB = dir.appendingPathComponent("B", isDirectory: true)
-        try FileManager.default.createDirectory(at: parentB, withIntermediateDirectories: true)
-        let rootB = try XCTUnwrap(b.join(b.elsewhere[0], in: parentB))
+        let share = b.elsewhere[0]
+        let rootB = try XCTUnwrap(b.join(share, at: b.suggestedDestination(for: share)))
         XCTAssertEqual(rootB.lastPathComponent, "Thesis")
-
         try await eventually("files on b") {
             read(rootB.appendingPathComponent("main.typ")) == "one\ntwo\nthree\nfour\nfive\n"
-                && FileManager.default.fileExists(atPath: rootB.appendingPathComponent("figures/plot.pdf").path)
+                && (try? Data(contentsOf: rootB.appendingPathComponent("figures/plot.pdf"))) == Data([0x25, 0x50, 0x44, 0x46, 0, 1, 2])
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: rootB.appendingPathComponent("out").path))
 
         // Edits on both devices at once merge line by line.
-        try "ONE\ntwo\nthree\nfour\nfive\n".write(to: rootA.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
-        try "one\ntwo\nthree\nfour\nFIVE\n".write(to: rootB.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
+        try write("ONE\ntwo\nthree\nfour\nfive\n", to: rootA.appendingPathComponent("main.typ"))
+        try write("one\ntwo\nthree\nfour\nFIVE\n", to: rootB.appendingPathComponent("main.typ"))
+        await commit(a, b)
         let merged = "ONE\ntwo\nthree\nfour\nFIVE\n"
         try await eventually("merge on both") {
             read(rootA.appendingPathComponent("main.typ")) == merged && read(rootB.appendingPathComponent("main.typ")) == merged
@@ -115,26 +172,78 @@ final class SyncNetworkTests: XCTestCase {
 
         // Deletions follow.
         try FileManager.default.removeItem(at: rootB.appendingPathComponent("figures/plot.pdf"))
+        await commit(b)
         try await eventually("deletion on a") {
             !FileManager.default.fileExists(atPath: rootA.appendingPathComponent("figures/plot.pdf").path)
         }
+        try await eventually("both synced") { a.status(for: rootA) == .synced && b.status(for: rootB) == .synced }
     }
 
-    /// Shares a one-file space from a new device `a` and joins it on `b`.
-    private func sharedSpace(_ text: String) async throws -> (SyncService, URL, SyncService, URL) {
-        let account = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
-        let a = try await device("a", account: account)
-        let b = try await device("b", account: account)
-        let rootA = dir.appendingPathComponent("A/Notes", isDirectory: true)
-        try FileManager.default.createDirectory(at: rootA, withIntermediateDirectories: true)
-        try text.write(to: rootA.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
-        a.share(rootA)
-        try await eventually("space listed on b") { !b.elsewhere.isEmpty }
-        let parentB = dir.appendingPathComponent("B", isDirectory: true)
-        try FileManager.default.createDirectory(at: parentB, withIntermediateDirectories: true)
-        let rootB = try XCTUnwrap(b.join(b.elsewhere[0], in: parentB))
-        try await eventually("file on b") { read(rootB.appendingPathComponent("main.typ")) == text }
-        return (a, rootA, b, rootB)
+    func testResolvesAConflictOnceForBothDevices() async throws {
+        let (a, rootA, b, rootB) = try await sharedSpace("one\ntwo\n")
+        try write("one (a)\ntwo\n", to: rootA.appendingPathComponent("main.typ"))
+        try write("one (b)\ntwo\n", to: rootB.appendingPathComponent("main.typ"))
+        await commit(a, b)
+        try await eventually("conflict") { !a.repository.conflicted.isEmpty || !b.repository.conflicted.isEmpty }
+        try await eventually("conflicts status") { a.status(for: rootA) == .conflicts || b.status(for: rootB) == .conflicts }
+
+        let (resolver, root) = a.repository.conflicted.isEmpty ? (b, rootB) : (a, rootA)
+        let found = await resolver.repository.conflict(at: root.appendingPathComponent("main.typ"))
+        let conflict = try XCTUnwrap(found)
+        XCTAssertEqual(conflict.sides.count, 2)
+        let resolved = await resolver.repository.resolve(root.appendingPathComponent("main.typ"), text: "one (a and b)\ntwo\n")
+        XCTAssertTrue(resolved)
+        await commit(resolver)
+        try await eventually("resolution on both") {
+            read(rootA.appendingPathComponent("main.typ")) == "one (a and b)\ntwo\n"
+                && read(rootB.appendingPathComponent("main.typ")) == "one (a and b)\ntwo\n"
+                && a.repository.conflicted.isEmpty && b.repository.conflicted.isEmpty
+        }
+    }
+
+    func testKeepsBothVersionsOfAnLFSFileChangedOnBoth() async throws {
+        let (a, rootA, b, rootB) = try await sharedSpace("x\n")
+        try Data([0, 1, 2, 3]).write(to: rootA.appendingPathComponent("image.png"))
+        await commit(a)
+        try await eventually("image on b") { FileManager.default.fileExists(atPath: rootB.appendingPathComponent("image.png").path) }
+
+        try Data([0, 0xA]).write(to: rootA.appendingPathComponent("image.png"))
+        try Data([0, 0xB]).write(to: rootB.appendingPathComponent("image.png"))
+        // b's change is the newer one.
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)],
+                                              ofItemAtPath: rootB.appendingPathComponent("image.png").path)
+        await commit(a, b)
+        try await eventually("newest wins, the other is kept") {
+            [rootA, rootB].allSatisfy { root in
+                (try? Data(contentsOf: root.appendingPathComponent("image.png"))) == Data([0, 0xB])
+                    && (try? Data(contentsOf: root.appendingPathComponent("image (conflict).png"))) == Data([0, 0xA])
+            }
+        }
+    }
+
+    func testSharesAFileWithAnotherAccountAtItsOwnPlace() async throws {
+        let a = try await device("a", account: account())
+        let b = try await device("b", account: account())
+        let file = a.repository.url(of: "Notes/todo.typ")
+        try write("- milk\n", to: file)
+        await commit(a)
+        a.share(file)
+        let link = try XCTUnwrap(a.inviteLink(for: file))
+        let invite = try XCTUnwrap(parseInvite(link: link))
+        XCTAssertTrue(invite.file)
+        XCTAssertEqual(invite.name, "todo.typ")
+        XCTAssertTrue(b.elsewhere.isEmpty)
+
+        let destination = b.repository.url(of: "Inbox/shopping.typ")
+        XCTAssertNotNil(b.join(invite, at: destination))
+        try await eventually("file on b") { read(destination) == "- milk\n" }
+
+        try write("- milk\n- eggs\n", to: destination)
+        await commit(b)
+        try await eventually("edit on a") { read(file) == "- milk\n- eggs\n" }
+        // Nothing else of a's space travels.
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: b.repository.url(of: "Inbox").path), ["shopping.typ"])
+        try await eventually("shared on both") { a.isShared(file) && b.isShared(destination) }
     }
 
     /// An editor's side of a live session, as `LiveEditing` does it.
@@ -166,10 +275,13 @@ final class SyncNetworkTests: XCTestCase {
             text = buffer as String
             cursors = result.cursors
         }
+
+        func save() throws { try text.write(to: root.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8) }
     }
 
-    func testEditsLiveWithCursors() async throws {
+    func testEditsLiveWithCursorsWhileNodesSync() async throws {
         let (a, rootA, b, rootB) = try await sharedSpace("hello\n")
+        XCTAssertTrue(a.canEditLive(root: rootA, path: "main.typ"))
         let editorA = Editor(a, rootA, "hello\n")
         let editorB = Editor(b, rootB, "hello\n")
         try await eventually("sessions meet") {
@@ -198,36 +310,29 @@ final class SyncNetworkTests: XCTestCase {
             editorB.sync()
             return editorA.text == "Oh, hello world!\n" && editorB.text == editorA.text
         }
+
+        // Saving and committing on both while live: node merges leave the open file alone and settle.
+        editorA.text = "Oh, hello world! A\n"
+        editorA.sync()
+        try editorA.save()
+        await commit(a)
+        try await eventually("typed text on b", timeout: 10) {
+            editorB.sync()
+            return editorB.text == "Oh, hello world! A\n"
+        }
+        try editorB.save()
+        await commit(b)
+        try await eventually("nodes settle without conflicts") {
+            editorA.sync()
+            editorB.sync()
+            return a.status(for: rootA) == .synced && b.status(for: rootB) == .synced
+                && a.repository.conflicted.isEmpty && b.repository.conflicted.isEmpty
+        }
+        XCTAssertEqual(read(rootB.appendingPathComponent("main.typ")), "Oh, hello world! A\n")
+        XCTAssertEqual(editorA.text, editorB.text)
     }
 
-    func testSharesASpaceWithAnotherAccountByLink() async throws {
-        let a = try await device("a", account: Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }))
-        let b = try await device("b", account: Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }))
-        let rootA = dir.appendingPathComponent("A/Paper", isDirectory: true)
-        try FileManager.default.createDirectory(at: rootA, withIntermediateDirectories: true)
-        try "= Draft\n".write(to: rootA.appendingPathComponent("main.typ"), atomically: true, encoding: .utf8)
-        a.share(rootA)
-
-        let link = try XCTUnwrap(a.inviteLink(for: rootA))
-        let invite = try XCTUnwrap(parseInvite(link: link))
-        XCTAssertEqual(invite.name, "Paper")
-        XCTAssertTrue(b.elsewhere.isEmpty)
-        let parentB = dir.appendingPathComponent("B", isDirectory: true)
-        try FileManager.default.createDirectory(at: parentB, withIntermediateDirectories: true)
-        let rootB = try XCTUnwrap(b.join(invite, in: parentB))
-        XCTAssertEqual(rootB.lastPathComponent, "Paper")
-
-        try await eventually("file on b") { read(rootB.appendingPathComponent("main.typ")) == "= Draft\n" }
-        try "notes".write(to: rootB.appendingPathComponent("notes.typ"), atomically: true, encoding: .utf8)
-        try await eventually("file from b on a") { read(rootA.appendingPathComponent("notes.typ")) == "notes" }
-        try await eventually("shared on both") { a.isShared(rootA) && b.isShared(rootB) }
-
-        // Leaving only stops b; a keeps syncing.
-        b.stopSyncing(rootB)
-        XCTAssertTrue(a.isSynced(rootA))
-    }
-
-    func testSpacesNobodySyncsLeaveTheAccount() async throws {
+    func testSharesNobodySyncsLeaveTheAccount() async throws {
         let (a, rootA, b, rootB) = try await sharedSpace("x\n")
         b.stopSyncing(rootB)
         // A still syncs it, so b can join again.

@@ -936,7 +936,7 @@ final class Workspace: EditorLanguage {
     /// Synced spaces save within a second, so the other devices keep up; repository spaces within two, for their history.
     private func scheduleAutosave() {
         guard autosaveTask == nil else { return }
-        let delay: Double = SyncService.shared.isSynced(root) ? 1 : SpaceList.isInRepository(root) ? 2 : 30
+        let delay: Double = SyncService.shared.syncsAnything(in: root) ? 1 : SpaceList.isInRepository(root) ? 2 : 30
         autosaveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }

@@ -535,11 +535,11 @@ struct CommandPalette: View {
                                      keywords: ["trash", "restore", "undelete"],
                                      action: .run { DispatchQueue.main.async { RecentlyDeleted.show(in: ws.root) } }))
         }
-        if SyncService.shared.isSynced(ws.root) {
-            // The confirmation alert waits until the palette is gone.
-            items.append(PaletteItem(id: "space.invite", title: "Copy Invite Link to \(ws.name)…", icon: "person.badge.plus", section: "Space",
-                                     keywords: ["share", "collaborate", "invite", "link"],
-                                     action: .run { DispatchQueue.main.async { Invites.copyLink(for: ws.root) } }))
+        if SpaceList.isInRepository(ws.root) {
+            // The alert waits until the palette is gone.
+            items.append(PaletteItem(id: "space.invite", title: "Share \(ws.name)…", icon: "person.badge.plus", section: "Space",
+                                     keywords: ["share", "collaborate", "invite", "link", "sync"],
+                                     action: .run { DispatchQueue.main.async { Invites.share(ws.root) } }))
         }
         items.append(PaletteItem(id: "space.sidebar", title: state.sidebarVisible ? "Hide Sidebar" : "Show Sidebar",
                                  icon: "sidebar.left", shortcut: keys.sidebar.display, section: "Space",

@@ -341,6 +341,7 @@ final class Opener {
 
     /// Copies a folder into the repository, asking whether a link replaces the original. Returns the new space.
     /// `warnAboutGit` is off where the caller already told the user (the migration sheet).
+    @discardableResult
     func importSpace(_ source: URL, replace: Bool? = nil, warnAboutGit: Bool = true) async -> URL? {
         let source = source.standardizedFileURL
         if warnAboutGit, SpaceFolders.isGitRepository(source) {

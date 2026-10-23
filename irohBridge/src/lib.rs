@@ -10,7 +10,9 @@
 //!   from the space's secret, so the newest write of a path wins,
 //! - shared spaces have their own pkarr record, keyed by the space's secret, listing every device
 //!   (of any account) syncing them,
-//! - one gossip topic per space carries live edits and cursors of open files (see `live`).
+//! - one gossip topic per space carries live edits and cursors of open files (see `live`),
+//! - shares (folders or files synced as jj nodes, which replace path-by-path sync on the Mac) have replicas of their
+//!   own, holding each device's head (see `shares` and `bundle`); they reuse the keys, records and topics above.
 //!
 //! Events reach Swift (`ffi`) or the web app (`web`) as JSON strings through one callback.
 
@@ -38,9 +40,11 @@ use iroh_gossip::net::Gossip;
 use n0_future::{StreamExt, task::spawn, time::sleep};
 use serde_json::json;
 
+pub mod bundle;
 #[cfg(not(target_arch = "wasm32"))]
 mod ffi;
 mod live;
+mod shares;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
@@ -90,6 +94,11 @@ pub(crate) struct Inner {
     account_doc: Doc,
     gossip: Gossip,
     spaces: Mutex<HashMap<String, Space>>,
+    /// Opened share replicas by share id.
+    shares: Mutex<HashMap<String, Space>>,
+    /// Heads per share whose bundle or LFS files haven't arrived yet: device → bundle hash.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    waiting: Mutex<HashMap<String, HashMap<String, Hash>>>,
     /// What the account replica says about each space's keys.
     infos: Mutex<HashMap<String, SpaceInfo>>,
     /// Devices of other accounts syncing a shared space, from its record or the invite's hints.
@@ -110,7 +119,7 @@ unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 
 #[derive(Clone)]
-struct Space {
+pub(crate) struct Space {
     doc: Doc,
     author: AuthorId,
 }
@@ -192,7 +201,7 @@ pub(crate) fn space_author(secret: &[u8; 32]) -> Author {
 }
 
 /// Key of the shared space's pkarr record listing the devices syncing it.
-fn space_directory_key(secret: &[u8; 32]) -> SecretKey {
+pub(crate) fn space_directory_key(secret: &[u8; 32]) -> SecretKey {
     SecretKey::from_bytes(&derive("typewright 2026-10 space directory v0", &[secret]))
 }
 
@@ -266,6 +275,8 @@ pub(crate) async fn start(parts: Parts, account: [u8; 32], sink: Sink) -> Result
         account_doc,
         gossip,
         spaces: Mutex::new(HashMap::new()),
+        shares: Mutex::new(HashMap::new()),
+        waiting: Mutex::new(HashMap::new()),
         infos: Mutex::new(HashMap::new()),
         space_devices: Mutex::new(HashMap::new()),
         topics: Mutex::new(HashMap::new()),
@@ -299,7 +310,7 @@ async fn directory_loop(inner: Arc<Inner>) {
     }
 }
 
-fn pkarr_client(inner: &Inner) -> Result<PkarrRelayClient> {
+pub(crate) fn pkarr_client(inner: &Inner) -> Result<PkarrRelayClient> {
     #[cfg(not(target_arch = "wasm32"))]
     return Ok(PkarrRelayClient::new(
         N0_DNS_PKARR_RELAY_PROD.parse()?,
@@ -314,7 +325,7 @@ fn pkarr_client(inner: &Inner) -> Result<PkarrRelayClient> {
 }
 
 /// Adds this device to the record (or takes it out with `leave`) and returns the devices it lists.
-async fn update_record(
+pub(crate) async fn update_record(
     inner: &Inner,
     client: &PkarrRelayClient,
     key: &SecretKey,
@@ -355,7 +366,8 @@ async fn refresh_directory(inner: &Inner, key: &SecretKey, republish: bool) -> R
     if !peers.is_empty() {
         inner.account_doc.start_sync(peers).await?;
     }
-    let spaces: Vec<(String, Doc)> = inner.spaces.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.doc.clone())).collect();
+    let mut spaces: Vec<(String, Doc)> = inner.spaces.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.doc.clone())).collect();
+    spaces.extend(inner.shares.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.doc.clone())));
     for (id, doc) in spaces {
         if inner.is_shared(&id) {
             refresh_space_directory(inner, &client, &id, republish).await;
@@ -367,7 +379,7 @@ async fn refresh_directory(inner: &Inner, key: &SecretKey, republish: bool) -> R
 }
 
 /// Keeps this device listed in a shared space's record and remembers who else is.
-async fn refresh_space_directory(inner: &Inner, client: &PkarrRelayClient, id: &str, republish: bool) {
+pub(crate) async fn refresh_space_directory(inner: &Inner, client: &PkarrRelayClient, id: &str, republish: bool) {
     let key = space_directory_key(&inner.namespace(id));
     match update_record(inner, client, &key, republish, false).await {
         Ok(devices) => {
@@ -385,7 +397,7 @@ async fn refresh_space_directory(inner: &Inner, client: &PkarrRelayClient, id: &
 
 /// Syncs the replica and the live topic with everyone known to sync the space. With nobody listed,
 /// iroh-docs still dials the peers it last synced the replica with (it keeps a few per replica).
-async fn sync_space(inner: &Inner, id: &str, doc: &Doc) -> Result<()> {
+pub(crate) async fn sync_space(inner: &Inner, id: &str, doc: &Doc) -> Result<()> {
     let peers = inner.space_peers(id);
     doc.start_sync(peers.iter().map(|p| EndpointAddr::from(*p)).collect()).await?;
     if !peers.is_empty() {
@@ -417,7 +429,7 @@ async fn watch_account(inner: Arc<Inner>) {
     }
 }
 
-fn track(inner: &Inner, peer: EndpointId, up: bool) {
+pub(crate) fn track(inner: &Inner, peer: EndpointId, up: bool) {
     let mut neighbors = inner.neighbors.lock().unwrap();
     if up { neighbors.insert(peer) } else { neighbors.remove(&peer) };
     drop(neighbors);
@@ -442,43 +454,70 @@ async fn emit_spaces(inner: &Inner) -> Result<()> {
             removed.push(space.to_string());
         }
     }
-    let mut spaces = Vec::new();
     let mut infos = HashMap::new();
-    let entries = inner.account_doc.get_many(Query::single_latest_per_key().key_prefix("space/").build()).await?;
-    tokio::pin!(entries);
-    while let Some(entry) = entries.next().await {
-        let entry = entry?;
-        let id = String::from_utf8_lossy(&entry.key()[6..]).to_string();
-        // Content arrives after the entry; the next ContentReady lists it.
-        let Ok(bytes) = inner.blobs.get_bytes(entry.content_hash()).await else { continue };
-        let Ok(mut info) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+    let raw_spaces = account_entries(inner, "space/").await?;
+    let raw_shares = account_entries(inner, "share/").await?;
+    let mut spaces = Vec::new();
+    for (id, info) in &raw_spaces {
+        let mut info = info.clone();
         let keys = space_info(&info);
         info["shared"] = json!(keys.shared || keys.secret.is_some());
         if let Some(fields) = info.as_object_mut() {
             fields.remove("secret");
         }
         infos.insert(id.clone(), keys);
-        info["members"] = json!(members.remove(&id).unwrap_or_default());
+        info["members"] = json!(members.get(id).cloned().unwrap_or_default());
         info["id"] = json!(id);
         spaces.push(info);
+    }
+    // A share's keys win over the space it was migrated from (the same, unless it was joined again).
+    for (id, info) in &raw_shares {
+        infos.insert(id.clone(), space_info(info));
     }
     {
         // Spaces syncing here keep their keys while their entry is missing, and joined secrets stay
         // known, as a join writes its entry after opening may already have asked.
         let mut known = inner.infos.lock().unwrap();
         let open = inner.spaces.lock().unwrap();
-        known.retain(|id, info| (open.contains_key(id) || info.secret.is_some()) && !infos.contains_key(id));
+        let shares = inner.shares.lock().unwrap();
+        known.retain(|id, info| (open.contains_key(id) || shares.contains_key(id) || info.secret.is_some()) && !infos.contains_key(id));
         known.extend(infos);
     }
+    let (shares, migrate) = shares::share_list(raw_shares, &raw_spaces, &members);
+    // The browser still syncs spaces the old way; the Mac lists them as folder shares for all its devices.
+    if cfg!(not(target_arch = "wasm32")) {
+        for (id, info) in migrate {
+            inner.account_doc.set_bytes(inner.author, format!("share/{id}"), serde_json::to_vec(&info)?).await?;
+        }
+    }
     inner.emit(json!({"type": "spaces", "spaces": spaces, "removed": removed}));
+    inner.emit(json!({"type": "shares", "shares": shares, "removed": removed}));
     Ok(())
 }
 
-fn member_key(inner: &Inner, space: &str) -> String {
+/// The account replica's JSON entries under `prefix` by id; entries whose content hasn't arrived yet are skipped
+/// (the next ContentReady lists them).
+async fn account_entries(inner: &Inner, prefix: &str) -> Result<Vec<(String, serde_json::Value)>> {
+    let mut out = Vec::new();
+    let entries = inner.account_doc.get_many(Query::single_latest_per_key().key_prefix(prefix).build()).await?;
+    tokio::pin!(entries);
+    while let Some(entry) = entries.next().await {
+        let entry = entry?;
+        let id = String::from_utf8_lossy(&entry.key()[prefix.len()..]).to_string();
+        let Ok(bytes) = inner.blobs.get_bytes(entry.content_hash()).await else { continue };
+        let Ok(info) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        out.push((id, info));
+    }
+    Ok(out)
+}
+
+pub(crate) fn member_key(inner: &Inner, space: &str) -> String {
     format!("member/{space}/{}", inner.endpoint.id())
 }
 
 /// Stops syncing here; a space nobody syncs anymore leaves the account.
+// The web app still syncs spaces path by path.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) async fn leave_space(inner: Arc<Inner>, id: String) -> Result<()> {
     live::leave(&inner, &id);
     let space = inner.spaces.lock().unwrap().remove(&id);
@@ -503,6 +542,8 @@ pub(crate) async fn leave_space(inner: Arc<Inner>, id: String) -> Result<()> {
 }
 
 /// Takes the space off every device; each keeps its files.
+// The web app still syncs spaces path by path.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) async fn remove_space(inner: Arc<Inner>, id: String) -> Result<()> {
     inner.account_doc.set_bytes(inner.author, format!("removed/{id}"), b"1".to_vec()).await?;
     inner.account_doc.del(inner.author, format!("space/{id}")).await?;
@@ -540,6 +581,8 @@ pub(crate) async fn space_doc(inner: &Arc<Inner>, id: &str) -> Result<Space> {
     Ok(space)
 }
 
+// The web app still syncs spaces path by path.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) async fn open_space(inner: Arc<Inner>, id: String) -> Result<()> {
     space_doc(&inner, &id).await?;
     list_space(&inner, &id).await
@@ -583,7 +626,7 @@ async fn watch_space(
     }
 }
 
-async fn latest(doc: &Doc, key: &[u8]) -> Result<Option<iroh_docs::Entry>> {
+pub(crate) async fn latest(doc: &Doc, key: &[u8]) -> Result<Option<iroh_docs::Entry>> {
     doc.get_one(Query::single_latest_per_key().key_exact(key).include_empty().build()).await
 }
 
@@ -593,6 +636,8 @@ fn remote(space: &str, key: &[u8], hash: Hash, size: u64) -> serde_json::Value {
     event
 }
 
+// The web app still syncs spaces path by path.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) async fn list_space(inner: &Arc<Inner>, id: &str) -> Result<()> {
     let doc = space_doc(inner, id).await?.doc;
     let stream = doc.get_many(Query::single_latest_per_key().include_empty().build()).await?;
@@ -610,6 +655,8 @@ pub(crate) async fn list_space(inner: &Arc<Inner>, id: &str) -> Result<()> {
     Ok(())
 }
 
+// The web app still syncs spaces path by path.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) async fn share_space(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
     // Membership lands before the listing, so no device sees the space without members.
     inner.account_doc.set_bytes(inner.author, member_key(&inner, &id), b"1".to_vec()).await?;
@@ -619,6 +666,8 @@ pub(crate) async fn share_space(inner: Arc<Inner>, id: String, name: String) -> 
 }
 
 /// Marks an own space shared, so all devices of the account list themselves in its record.
+// The web app still syncs spaces path by path.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) async fn invite(inner: Arc<Inner>, id: String, name: String) -> Result<()> {
     let key = format!("space/{id}");
     let stored = match inner.account_doc.get_exact(inner.author, key.clone(), false).await? {
@@ -645,6 +694,8 @@ pub(crate) fn begin_join(inner: &Inner, id: &str, secret: [u8; 32], hints: Vec<E
     inner.space_devices.lock().unwrap().insert(id.to_string(), hints);
 }
 
+// The web app still syncs spaces path by path.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) async fn join_space(inner: Arc<Inner>, id: String, name: String, secret: [u8; 32]) -> Result<()> {
     // Joining again after "Remove From All Devices" brings it back.
     inner.account_doc.del(inner.author, format!("removed/{id}")).await?;
@@ -671,6 +722,8 @@ pub(crate) async fn publish_bytes(inner: Arc<Inner>, id: String, path: String, b
     Ok(())
 }
 
+// The web app still syncs spaces path by path.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) async fn unpublish(inner: Arc<Inner>, id: String, path: String) -> Result<()> {
     let space = space_doc(&inner, &id).await?;
     let hash = space.doc.set_bytes(space.author, Bytes::from(path.clone().into_bytes()), TOMBSTONE).await?;

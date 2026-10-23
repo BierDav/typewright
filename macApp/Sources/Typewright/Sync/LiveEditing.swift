@@ -61,11 +61,11 @@ final class LiveEditing {
         observer = nil
     }
 
-    /// Starts sharing the file `path` (relative to the space) if the space syncs and the file is small enough.
+    /// Starts sharing the file `path` (relative to the space) if it's in a synced share and small enough.
     func open(_ path: String?, text: String) {
         guard path != self.path else { return }
         close()
-        guard let path, SyncService.shared.isRunning, SyncService.shared.isSynced(root), text.utf8.count <= SyncService.liveLimit else { return }
+        guard let path, SyncService.shared.canEditLive(root: root, path: path), text.utf8.count <= SyncService.liveLimit else { return }
         // The bridge keeps one session per file; another window with it open already shares it.
         guard Self.sessions.insert(root.standardizedFileURL.path + "/" + path).inserted else { return }
         self.path = path

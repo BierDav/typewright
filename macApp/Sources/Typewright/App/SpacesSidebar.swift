@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TypewrightCore
 
 /// The window's sidebar: the space's file tree, which shrinks away while the selector covers it.
 struct SpacesSidebar: View {
@@ -286,7 +287,7 @@ private struct SpacesPane: View {
             LazyVStack(spacing: 2) {
                 ForEach(Array(spaces.enumerated()), id: \.element) { index, url in
                     SpaceRow(url: url, isCurrent: url.path == current, isHighlighted: focused && highlighted == url,
-                             isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url),
+                             isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url), status: sync.status(for: url),
                              isRenaming: renaming == url, shortcut: commandDown && index < 9 ? index + 1 : nil) {
                         open(url)
                     } onStartRename: {
@@ -307,9 +308,9 @@ private struct SpacesPane: View {
                     } onToggleSync: {
                         toggleSync(url)
                     } onRemoveEverywhere: {
-                        if let id = sync.spaceID(for: url) { removeEverywhere(id, name: url.lastPathComponent) }
+                        if let id = sync.shareID(for: url) { removeEverywhere(id, name: url.lastPathComponent) }
                     } onInvite: {
-                        Invites.copyLink(for: url)
+                        Invites.share(url)
                     } onDrag: { offset in
                         drag = (url, offset)
                     } onDrop: {
@@ -339,11 +340,11 @@ private struct SpacesPane: View {
                         .padding(.horizontal, 10)
                         .padding(.top, 10)
                         .padding(.bottom, 2)
-                    ForEach(sync.elsewhere) { space in
-                        ElsewhereSpaceRow(name: space.name) {
-                            download(space)
+                    ForEach(sync.elsewhere) { share in
+                        ElsewhereSpaceRow(name: share.name) {
+                            download(share)
                         } onRemove: {
-                            removeEverywhere(space.id, name: space.name)
+                            removeEverywhere(share.id, name: share.name)
                         }
                     }
                 }
@@ -468,14 +469,26 @@ private struct SpacesPane: View {
         withAnimation(.smooth(duration: 0.3)) { onChange() }
     }
 
-    /// Without an account, syncing starts in the Devices settings.
+    /// Without an account, syncing starts in the Devices settings; only spaces in the library sync.
     private func toggleSync(_ url: URL) {
         if sync.isSynced(url) {
             sync.stopSyncing(url)
-        } else if sync.isRunning {
-            sync.share(url)
-        } else {
+        } else if !sync.isRunning {
             SettingsWindowController.shared.show(tab: 4)
+        } else if !SpaceList.isInRepository(url) {
+            let alert = NSAlert()
+            alert.messageText = "Import “\(url.lastPathComponent)” to sync it?"
+            alert.informativeText = "Spaces sync from Typewright's library. Importing copies the folder there and leaves a link where it was."
+            alert.addButton(withTitle: "Import and Sync")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            Task {
+                guard let imported = await Opener.shared.importSpace(url, replace: true) else { return }
+                sync.share(imported)
+                onChange()
+            }
+        } else {
+            sync.share(url)
         }
     }
 
@@ -484,7 +497,7 @@ private struct SpacesPane: View {
         let alert = NSAlert()
         alert.messageText = "Remove “\(name)” from all devices?"
         alert.informativeText = "Your devices stop syncing this space. Their copies of the files stay where they are."
-        if sync.accountSpaces.contains(where: { $0.id == id && $0.shared }) {
+        if sync.accountShares.contains(where: { $0.id == id && $0.shared }) {
             alert.informativeText += " Others it's shared with keep syncing it among themselves."
         }
         alert.addButton(withTitle: "Remove")
@@ -494,16 +507,22 @@ private struct SpacesPane: View {
         withAnimation(.smooth(duration: 0.2)) { sync.removeEverywhere(id) }
     }
 
-    /// Asks where the space's folder goes, then opens it while its files arrive.
-    private func download(_ space: AccountSpace) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Download Here"
-        panel.message = "Choose where to put “\(space.name)”."
-        guard panel.runModal() == .OK, let parent = panel.url, let root = sync.join(space, in: parent) else { return }
-        Opener.shared.open(root, in: state)
+    /// Spaces come back as spaces; a folder or file shared on another device asks where it goes. Opens it while its
+    /// files arrive.
+    private func download(_ share: AccountShare) {
+        let destination = share.kind == .space
+            ? sync.suggestedDestination(for: share)
+            : LibraryPanel.destination(for: share.name, file: share.kind == .file, in: sync.repository)
+        guard let destination else { return }
+        guard let joined = sync.join(share, at: destination) else {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't download “\(share.name)”."
+            alert.informativeText = sync.lastError ?? ""
+            alert.runModal()
+            return
+        }
+        onChange()
+        if share.kind == .space { Opener.shared.open(joined, in: state) } else { Invites.reveal(joined) }
     }
 
     private func open(_ url: URL) {
@@ -523,6 +542,7 @@ private struct SpaceRow: View {
     let isDragged: Bool
     let isSynced: Bool
     let isShared: Bool
+    let status: ShareStatus?
     let isRenaming: Bool
     /// The ⌘ number shown while ⌘ is held.
     let shortcut: Int?
@@ -568,10 +588,7 @@ private struct SpaceRow: View {
                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
             } else if isSynced {
-                Image(systemName: isShared ? "person.2" : "arrow.triangle.2.circlepath")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .help(isShared ? "Shared with others" : "Synced across your devices")
+                SyncStatusLabel(status: status, shared: isShared)
             }
             if shortcut == nil, SpaceFolders.isGitRepository(url) {
                 Image(systemName: "exclamationmark.triangle")
@@ -624,7 +641,9 @@ private struct SpaceRow: View {
             Button(isSynced ? "Stop Syncing on This Mac" : "Sync Across Devices", action: onToggleSync)
             if isSynced {
                 Button("Remove From All Devices…", action: onRemoveEverywhere)
-                Button("Copy Invite Link…", action: onInvite)
+            }
+            if inRepository {
+                Button("Share…", action: onInvite)
             }
             Divider()
             if inRepository {

@@ -206,6 +206,7 @@ struct SidebarView: View {
         items.append(.init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) })
         if SpaceList.isInRepository(workspace.root) {
             items.append(.init("Link to…", "link") { Opener.shared.link(node.url) })
+            items.append(.init("Share…", "person.badge.plus") { Invites.share(node.url) })
         }
         items.append(.init("Copy Absolute Path", "doc.on.doc") { copyPath(node.url) })
         items.append(.init("Copy Relative Path", "doc.on.doc") {
@@ -232,6 +233,7 @@ struct SidebarView: View {
             .init("Copy Path", "doc.on.doc") { copyPath(workspace.root) },
         ] + (SpaceList.isInRepository(workspace.root) ? [
             .init("Link to…", "link") { Opener.shared.link(workspace.root) },
+            .init("Share…", "person.badge.plus") { Invites.share(workspace.root) },
             .init("Show Recently Deleted", "trash.slash") { RecentlyDeleted.show(in: workspace.root) },
         ] : []) + [
             .divider,
