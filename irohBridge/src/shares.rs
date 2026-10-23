@@ -4,15 +4,13 @@
 //! the same `member/<id>/<device>` and `removed/<id>` entries spaces have. Spaces listed under `space/<id>` (the
 //! path-by-path sync before shares) become `space` shares with the same id and keys.
 //!
-//! Each share has its own replica, keyed by its secret like a space's but in a different namespace, so devices still
-//! syncing the old way never see it. It holds:
+//! Each share has its own replica, keyed by its secret but in a namespace apart from the path-by-path replicas spaces
+//! had before shares, so devices still syncing the old way never see it. It holds:
 //! - `head/<device>` → the node bundle of the device's current node,
 //! - `lfs/<blake3>` → an LFS file the heads name (iroh blob hashes are BLAKE3, so the key is the content's hash),
 //! - `name/<device>` → the device's name, for conflict sides.
 //!
 //! A head is reported (`head` event) once its bundle and LFS files are local, so applying it never waits.
-// The web app doesn't sync shares yet.
-#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
