@@ -149,7 +149,7 @@ mod tests {
   $ x´ := 3 $
   $ r` := 3 $
   $ z := x´ + r` $
-  #graph("tri(2x)", xrange: ("r","-r"))
+  #graph($op("tri")(2x)$, xrange: ($r$, $-r$))
 ]"##;
         let context = serde_json::json!({"files": [], "report": "", "path": "main.typ", "main": true}).to_string();
         let at = |needle: &str| doc[..doc.rfind(needle).unwrap()].encode_utf16().count() as u32;
@@ -169,9 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn value_supports_editor_features_in_strings_and_math() {
-        for expression in [r#""U_2 / 2 = mV""#, r#"$U_2 / 2 = "mV"$"#] {
-            let doc = format!("#show: worksheet\n$U_2 := 5 V$\nVoltage: #value({expression}).");
+    fn value_supports_editor_features_in_math() {
+        for expression in [r#"$U_2 / 2 = unit("mV")$"#] {
+            let doc = format!("#show: worksheet\n$U_2 := 5 unit(\"V\")$\nVoltage: #value({expression}).");
             let context = serde_json::json!({"path": "main.typ", "main": true}).to_string();
             let at = doc[..doc.rfind("U_2").unwrap()].encode_utf16().count() as u32;
             let json = |op, offset| serde_json::from_str::<Value>(&call(op, &doc, &context, offset)).unwrap();
@@ -182,8 +182,7 @@ mod tests {
             let items = json("complete", at + 1);
             assert!(items["items"].as_array().unwrap().iter().any(|i| i["insert"] == "U_2"), "{items}");
             let tokens = json("documentTokens", 0);
-            // in math the quoted unit's token starts at its quote
-            let unit = doc[..doc.rfind("mV").unwrap() - usize::from(expression.starts_with('$'))].encode_utf16().count() as u32;
+            let unit = doc[..doc.rfind("mV").unwrap()].encode_utf16().count() as u32;
             assert!(tokens.as_array().unwrap().chunks_exact(3).any(|t| t[0] == unit && t[2] == solveng_ide::TokenKind::UNIT));
         }
         let function: Value = serde_json::from_str(&call("function", "value", "", 0)).unwrap();
@@ -194,7 +193,7 @@ mod tests {
     #[test]
     fn completes_and_documents_new_calculation_builtins() {
         for name in ["sum", "laplace", "det", "tr", "integrate"] {
-            let doc = format!("#value(\"{name}\")");
+            let doc = format!("#value(${name}$)");
             let at = doc.find(name).unwrap() as u32;
             let result: Value = serde_json::from_str(&call("complete", &doc, "", at + name.len() as u32)).unwrap();
             let item = result["items"].as_array().unwrap().iter().find(|i| i["label"] == name).unwrap();
@@ -202,6 +201,18 @@ mod tests {
             let hover: Value = serde_json::from_str(&call("hover", &doc, "", at + 1)).unwrap();
             assert!(hover["markdown"].as_str().unwrap().contains("### Parameters"), "{hover}");
         }
+    }
+
+    #[test]
+    fn unit_shortcuts_complete_with_hashes_and_conceal_them() {
+        let doc = "#import units: s\n#show: worksheet\n$x := 1 #s$";
+        let at = doc.rfind("#s").unwrap() as u32;
+        let complete: Value = serde_json::from_str(&call("complete", doc, "", at + 2)).unwrap();
+        assert!(complete["items"].as_array().unwrap().iter().any(|item| item["label"] == "s" && item["insert"] == "#s"));
+        let conceals: Value = serde_json::from_str(&call("conceals", doc, "", 0)).unwrap();
+        assert!(conceals.as_array().unwrap().chunks_exact(5).any(|item| item[0] == at && item[1] == 1 && item[2] == 0));
+        let string = "#value(\"x + 1\")";
+        assert_eq!(call("complete", string, "", 11), "null");
     }
 
     #[test]
@@ -227,7 +238,7 @@ mod tests {
 
     #[test]
     fn documents_transitive_dependencies_without_parameters_or_units() {
-        let doc = "#show: worksheet\n$a := 2 \"A\"$\n$b := a + 3 \"A\"$\n$f(x: A) := b + x$\n$f(1 \"A\") =$";
+        let doc = "#show: worksheet\n$a := 2 unit(\"A\")$\n$b := a + 3 unit(\"A\")$\n$f(x: A) := b + x$\n$f(1 unit(\"A\")) =$";
         let at = doc.rfind("f(").unwrap() as u32;
         let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
         let markdown = hover["markdown"].as_str().unwrap();
@@ -239,7 +250,7 @@ mod tests {
     fn documents_code_and_call_string_dependencies() {
         for doc in [
             "#show: worksheet\n```solveng\na := 2\nb := a + a\nf(x) := b + x\nf(1) =\n```",
-            "#worksheet(\"a := 2\", \"b := a + a\", \"f(x) := b + x\", \"f(1) =\")",
+            "#worksheet(`a := 2`, `b := a + a`, `f(x) := b + x`, `f(1) =`)",
         ] {
             let at = doc.rfind("f(").unwrap() as u32;
             let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
@@ -284,7 +295,7 @@ mod tests {
     fn reads_the_editor_context() {
         // A chapter included inside the main file's worksheet sees its definitions.
         let context = serde_json::json!({
-            "files": [{"path": "main.typ", "text": "#show: worksheet\n#worksheet(\"U := 5 V\")\n#include \"ch.typ\""}],
+            "files": [{"path": "main.typ", "text": "#show: worksheet\n#worksheet(`U := 5 V`)\n#include \"ch.typ\""}],
             "report": "", "path": "ch.typ", "main": false, "mainPath": "main.typ",
         })
         .to_string();
