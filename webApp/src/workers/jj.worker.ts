@@ -23,7 +23,7 @@ const GUEST_ROOT = "/repo";
 const SIGNATURES: Record<string, { args: ("str" | "str?" | "u32" | "i32" | "u64")[]; void?: true }> = {
   twj_set_lfs_limit: { args: ["u64"], void: true },
   twj_commit: { args: ["str"] },
-  twj_squash: { args: ["u32"] },
+  twj_squash: { args: ["str"] },
   twj_file_history: { args: ["str", "u32"] },
   twj_file_at: { args: ["str", "str"] },
   twj_restore_file: { args: ["str", "str"] },

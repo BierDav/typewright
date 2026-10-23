@@ -1872,3 +1872,15 @@ button.issue:hover:not(:disabled) {
     width: 200px;
   }
 }
+
+/* Groups controls so one `disabled` covers them, without a fieldset's frame. */
+fieldset.plain {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+fieldset.plain:disabled {
+  opacity: 0.5;
+}

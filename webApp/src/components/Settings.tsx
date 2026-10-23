@@ -4,7 +4,7 @@ import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import * as fontLib from "~/lib/fonts";
 import { createPasskey, identity, passkeysSupported, relyingParty, sharesMacPasskeys, signInWithPasskey, signOut } from "~/lib/identity";
-import { setSettings, settings } from "~/lib/settings";
+import { DEFAULT_RETENTION, type RetentionPolicy, setSettings, settings } from "~/lib/settings";
 import { spacePath } from "~/lib/spaces";
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
@@ -67,6 +67,60 @@ function Stepper(props: { value: number; min: number; max: number; step?: number
         +
       </button>
     </div>
+  );
+}
+
+function Count(props: { value: number; onChange: (value: number) => void; label: string }) {
+  return (
+    <input
+      class="text-field number"
+      type="number"
+      min="0"
+      max="9999"
+      aria-label={props.label}
+      value={props.value}
+      onChange={(e) => props.onChange(Math.min(9999, Math.max(0, Math.trunc(Number(e.currentTarget.value) || 0))))}
+    />
+  );
+}
+
+/** Mirrors the Mac's History settings: a backup-style policy of how many old versions stay. */
+function Retention() {
+  const policy = () => settings.historyRetention;
+  const set = (key: keyof RetentionPolicy, value: number) => setSettings("historyRetention", key, value);
+  const isDefault = () => (Object.keys(DEFAULT_RETENTION) as (keyof RetentionPolicy)[]).every((k) => policy()[k] === DEFAULT_RETENTION[k]);
+  const rows: [keyof RetentionPolicy, string][] = [["last", "Most recent"], ["hourly", "Hourly"], ["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]];
+  return (
+    <Section title="History" footer="Typewright keeps the most recent versions, then the last version of each of that many hours, days, weeks, months and years; the versions in between are combined into the next one kept.">
+      <Row label="Thin out old history">
+        <Toggle checked={settings.historyThinOut} onChange={(v) => setSettings("historyThinOut", v)} label="Thin out old history" />
+      </Row>
+      <For each={rows}>
+        {([key, label]) => (
+          <Row label={label}>
+            <fieldset class="plain" disabled={!settings.historyThinOut}>
+              <Count label={label} value={policy()[key]} onChange={(v) => set(key, v)} />
+            </fieldset>
+          </Row>
+        )}
+      </For>
+      <Row label="Yearly">
+        <fieldset class="plain inline-field" disabled={!settings.historyThinOut}>
+          <Show when={policy().yearly >= 0}>
+            <Count label="Yearly" value={policy().yearly} onChange={(v) => set("yearly", v)} />
+          </Show>
+          <label class="inline-field">
+            <input type="checkbox" checked={policy().yearly < 0} onChange={(e) => set("yearly", e.currentTarget.checked ? -1 : 10)} />
+            <span>All</span>
+          </label>
+        </fieldset>
+      </Row>
+      <Row label="">
+        <button class="button small" disabled={isDefault()} onClick={() => setSettings("historyRetention", { ...DEFAULT_RETENTION })}>
+          Restore Defaults
+        </button>
+      </Row>
+    </Section>
   );
 }
 
@@ -135,13 +189,11 @@ function General() {
           </Show>
         </Row>
       </Section>
+      <Retention />
       <Section
-        title="History"
-        footer="Every space keeps a version of each file a few seconds after it changes. Older versions are kept one per day. Larger files and binary files like PDFs and images have no history and are synced whole; when two devices change one at once, both versions are kept."
+        title="Large Files"
+        footer="Every space keeps a version of each file a few seconds after it changes. Larger files and binary files like PDFs and images have no history and are synced whole; when two devices change one at once, both versions are kept."
       >
-        <Row label="Keep every version for">
-          <Stepper value={settings.historySquashDays} min={1} max={365} suffix=" days" onChange={(v) => setSettings("historySquashDays", v)} />
-        </Row>
         <Row label="Track files up to">
           <div class="inline-field">
             <input

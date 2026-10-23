@@ -2,6 +2,11 @@ import { createEffect, createRoot } from "solid-js";
 import { createStore } from "solid-js/store";
 
 export type RenderMode = "pdf" | "html" | "svg";
+
+/** How many old versions to keep, like a backup prune (`twj_squash` in jjBridge); negative means all. */
+export type RetentionPolicy = { last: number; hourly: number; daily: number; weekly: number; monthly: number; yearly: number };
+
+export const DEFAULT_RETENTION: RetentionPolicy = { last: 100, hourly: 48, daily: 14, weekly: 8, monthly: 12, yearly: -1 };
 export type Theme = "system" | "light" | "dark";
 
 export type Settings = {
@@ -21,8 +26,9 @@ export type Settings = {
   spaceFontPaths: string[];
   /** Files up to this many megabytes get history and merge when synced; larger ones are LFS files, kept whole. */
   lfsThresholdMB: number;
-  /** History older than this many days keeps one version per day; 0 keeps every version. */
-  historySquashDays: number;
+  /** Whether old versions are thinned out by `historyRetention`. */
+  historyThinOut: boolean;
+  historyRetention: RetentionPolicy;
   /** Labels this device's cursor on other devices. */
   deviceName: string;
   sidebarVisible: boolean;
@@ -43,7 +49,8 @@ const defaults: Settings = {
   ignoreLibraryWarnings: false,
   spaceFontPaths: ["./fonts"],
   lfsThresholdMB: 1,
-  historySquashDays: 30,
+  historyThinOut: true,
+  historyRetention: DEFAULT_RETENTION,
   deviceName: defaultDeviceName(),
   sidebarVisible: true,
   spacesVisible: true,
@@ -62,7 +69,10 @@ const KEY = "typewright.settings";
 
 function load(): Settings {
   try {
-    return { ...defaults, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    const stored = JSON.parse(localStorage.getItem(KEY) ?? "{}");
+    // The old "squash after N days" setting gives way to the retention defaults, like on the Mac.
+    delete stored.historySquashDays;
+    return { ...defaults, ...stored, historyRetention: { ...DEFAULT_RETENTION, ...stored.historyRetention } };
   } catch {
     return { ...defaults };
   }

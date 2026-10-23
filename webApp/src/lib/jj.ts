@@ -6,7 +6,7 @@ import { createEffect, createRoot } from "solid-js";
 import { createStore } from "solid-js/store";
 import JJWorker from "~/workers/jj.worker.ts?worker";
 import type { Arg, Request, Response } from "~/workers/jj.worker";
-import { settings } from "./settings";
+import { type RetentionPolicy, settings } from "./settings";
 import { SPACES } from "./spaces";
 import * as fs from "./storage";
 
@@ -29,7 +29,8 @@ export type FileConflict = { path: string; binary: boolean; sides: string[]; hun
 
 const IDLE_MS = 5_000;
 const MAX_MS = 60_000;
-const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+const LAST_SQUASH = "typewright.jj.lastSquash";
 
 export const [repository, setRepository] = createStore({
   /** "elsewhere": another tab runs the repository, so history and conflicts show there. */
@@ -198,8 +199,15 @@ export async function commit(message = "Edit"): Promise<string[]> {
   return result.changed;
 }
 
-export async function squash(olderThanDays: number): Promise<number> {
-  return (await call<{ squashed: number }>("twj_squash", olderThanDays))?.squashed ?? 0;
+/** Thins out old autosaves by `policy`; null when it failed. */
+export async function squash(policy: RetentionPolicy): Promise<{ squashed: number; kept: number } | null> {
+  const clean = Object.fromEntries(Object.entries(policy).map(([k, v]) => [k, k === "yearly" ? Math.trunc(v) : Math.max(0, Math.trunc(v))]));
+  return call<{ squashed: number; kept: number }>("twj_squash", JSON.stringify(clean));
+}
+
+/** At most hourly (or after the clock went back), and only while no commit is pending. */
+export function squashIsDue(last: number | null, now: number): boolean {
+  return last === null || now - last >= HOUR_MS || now < last;
 }
 
 export async function history(path: string, limit = 500): Promise<FileVersion[]> {
@@ -264,11 +272,15 @@ function scheduleCommit() {
 }
 
 function scheduleSquash() {
-  const run = () => {
-    if (settings.historySquashDays > 0) void squash(settings.historySquashDays);
+  const run = async () => {
+    if (!settings.historyThinOut || idleTimer || repository.status !== "open") return;
+    const last = Number(localStorage.getItem(LAST_SQUASH)) || null;
+    if (!squashIsDue(last, Date.now())) return;
+    // Marked done only once it ran, so a failure gets the next check.
+    if (await squash({ ...settings.historyRetention })) localStorage.setItem(LAST_SQUASH, String(Date.now()));
   };
-  run();
-  setInterval(run, DAY_MS);
+  void run();
+  setInterval(() => void run(), 5 * 60_000);
 }
 
 createRoot(() => {
