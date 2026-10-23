@@ -74,7 +74,7 @@ fn cli_reads_managed_config_and_ignores_lfs() {
     assert_eq!(jj_ok(root, &["config", "get", "ui.conflict-marker-style"]).trim(), "git");
     let path = jj_ok(root, &["config", "path", "--repo"]);
     let text = fs::read_to_string(path.trim()).unwrap();
-    assert_eq!(crate::config::version(&text), Some("3"));
+    assert_eq!(crate::config::version(&text), crate::config::version(include_str!("repo_config.toml")));
     assert!(jj_ok(root, &["tw-help"]).contains("For people and AI agents"));
     jj_ok(root, &["tw-log"]);
     write(root, "S/old.typ", "old\n");

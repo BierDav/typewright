@@ -1,4 +1,4 @@
-# typewright-config-version: 3
+# typewright-config-version: 4
 #
 # Managed by Typewright. This is the jj repo config of Typewright's library:
 #   {{ROOT}}
@@ -25,10 +25,19 @@
 #   to S/b.typ", "Move …", "Add …", "Restore …", "Undo …". Typewright has no trash: deleting just commits the
 #   deletion. Undo in the app writes the old state back as a new commit; it never uses `jj undo`.
 #
+# Sync
+# - Typewright syncs shares: a space, or any folder or file in it, each with an id that every device maps to its
+#   own path here. A share's states travel as deterministic nodes (refs below), and another device's state arrives
+#   as a 3-way merge committed as "Sync <share id>"; files it deletes show in Recently Deleted like your own.
+# - Renaming or moving a shared folder or file in the app moves the share along. Doing it outside the app (Finder,
+#   `mv`, `jj`) leaves the share pointing at the old path, and it stops syncing until it's back there. Deleting a
+#   share's folder or file in the app stops syncing it on this device only; undoing (or restoring it from Recently
+#   Deleted) syncs it again.
+#
 # Finding deleted files
 # - In the app: File › Recently Deleted… (also per folder in the file sidebar).
-# - Here: `jj tw-deleted` lists deletions made in the app; `jj log -- 'S/a.typ'` finds every commit touching a path,
-#   deleted or not. The commit before a deletion still has the file:
+# - Here: `jj tw-deleted` lists deletions made in the app and sync merges (which may delete); `jj log -- 'S/a.typ'`
+#   finds every commit touching a path, deleted or not. The commit before a deletion still has the file:
 #   `jj file show -r <commit>- S/a.typ`, or bring it back with `jj restore --from <commit>- S/a.typ`.
 #
 # Never touch
@@ -74,4 +83,4 @@ max-new-file-size = {{LIMIT}}
 [aliases]
 tw-help = ["util", "exec", "--", "cat", "{{CONFIG_PATH}}"]
 tw-log = ["log", "-r", "all() ~ (tw_autosaves() ~ heads(all()))"]
-tw-deleted = ["log", "-r", 'description(regex:"^Delete ")']
+tw-deleted = ["log", "-r", 'description(regex:"^(Delete|Sync) ")']
