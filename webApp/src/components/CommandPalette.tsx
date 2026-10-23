@@ -358,11 +358,17 @@ function destinationPage(): Page {
   const request = commands.pendingDestination();
   const name = request?.name ?? "Shared";
   const file = request?.file ?? false;
+  const dot = name.lastIndexOf(".");
+  const [stem, ext] = file && dot > 0 ? [name.slice(0, dot), name.slice(dot + 1)] : [name, null];
   const pick = async (parent: string) => {
-    const dot = name.lastIndexOf(".");
-    const [stem, ext] = file && dot > 0 ? [name.slice(0, dot), name.slice(dot + 1)] : [name, null];
     const free = await uniqueName(fs.join(SPACES, parent), stem, ext);
     commands.settleDestination(parent ? `${parent}/${free}` : free);
+    setOverlay(null);
+  };
+  // A file goes into a space, so a new one is made around it.
+  const pickNewSpace = async () => {
+    const space = await uniqueName(SPACES, stem);
+    commands.settleDestination(`${space}/${name}`);
     setOverlay(null);
   };
   return {
@@ -371,7 +377,13 @@ function destinationPage(): Page {
     kind: "list",
     items: async () => {
       const items: Item[] = [];
-      if (!file) items.push({ id: "dest:new", title: `New Space “${name}”`, section: "New Space", icon: "space", action: { stay: () => void pick("") } });
+      items.push({
+        id: "dest:new",
+        title: `New Space “${stem}”`,
+        section: "New Space",
+        icon: "space",
+        action: { stay: () => void (file ? pickNewSpace() : pick("")) },
+      });
       for (const folder of await libraryFolders()) {
         const space = !folder.includes("/");
         items.push({
@@ -406,6 +418,9 @@ export default function CommandPalette(props: { page?: string }) {
   const [stack, setStack] = createSignal<Page[]>([startPage(props.page)].filter((p): p is Page => !!p));
   const [query, setQuery] = createSignal("");
   const [selected, setSelected] = createSignal(0);
+  // A palette opened on a page (like the destination picker) closes from it instead of going back to the root.
+  const base = stack().length;
+  const nested = () => stack().length > base;
   const page = () => stack().at(-1);
   const [source] = createResource(
     () => ({ page: page(), revision: fonts.fonts.revision + fonts.fonts.catalog.length }),
@@ -462,11 +477,11 @@ export default function CommandPalette(props: { page?: string }) {
     else if (event.key === "Enter") (event.preventDefault(), run(results()[selected()]));
     else if (event.key === "Escape") {
       event.preventDefault();
-      if (stack().length) {
+      if (nested()) {
         setStack(stack().slice(0, -1));
         setQuery("");
       } else close();
-    } else if (event.key === "Backspace" && !query() && stack().length) {
+    } else if (event.key === "Backspace" && !query() && nested()) {
       setStack(stack().slice(0, -1));
     }
   }
@@ -544,7 +559,7 @@ export default function CommandPalette(props: { page?: string }) {
           <span>
             <CornerDownLeft size={11} /> {page()?.kind === "input" ? "Create" : "Run"}
           </span>
-          <span>esc {stack().length ? "Back" : "Close"}</span>
+          <span>esc {nested() ? "Back" : "Close"}</span>
         </div>
       </div>
     </div>

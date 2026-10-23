@@ -53,7 +53,7 @@ function DialogView(props: { dialog: Dialog }) {
             </div>
           )}
         </For>
-        <div class="dialog-buttons" classList={{ stacked: d.buttons.length > 3 }}>
+        <div class="dialog-buttons" classList={{ stacked: d.buttons.length > 2 }}>
           <For each={d.buttons}>
             {(button) => (
               <button
