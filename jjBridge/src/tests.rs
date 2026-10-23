@@ -40,6 +40,20 @@ fn strs(value: &Value) -> Vec<String> {
 /// Sends `share` from `from` (at `from_path`) to `to` (at `to_path`) the way the sync engine will.
 fn send(from: &mut Repo, from_path: &str, to: &mut Repo, to_path: &str, label: &str) -> (Value, Value) {
     let manifest = from.export_node("share", from_path).unwrap();
+    let merged = deliver(from, from_path, &manifest, to, to_path, label, &[]).unwrap();
+    (manifest, merged)
+}
+
+/// Hands an exported `manifest` over to `to` and merges it there, keeping `keep` as it is.
+fn deliver(
+    from: &Repo,
+    from_path: &str,
+    manifest: &Value,
+    to: &mut Repo,
+    to_path: &str,
+    label: &str,
+    keep: &[String],
+) -> anyhow::Result<Value> {
     let wire = tempfile::tempdir().unwrap();
     let missing = to.missing_objects(&manifest.to_string()).unwrap();
     from.write_objects(&missing.to_string(), wire.path().to_str().unwrap()).unwrap();
@@ -52,10 +66,86 @@ fn send(from: &mut Repo, from_path: &str, to: &mut Repo, to_path: &str, label: &
     }
     let imported = to.import_node("share", &manifest.to_string(), wire.path().to_str().unwrap(), label).unwrap();
     assert_eq!(imported["node"], manifest["node"]);
-    let merged = to
-        .merge_node("share", to_path, manifest["node"].as_str().unwrap(), lfs.path().to_str().unwrap())
-        .unwrap();
-    (manifest, merged)
+    to.merge_node("share", to_path, manifest["node"].as_str().unwrap(), lfs.path().to_str().unwrap(), keep)
+}
+
+/// Two repos syncing `S` (on a) as `Joined` (on b), in sync.
+fn synced_pair(text: &str) -> (tempfile::TempDir, Repo, tempfile::TempDir, Repo) {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, mut b) = (open(da.path()), open(db.path()));
+    write(&a, "S/main.typ", text);
+    write(&a, "S/other.typ", "other\n");
+    send(&mut a, "S", &mut b, "Joined", "A");
+    (da, a, db, b)
+}
+
+#[test]
+fn a_peer_takes_the_resolution_of_a_conflict_it_has_too() {
+    let (_da, mut a, _db, mut b) = synced_pair("1\n2\n3\n");
+    write(&a, "S/main.typ", "1\n2 (a)\n3\n");
+    write(&b, "Joined/main.typ", "1\n2 (b)\n3\n");
+    let a_node = a.export_node("share", "S").unwrap();
+    let b_node = b.export_node("share", "Joined").unwrap();
+    // Both devices merge the other's node and both end up conflicted.
+    let at_b = deliver(&a, "S", &a_node, &mut b, "Joined", "A", &[]).unwrap();
+    let at_a = deliver(&b, "Joined", &b_node, &mut a, "S", "B", &[]).unwrap();
+    assert!(at_b["node"].is_null() && at_a["node"].is_null());
+    assert_eq!(a.conflicts("").unwrap(), ["S/main.typ"]);
+    // Another unrelated node can't merge while the conflict waits.
+    write(&b, "Mine/x.typ", "x\n");
+    // b resolves; a takes b's resolution instead of asking its user again.
+    b.resolve("Joined/main.typ", Some("1\n2 (both)\n3\n"), 0).unwrap();
+    let resolved = b.export_node("share", "Joined").unwrap();
+    let taken = deliver(&b, "Joined", &resolved, &mut a, "S", "B", &[]).unwrap();
+    assert_eq!(taken["node"], resolved["node"]);
+    assert!(a.conflicts("").unwrap().is_empty());
+    assert_eq!(read(&a, "S/main.typ"), "1\n2 (both)\n3\n");
+    let again = a.export_node("share", "S").unwrap();
+    assert_eq!(again["unchanged"], true);
+    assert_eq!(again["node"], resolved["node"]);
+}
+
+#[test]
+fn a_conflicted_share_refuses_nodes_that_dont_resolve_it() {
+    let (_da, mut a, _db, mut b) = synced_pair("1\n2\n3\n");
+    write(&a, "S/main.typ", "1\n2 (a)\n3\n");
+    write(&b, "Joined/main.typ", "1\n2 (b)\n3\n");
+    let a_node = a.export_node("share", "S").unwrap();
+    deliver(&a, "S", &a_node, &mut b, "Joined", "A", &[]).unwrap();
+    write(&a, "S/other.typ", "other, edited\n");
+    let next = a.export_node("share", "S").unwrap();
+    assert!(deliver(&a, "S", &next, &mut b, "Joined", "A", &[]).is_err());
+    assert_eq!(b.conflicts("").unwrap(), ["Joined/main.typ"]);
+}
+
+#[test]
+fn live_files_keep_their_local_content() {
+    let (_da, mut a, _db, mut b) = synced_pair("1\n2\n3\n");
+    // The live session already gave b a newer version than a's last commit.
+    write(&a, "S/main.typ", "1\n2 typing\n3\n");
+    write(&a, "S/other.typ", "other (a)\n");
+    write(&b, "Joined/main.typ", "1\n2 typing more\n3\n");
+    let a_node = a.export_node("share", "S").unwrap();
+    let keep = vec!["Joined/main.typ".to_owned()];
+    let merged = deliver(&a, "S", &a_node, &mut b, "Joined", "A", &keep).unwrap();
+    assert!(merged["node"].is_string(), "{merged}");
+    assert!(strs(&merged["conflicts"]).is_empty());
+    assert!(!strs(&merged["changed"]).contains(&"Joined/main.typ".to_owned()));
+    assert_eq!(read(&b, "Joined/main.typ"), "1\n2 typing more\n3\n");
+    assert_eq!(read(&b, "Joined/other.typ"), "other (a)\n");
+    // The conflict resolved to b's side, so the merge node already holds b's live content.
+    let next = b.export_node("share", "Joined").unwrap();
+    assert_eq!(next["node"], merged["node"]);
+    assert_eq!(next["unchanged"], true);
+    // Later nodes leave a kept file alone too.
+    write(&a, "S/main.typ", "1\n2 typing more\n3 (a)\n");
+    let ff = a.export_node("share", "S").unwrap();
+    let at_b = deliver(&a, "S", &ff, &mut b, "Joined", "A", &keep).unwrap();
+    assert!(strs(&at_b["conflicts"]).is_empty());
+    assert_eq!(read(&b, "Joined/main.typ"), "1\n2 typing more\n3\n");
+    let next = b.export_node("share", "Joined").unwrap();
+    assert!(!next["files"]["main.typ"]["oid"].is_null());
+    assert_eq!(read(&b, "Joined/main.typ"), "1\n2 typing more\n3\n");
 }
 
 #[test]

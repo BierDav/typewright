@@ -191,8 +191,21 @@ pub unsafe extern "C" fn twj_merge_node(
     node: *const c_char,
     lfs_dir: *const c_char,
 ) -> *mut c_char {
+    unsafe { twj_merge_node_keeping(repo, share, path, node, lfs_dir, std::ptr::null()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn twj_merge_node_keeping(
+    repo: *mut TWJRepo,
+    share: *const c_char,
+    path: *const c_char,
+    node: *const c_char,
+    lfs_dir: *const c_char,
+    keep: *const c_char,
+) -> *mut c_char {
     guard_repo(repo, |r| {
-        r.merge_node(unsafe { text(share) }?, unsafe { text(path) }?, unsafe { text(node) }?, unsafe { text(lfs_dir) }?)
+        let keep: Vec<String> = if keep.is_null() { Vec::new() } else { serde_json::from_str(unsafe { text(keep) }?)? };
+        r.merge_node(unsafe { text(share) }?, unsafe { text(path) }?, unsafe { text(node) }?, unsafe { text(lfs_dir) }?, &keep)
     })
 }
 

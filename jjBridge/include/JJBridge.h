@@ -116,7 +116,14 @@ char *_Nonnull twj_import_node(TWJRepo *_Nonnull repo, const char *_Nonnull shar
 /// same two nodes get the same id. `{"node": merged node id | null if conflicted, "changed": [..], "conflicts": [..]}`;
 /// with conflicts the merged content stays a jj conflict in the working copy until `twj_resolve`, after which
 /// `twj_export_node` publishes it with both parents. Fails while `path` already has unresolved conflicts.
+/// A share waiting on conflicts takes a node descending from both sides of its pending merge (a peer's resolution)
+/// in place of its conflicted content; other nodes fail until the conflict is resolved here.
 char *_Nonnull twj_merge_node(TWJRepo *_Nonnull repo, const char *_Nonnull share, const char *_Nonnull path,
                               const char *_Nonnull node, const char *_Nonnull lfs_dir);
+/// `twj_merge_node` keeping the working-copy content of `keep` (JSON array of repo paths, files edited live with the
+/// peer whose edits arrive through the CRDT): they're never rewritten, and conflicts there resolve to the local side.
+char *_Nonnull twj_merge_node_keeping(TWJRepo *_Nonnull repo, const char *_Nonnull share, const char *_Nonnull path,
+                                      const char *_Nonnull node, const char *_Nonnull lfs_dir,
+                                      const char *_Nullable keep);
 
 void twj_string_free(char *_Nullable string);

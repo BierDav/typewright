@@ -16,7 +16,7 @@ use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
-use jj_lib::repo_path::RepoPath;
+use jj_lib::repo_path::{RepoPath, RepoPathBuf};
 use pollster::FutureExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -469,6 +469,12 @@ impl Repo {
             }
             _ => bail!("{path} is not a {}", if kind == ShareKind::File { "file" } else { "folder" }),
         };
+        let lfs = self.local_lfs(kind, path)?;
+        Ok(Local { kind, tree: text_tree, lfs })
+    }
+
+    /// The share's LFS files on disk by path inside the share.
+    fn local_lfs(&mut self, kind: ShareKind, path: &str) -> Result<BTreeMap<String, (LfsFile, String, String)>> {
         let keys: Vec<(String, String)> = self
             .state
             .lfs
@@ -485,7 +491,7 @@ impl Repo {
                 lfs.insert(rel, (stat, hash, mode));
             }
         }
-        Ok(Local { kind, tree: text_tree, lfs })
+        Ok(lfs)
     }
 
     fn write_node(&self, odb: &Odb, tree: ObjectId, mut parents: Vec<ObjectId>, lfs: &BTreeMap<String, LfsEntry>) -> Result<ObjectId> {
@@ -719,10 +725,37 @@ impl Repo {
         })
     }
 
-    pub fn merge_node(&mut self, share: &str, path: &str, node: &str, lfs_dir: &str) -> Result<Value> {
+    /// `keep`: repo paths whose working-copy content stays (files edited live with the peer, whose edits arrive
+    /// through the CRDT instead); conflicts there resolve to the local side.
+    pub fn merge_node(&mut self, share: &str, path: &str, node: &str, lfs_dir: &str, keep: &[String]) -> Result<Value> {
         self.commit("Edit")?;
         let odb = self.odb()?;
         let remote = odb.node(oid(node)?).with_context(|| format!("node {node} isn't imported"))?;
+        let keep: Vec<RepoPathBuf> = keep.iter().map(|k| repo_path(k)).collect::<Result<_>>()?;
+        let state = self.share_state(share);
+        if !state.pending.is_empty() {
+            // A peer resolved the conflict this share is waiting on: take its resolution.
+            let ancestors: HashSet<ObjectId> = odb.ancestors(&[remote.id], usize::MAX).into_iter().collect();
+            let pending: Vec<ObjectId> = state.pending.iter().map(|p| oid(p)).collect::<Result<_>>()?;
+            if !pending.iter().all(|p| ancestors.contains(p)) {
+                bail!("{path} has unresolved conflicts");
+            }
+            let kind = state.kind.unwrap_or(ShareKind::Folder);
+            let old_lfs: BTreeMap<String, LfsEntry> = self
+                .local_lfs(kind, path)?
+                .into_iter()
+                .map(|(rel, (stat, blake3, mode))| (rel, LfsEntry { mode, size: stat.size, blake3, time: 0 }))
+                .collect();
+            let repo = self.head()?;
+            let wc_tree = self.wc_commit(&repo)?.tree();
+            let value = self.node_value(&odb, kind, remote.tree)?;
+            let lfs_dir = PathBuf::from(lfs_dir);
+            let (tree, changed) =
+                self.apply(path, kind, &wc_tree, Merge::resolved(value), None, &old_lfs, &remote.lfs, &lfs_dir, &keep)?;
+            self.commit_tree(tree, &format!("Sync {share}"))?;
+            self.set_head(&odb, share, kind, remote.id)?;
+            return Ok(json!({"node": remote.id.to_string(), "changed": changed, "conflicts": []}));
+        }
         let remote_entries = odb.tree(remote.tree)?;
         let hint = (remote_entries.len() == 1 && remote_entries[0].name == FILE_ENTRY.as_bytes()
             || remote.lfs.len() == 1 && remote.lfs.contains_key(FILE_ENTRY))
@@ -752,7 +785,8 @@ impl Repo {
         let old_lfs = local_node.as_ref().map(|a| a.lfs.clone()).unwrap_or_default();
         if fast_forward {
             let value = self.node_value(&odb, kind, remote.tree)?;
-            let (tree, changed) = self.apply(path, kind, &wc_tree, Merge::resolved(value), None, &old_lfs, &remote.lfs, &lfs_dir)?;
+            let (tree, changed) =
+                self.apply(path, kind, &wc_tree, Merge::resolved(value), None, &old_lfs, &remote.lfs, &lfs_dir, &keep)?;
             self.commit_tree(tree, &format!("Sync {share}"))?;
             self.set_head(&odb, share, kind, remote.id)?;
             return Ok(json!({"node": remote.id.to_string(), "changed": changed, "conflicts": []}));
@@ -771,6 +805,7 @@ impl Repo {
             (resolved(remote.tree), remote_label.clone()),
         ]))
         .block_on()?;
+        let merged = self.keep_local(merged, kind, path, &a, &keep)?;
         let value: MergedTreeValue = match kind {
             ShareKind::Folder => merged.tree_ids().map(|id| (id != store.empty_tree_id()).then(|| TreeValue::Tree(id.clone()))),
             ShareKind::File => merged.path_value(RepoPath::from_internal_string(FILE_ENTRY).unwrap()).block_on()?,
@@ -782,7 +817,7 @@ impl Repo {
         let empty_lfs = BTreeMap::new();
         let new_lfs = merge_lfs(base.as_ref().map_or(&empty_lfs, |b| &b.lfs), &a.lfs, &remote.lfs, &text_paths);
         let labels = merged.labels().clone();
-        let (tree, changed) = self.apply(path, kind, &wc_tree, value, Some(labels), &old_lfs, &new_lfs, &lfs_dir)?;
+        let (tree, changed) = self.apply(path, kind, &wc_tree, value, Some(labels), &old_lfs, &new_lfs, &lfs_dir, &keep)?;
         let conflicts: Vec<String> = tree
             .conflicts_matching(&PrefixMatcher::new([&rpath]))
             .map(|(p, _)| p.as_internal_file_string().to_owned())
@@ -803,6 +838,33 @@ impl Repo {
         }
     }
 
+    /// Resolves conflicts at kept paths to the local side `a`, so live-edited files never block a merge.
+    fn keep_local(&self, merged: MergedTree, kind: ShareKind, path: &str, a: &Node, keep: &[RepoPathBuf]) -> Result<MergedTree> {
+        let store = merged.store().clone();
+        let local = MergedTree::resolved(store, tree_id(&a.tree));
+        let mut builder = MergedTreeBuilder::new(merged.clone());
+        let mut touched = false;
+        for k in keep {
+            let key = k.as_internal_file_string();
+            let rel = match kind {
+                ShareKind::Folder => key.strip_prefix(&format!("{path}/")).map(str::to_owned),
+                ShareKind::File => (key == path).then(|| FILE_ENTRY.to_owned()),
+            };
+            let Some(rel) = rel else { continue };
+            let rel = repo_path(&rel)?;
+            if !merged.path_value(&rel).block_on()?.is_resolved() {
+                builder.set_or_remove(rel.clone(), local.path_value(&rel).block_on()?);
+                touched = true;
+            }
+        }
+        if !touched {
+            return Ok(merged);
+        }
+        let labels = merged.labels().clone();
+        let tree = builder.write_tree().block_on()?;
+        Ok(if tree.tree_ids().is_resolved() { tree } else { MergedTree::new(merged.store().clone(), tree.tree_ids().clone(), labels) })
+    }
+
     /// Puts `value` at the share's path and the LFS files on disk (atomic writes); returns the new working-copy tree.
     #[allow(clippy::too_many_arguments)]
     fn apply(
@@ -815,12 +877,21 @@ impl Repo {
         old_lfs: &BTreeMap<String, LfsEntry>,
         new_lfs: &BTreeMap<String, LfsEntry>,
         lfs_dir: &Path,
+        keep: &[RepoPathBuf],
     ) -> Result<(MergedTree, Vec<String>)> {
         let store = wc_tree.store().clone();
         let rpath = repo_path(path)?;
         let mut builder = MergedTreeBuilder::new(wc_tree.clone());
         builder.set_or_remove(rpath.clone(), value);
         let mut tree = builder.write_tree().block_on()?;
+        let kept: Vec<&RepoPathBuf> = keep.iter().filter(|k| k.starts_with(&rpath)).collect();
+        if !kept.is_empty() {
+            let mut builder = MergedTreeBuilder::new(tree.clone());
+            for k in kept {
+                builder.set_or_remove(k.clone(), wc_tree.path_value(k).block_on()?);
+            }
+            tree = builder.write_tree().block_on()?;
+        }
         if let Some(labels) = labels
             && !tree.tree_ids().is_resolved()
             && !wc_tree.labels().has_labels()
@@ -858,6 +929,9 @@ impl Repo {
         let rels: BTreeSet<&String> = old_lfs.keys().chain(new_lfs.keys()).collect();
         for rel in rels {
             let key = Self::lfs_key(kind, path, rel);
+            if keep.iter().any(|k| k.as_internal_file_string() == key) {
+                continue;
+            }
             let disk = self.disk_path(&repo_path(&key)?)?;
             match (old_lfs.get(rel), new_lfs.get(rel)) {
                 (old, Some(new)) if old.map(|o| &o.blake3) != Some(&new.blake3) => {
