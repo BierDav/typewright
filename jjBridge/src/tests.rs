@@ -521,6 +521,19 @@ fn delete_commits_and_stashes_lfs_files() {
 }
 
 #[test]
+fn renames_are_not_deletions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut repo = open(dir.path());
+    write(&repo, "S/a.typ", "a\n");
+    write(&repo, "S/dir/b.typ", "b\n");
+    repo.commit("Add").unwrap();
+    fs::rename(repo.root().join("S/a.typ"), repo.root().join("S/c.typ")).unwrap();
+    fs::rename(repo.root().join("S/dir"), repo.root().join("S/moved")).unwrap();
+    repo.commit("Rename").unwrap();
+    assert!(repo.deleted("", 10).unwrap().as_array().unwrap().is_empty());
+}
+
+#[test]
 fn deleting_the_last_file_of_a_folder_lists_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let mut repo = open(dir.path());

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::StreamExt as _;
-use jj_lib::backend::{MergedTreeValue, Timestamp, TreeValue};
+use jj_lib::backend::{FileId, MergedTreeValue, Timestamp, TreeValue};
 use jj_lib::matchers::{EverythingMatcher, Matcher, PrefixMatcher};
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
@@ -31,6 +31,13 @@ struct Stash {
     /// Milliseconds since the epoch.
     time: i64,
     files: Vec<String>,
+}
+
+fn file_id(value: &MergedTreeValue) -> Option<FileId> {
+    match value.as_resolved() {
+        Some(Some(TreeValue::File { id, .. })) => Some(id.clone()),
+        _ => None,
+    }
 }
 
 fn is_tree(value: &MergedTreeValue) -> bool { matches!(value.as_resolved(), Some(Some(TreeValue::Tree(_)))) }
@@ -166,16 +173,26 @@ impl Repo {
             let Some(parent_id) = commit.parent_ids().first() else { continue };
             let before = commit.parent_tree(repo.as_ref()).block_on()?;
             let after = commit.tree();
-            // Removed files, grouped under the topmost folder that disappeared with them.
-            let mut groups: BTreeMap<RepoPathBuf, (bool, usize)> = BTreeMap::new();
+            // Removed files, minus renames (the same content added elsewhere in the commit).
+            let mut removed: Vec<(RepoPathBuf, Option<FileId>)> = Vec::new();
+            let mut added: HashSet<FileId> = HashSet::new();
             let mut stream = before.diff_stream(&after, matcher.as_ref());
             while let Some(entry) = stream.next().block_on() {
                 let values = entry.values?;
-                if is_absent(&values.before) || !is_absent(&values.after) {
+                if is_absent(&values.before) && !is_absent(&values.after) {
+                    added.extend(file_id(&values.after));
+                } else if !is_absent(&values.before) && is_absent(&values.after) {
+                    removed.push((entry.path, file_id(&values.before)));
+                }
+            }
+            // Grouped under the topmost folder that disappeared with them.
+            let mut groups: BTreeMap<RepoPathBuf, (bool, usize)> = BTreeMap::new();
+            for (path, id) in removed {
+                if id.is_some_and(|id| added.contains(&id)) {
                     continue;
                 }
-                let mut key = (entry.path.clone(), false);
-                for dir in entry.path.ancestors().skip(1) {
+                let mut key = (path.clone(), false);
+                for dir in path.ancestors().skip(1) {
                     if dir.is_root() || !in_prefix(dir.as_internal_file_string(), prefix) {
                         break;
                     }
@@ -212,9 +229,10 @@ impl Repo {
         for entry in &mut found {
             let path = entry["path"].as_str().unwrap_or_default().to_owned();
             let time = (entry["time"].as_f64().unwrap_or(0.0) * 1000.0) as i64;
-            if let Some((id, _)) = stashes.iter().find(|(id, s)| !used.contains(id) && s.path == path && s.time <= time + 1000) {
+            if let Some((id, stash)) = stashes.iter().find(|(id, s)| !used.contains(id) && s.path == path && s.time <= time + 1000) {
                 used.insert(id.clone());
                 entry["stash"] = json!(id);
+                entry["files"] = json!(entry["files"].as_u64().unwrap_or(0) + stash.files.len() as u64);
             }
         }
         for (id, stash) in &stashes {
