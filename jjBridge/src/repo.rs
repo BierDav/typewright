@@ -70,6 +70,7 @@ pub struct Repo {
     pub(crate) clock: Option<Timestamp>,
     /// The local UTC offset in minutes, for hosts without a time zone database (WASI reports UTC).
     pub(crate) utc_offset: Option<i32>,
+    pub(crate) watched_commit: Option<Commit>,
 }
 
 pub struct Committed {
@@ -181,10 +182,12 @@ impl Repo {
             recovered_from,
             clock: None,
             utc_offset: None,
+            watched_commit: None,
         };
         repo.save_state()?;
         repo.write_excludes()?;
-        repo.prepare()?;
+        let head = repo.prepare()?;
+        repo.watched_commit = Some(repo.wc_commit(&head)?);
         Ok(repo)
     }
 

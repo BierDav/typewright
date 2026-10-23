@@ -41,6 +41,9 @@ void twj_set_utc_offset(TWJRepo *_Nonnull repo, int32_t minutes);
 /// past it; they're listed in `.jj/typewright/state.json`, not in the user's folders.
 char *_Nonnull twj_commit(TWJRepo *_Nonnull repo, const char *_Nonnull message);
 
+/// Snapshots @ for immediate UI updates without ending the autosave change: {"changed": [path, …], "renamed": [{"from", "to"}, …]}.
+char *_Nonnull twj_working_copy_changes(TWJRepo *_Nonnull repo);
+
 /// Thins out @'s first-parent history like a backup prune. `policy` is JSON
 /// `{"last": 100, "hourly": 48, "daily": 14, "weekly": 8, "monthly": 12, "yearly": -1}` (missing keys take these
 /// defaults, `null` or negative = unlimited, 0 = rule off): the newest `last` commits stay, then the newest commit of

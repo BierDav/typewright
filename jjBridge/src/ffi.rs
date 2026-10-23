@@ -90,6 +90,11 @@ pub unsafe extern "C" fn twj_commit(repo: *mut TWJRepo, message: *const c_char) 
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn twj_working_copy_changes(repo: *mut TWJRepo) -> *mut c_char {
+    guard_repo(repo, Repo::working_copy_changes)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_squash(repo: *mut TWJRepo, policy: *const c_char) -> *mut c_char {
     guard_repo(repo, |r| {
         let policy = crate::retention::Policy::parse(unsafe { text(policy) }?)?;

@@ -336,7 +336,14 @@ final class Opener {
     /// "New Space" from the menu and palette: makes one and shows it.
     func newSpace(in state: WindowState?, named name: String = "Untitled Space") {
         guard let url = newSpace(named: name) else { return }
-        if let state { open(url, in: state) } else { open(url) }
+        if let state = state ?? keyState {
+            state.renameNewSpace = true
+            state.sidebarVisible = true
+            open(url, in: state)
+        } else {
+            let controller = MainWindowController(space: url, renameNewSpace: true)
+            show(controller)
+        }
     }
 
     /// Copies a folder into the repository, asking what becomes of the original. Returns the new space.
@@ -488,12 +495,24 @@ final class Opener {
     }
 
     /// Points windows, saved state and sync at a space's new folder.
-    private func relocate(_ windows: [MainWindowController], from old: URL, to target: URL) {
+    func spaceMovedExternally(from old: URL, to target: URL) {
+        SpaceLinks.shared.moved(from: old, to: target)
+        relocate(windows(showing: old), from: old, to: target, external: true)
+        SpaceList.replace(old, with: target)
+    }
+
+    private func relocate(_ windows: [MainWindowController], from old: URL, to target: URL, external: Bool = false) {
+        if external {
+            for window in windows {
+                window.state.pendingSession = window.state.workspace?.sessionAfterMoving(to: target)
+            }
+        }
         // Persist under the old key first so the saved state moves along.
         windows.forEach { $0.state.workspace?.close() }
         SpaceStore.move(from: old, to: target)
         SpaceRepository.shared.noteMoved(from: old, to: target)
         for window in windows {
+            window.state.relocatingSpace = true
             // A window opened on a file inside the space keeps that file.
             let space = window.state.space?.standardizedFileURL
             let base = window.state.workspace?.root.path ?? old.path

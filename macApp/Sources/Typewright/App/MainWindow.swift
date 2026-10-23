@@ -29,6 +29,8 @@ final class WindowState {
     /// A file to select once the window opened its space, keeping its saved caret.
     var pendingFile: URL?
     var pendingSession: WorkspaceSession?
+    var renameNewSpace = false
+    var relocatingSpace = false
     var sidebarVisible = true {
         didSet { if sidebarVisible { floatingSidebar = false } }
     }
@@ -114,8 +116,9 @@ final class WindowState {
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let state: WindowState
 
-    init(space: URL?, copying source: WindowState? = nil) {
+    init(space: URL?, copying source: WindowState? = nil, renameNewSpace: Bool = false) {
         state = WindowState(space: space, copying: source)
+        state.renameNewSpace = renameNewSpace
         let host = NSHostingController(rootView: MainWindow(state: state))
         host.sceneBridgingOptions = .all
         let window = NSWindow(contentViewController: host)
@@ -195,13 +198,22 @@ struct MainWindow: View {
             if let next, let file = state.pendingFile, file.path.hasPrefix(next.root.path + "/") { next.select(file) }
             state.pendingFile = nil
             next?.fileOps.undoManager = state.undoManager
+            next?.renamingSpace = state.renameNewSpace
+            state.renameNewSpace = false
             // File changes undo within their space only.
             if let previous { state.undoManager.removeAllActions(withTarget: previous.fileOps) }
             state.workspace = next
             // The selector slides away while the new space zooms in behind it.
-            withAnimation(WindowState.spacesAnimation) {
-                workspace = next
-                state.spacesOpen = false
+            if state.relocatingSpace {
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { workspace = next }
+                state.relocatingSpace = false
+            } else {
+                withAnimation(WindowState.spacesAnimation) {
+                    workspace = next
+                    state.spacesOpen = false
+                }
             }
             previous?.close()
             Opener.shared.saveSession()

@@ -50,4 +50,66 @@ final class PreviewStateTests: XCTestCase {
         ws.setPreview(b)
         XCTAssertEqual(ws.renderMode, .pdf)
     }
+    func testPreviewCyclesFollowingPinningAndHiding() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("tw-preview-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("main.typ"), b = root.appendingPathComponent("other.typ")
+        try "= A".write(to: a, atomically: true, encoding: .utf8)
+        try "= B".write(to: b, atomically: true, encoding: .utf8)
+        let ws = Workspace(url: root)
+        defer { ws.close() }
+
+        XCTAssertEqual(ws.previewMode, .following)
+        ws.select(b)
+        XCTAssertEqual(ws.previewFile, b)
+        ws.togglePreviewVisibility()
+        XCTAssertEqual(ws.previewMode, .pinned)
+        ws.select(a)
+        XCTAssertEqual(ws.previewFile, b)
+        ws.previewSelectedFile(ifEnabled: true)
+        XCTAssertEqual(ws.previewFile, a)
+        XCTAssertEqual(ws.previewMode, .pinned)
+        ws.togglePreviewVisibility()
+        XCTAssertEqual(ws.previewMode, .hidden)
+        XCTAssertNil(ws.previewFile)
+        ws.previewSelectedFile(ifEnabled: true)
+        XCTAssertNil(ws.previewFile)
+        ws.togglePreviewVisibility()
+        XCTAssertEqual(ws.previewMode, .following)
+        XCTAssertEqual(ws.previewFile, a)
+
+        let session = ws.session()
+        let fork = Workspace(url: root, session: session)
+        defer { fork.close() }
+        XCTAssertEqual(fork.previewMode, .following)
+        fork.select(b)
+        XCTAssertEqual(fork.previewFile, b)
+        ws.setPreview(nil)
+        ws.previewSelectedFile()
+        XCTAssertEqual(ws.previewFile, a)
+        XCTAssertEqual(ws.previewMode, .following)
+    }
+
+    func testFollowingPreviewAcrossUnsupportedFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("tw-preview-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let main = root.appendingPathComponent("main.typ"), text = root.appendingPathComponent("notes.txt")
+        try "= Main".write(to: main, atomically: true, encoding: .utf8)
+        try "Notes".write(to: text, atomically: true, encoding: .utf8)
+        let ws = Workspace(url: root)
+        defer { ws.close() }
+        ws.select(text)
+        XCTAssertNil(ws.previewFile)
+        XCTAssertEqual(ws.previewMode, .following)
+        ws.select(main)
+        XCTAssertEqual(ws.previewFile, main)
+        ws.select(text)
+        ws.togglePreviewVisibility()
+        XCTAssertEqual(ws.previewMode, .hidden)
+        ws.select(main)
+        XCTAssertNil(ws.previewFile)
+    }
+
 }

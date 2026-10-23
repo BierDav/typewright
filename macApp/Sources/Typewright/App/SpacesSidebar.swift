@@ -744,7 +744,7 @@ private struct ZenRowPressStyle: ButtonStyle {
 }
 
 /// Drives the selector with horizontal two-finger swipes: right reveals it, left returns to the space.
-private struct SpaceSwipe: NSViewRepresentable {
+struct SpaceSwipe: NSViewRepresentable {
     let state: WindowState
     let width: CGFloat
 
@@ -769,6 +769,7 @@ private struct SpaceSwipe: NSViewRepresentable {
         private var distance = CGSize.zero
         private var lastDelta: CGFloat = 0
         private var swallowMomentum = false
+        private var horizontal = false
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -778,11 +779,12 @@ private struct SpaceSwipe: NSViewRepresentable {
             monitor = nil
             guard window != nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                self?.handle(event) ?? event
+                guard let self else { return event }
+                return self.handle(event)
             }
         }
 
-        private func handle(_ event: NSEvent) -> NSEvent? {
+        func handle(_ event: NSEvent) -> NSEvent? {
             guard let state, event.window === window, event.hasPreciseScrollingDeltas, state.space != nil,
                   state.overlay == nil || tracking == true else { return event }
             // The flick's momentum would otherwise scroll whatever is under the pointer.
@@ -799,20 +801,21 @@ private struct SpaceSwipe: NSViewRepresentable {
                 let inside = bounds.contains(convert(event.locationInWindow, from: nil))
                 tracking = inside || state.spacesOpen ? nil : false
                 start = state.spacesProgress
-                distance = .zero
+                distance = CGSize(width: dx, height: event.scrollingDeltaY)
                 lastDelta = 0
                 swallowMomentum = false
-                return event
+                horizontal = tracking == nil && abs(distance.width) > abs(distance.height) * 1.5
+                return horizontal ? nil : event
             case .changed:
-                guard tracking != false else { return event }
+                guard tracking != false else { return horizontal ? nil : event }
                 distance.width += dx
                 distance.height += event.scrollingDeltaY
                 if tracking == nil {
-                    guard abs(distance.width) + abs(distance.height) > 6 else { return event }
+                    horizontal = abs(distance.width) > abs(distance.height) * 1.5
+                    guard abs(distance.width) + abs(distance.height) > 6 else { return horizontal ? nil : event }
                     let opening = distance.width > 0
-                    let horizontal = abs(distance.width) > abs(distance.height) * 1.5
                     tracking = horizontal && opening != state.spacesOpen
-                    guard tracking == true else { return event }
+                    guard tracking == true else { return horizontal ? nil : event }
                     state.selectorMounted = true
                 }
                 if dx != 0 { lastDelta = dx }
@@ -821,9 +824,12 @@ private struct SpaceSwipe: NSViewRepresentable {
             case .ended, .cancelled:
                 guard tracking == true else {
                     tracking = nil
-                    return event
+                    swallowMomentum = horizontal
+                    horizontal = false
+                    return swallowMomentum ? nil : event
                 }
                 tracking = nil
+                horizontal = false
                 swallowMomentum = true
                 let progress = state.swipe ?? start
                 // A flick decides on its own; otherwise the halfway point does.

@@ -47,10 +47,31 @@ struct DocumentPosition: Codable, Equatable {
     }
 }
 
+enum PreviewMode: String, Codable {
+    case hidden, following, pinned
+
+    var nextTitle: String {
+        switch self {
+        case .hidden: "Show Preview"
+        case .following: "Pin Preview"
+        case .pinned: "Hide Preview"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .hidden: "eye"
+        case .following: "eye.fill"
+        case .pinned: "pin.fill"
+        }
+    }
+}
+
 /// UI state of one space; file keys are paths relative to the space folder.
 struct SpaceState: Codable {
     var selected: String?
     var preview: String?
+    var previewMode: PreviewMode?
     /// The file the preview last showed, kept while the preview is hidden.
     var lastPreview: String?
     var split = 0.5
@@ -66,6 +87,7 @@ struct SpaceState: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         selected = try c.decodeIfPresent(String.self, forKey: .selected)
         preview = try c.decodeIfPresent(String.self, forKey: .preview)
+        previewMode = try c.decodeIfPresent(PreviewMode.self, forKey: .previewMode)
         lastPreview = try c.decodeIfPresent(String.self, forKey: .lastPreview)
         split = try c.decodeIfPresent(Double.self, forKey: .split) ?? 0.5
         editors = try c.decodeIfPresent([String: EditorState].self, forKey: .editors) ?? [:]
@@ -78,6 +100,7 @@ struct SpaceState: Codable {
 struct WorkspaceSession {
     var state: SpaceState
     var buffers: [URL: String]
+    var dirty: Set<URL> = []
 }
 
 /// Keeps every space's UI state in Application Support so it survives relaunches.

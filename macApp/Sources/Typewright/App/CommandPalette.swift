@@ -409,6 +409,22 @@ struct CommandPalette: View {
         items = Self.emphasizingNames(items, names: [workspace?.selectedFile?.lastPathComponent,
                                                      workspace?.selectedFile?.deletingLastPathComponent().lastPathComponent,
                                                      workspace?.name] + spaces.map(\.lastPathComponent))
+        let editor = inOverview ? nil : workspace?.find.textView
+        let editorUndo = editor?.undoManager
+        let undoInEditor = editor?.isRenaming == true || editorUndo?.canUndo == true
+        let undo = undoInEditor ? editorUndo : state.undoManager
+        items.append(PaletteItem(id: "edit.undo", title: undo?.undoMenuItemTitle ?? "Undo", icon: "arrow.uturn.backward",
+                                 shortcut: "⌘Z", section: "Edit", keywords: ["undo"],
+                                 action: .run {
+                                     if undoInEditor { editor?.undo(nil) } else { undo?.undo() }
+                                 }))
+        let redoInEditor = editor?.isRenaming == true || editorUndo?.canRedo == true
+        let redo = redoInEditor ? editorUndo : state.undoManager
+        items.append(PaletteItem(id: "edit.redo", title: redo?.redoMenuItemTitle ?? "Redo", icon: "arrow.uturn.forward",
+                                 shortcut: "⇧⌘Z", section: "Edit", keywords: ["redo"],
+                                 action: .run {
+                                     if redoInEditor { editor?.redo(nil) } else { redo?.redo() }
+                                 }))
         items += fontItems
         items += settingsItems
         items += [
@@ -462,8 +478,8 @@ struct CommandPalette: View {
             }
             if Workspace.isPreviewable(file) {
                 let previewed = ws.previewFile == file
-                items.append(PaletteItem(id: "preview", title: previewed ? "Hide Preview" : "Preview \(name)",
-                                         icon: previewed ? "eye.slash" : "eye",
+                items.append(PaletteItem(id: "preview", title: previewed ? ws.previewMode.nextTitle : "Preview \(name)",
+                                         icon: previewed ? ws.previewMode.icon : "eye",
                                          shortcut: previewed ? nil : keys.previewCurrentFile.display,
                                          section: "File", action: .run { ws.togglePreview(file) }))
             }
@@ -509,10 +525,18 @@ struct CommandPalette: View {
         }
         items.append(PaletteItem(id: "space.search", title: "Find in \(ws.name)", icon: "text.magnifyingglass", shortcut: keys.findInSpace.display,
                                  section: "Space", action: .run { DispatchQueue.main.async { state.overlay = .search(allSpaces: false) } }))
-        items.append(PaletteItem(id: "preview.toggle", title: ws.previewFile == nil ? "Show Preview" : "Hide Preview",
-                                 icon: ws.previewFile == nil ? "eye" : "eye.slash", shortcut: keys.togglePreview.display,
+        items.append(PaletteItem(id: "preview.toggle", title: ws.previewMode.nextTitle,
+                                 icon: ws.previewMode.icon, shortcut: keys.togglePreview.display,
                                  section: "Space", keywords: ["preview pane", "toggle preview"],
                                  action: .run { ws.togglePreviewVisibility() }))
+        if ws.previewMode == .hidden, let file = ws.selectedFile, Workspace.isPreviewable(file) {
+            items.append(PaletteItem(id: "preview.pin", title: "Pin Preview to \(file.lastPathComponent)", icon: "pin", section: "Space",
+                                     keywords: ["pin preview", "show preview"], action: .run { ws.setPreview(file) }))
+        }
+        if ws.previewMode == .following {
+            items.append(PaletteItem(id: "preview.hide", title: "Hide Preview", icon: "eye.slash", section: "Space",
+                                     keywords: ["close preview", "hide preview"], action: .run { ws.setPreview(nil) }))
+        }
         for mode in RenderMode.allCases where mode != ws.renderMode {
             items.append(PaletteItem(id: "render.\(mode.rawValue)", title: "Render Preview as \(mode.rawValue.uppercased())",
                                      icon: "doc.richtext", section: "Space", action: .run { ws.renderMode = mode }))
@@ -527,6 +551,9 @@ struct CommandPalette: View {
         items.append(PaletteItem(id: "space.finder", title: "Reveal \(ws.name) in Finder", icon: "folder", section: "Space",
                                  action: .run { NSWorkspace.shared.activateFileViewerSelecting([ws.root]) }))
         if SpaceList.isInRepository(ws.root) {
+            items.append(PaletteItem(id: "space.delete", title: "Delete Space “\(ws.name)”…", icon: "trash", section: "Space",
+                                     keywords: ["delete space", "remove space"],
+                                     action: .run { DispatchQueue.main.async { Opener.shared.deleteSpace(ws.root, in: state) } }))
             // The save panel waits until the palette is gone.
             items.append(PaletteItem(id: "space.link", title: "Link \(ws.name) to…", icon: "link", section: "Space",
                                      keywords: ["symlink", "alias", "shortcut"],

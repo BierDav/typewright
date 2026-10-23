@@ -216,6 +216,16 @@ final class SpaceRepository {
         setLFSLimit(bytes: UInt64(max(megabytes, 0) * 1_048_576))
     }
 
+    struct WorkingCopyChanges: Decodable {
+        struct Rename: Decodable { let from: String; let to: String }
+        let changed: [String]
+        let renamed: [Rename]
+    }
+
+    func workingCopyChanges() async -> WorkingCopyChanges? {
+        await call { twj_working_copy_changes($0) }
+    }
+
     // MARK: - History
 
     /// Commits whatever changed on disk.

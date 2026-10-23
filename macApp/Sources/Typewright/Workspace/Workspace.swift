@@ -37,7 +37,9 @@ final class Workspace: EditorLanguage {
     private(set) var revision = 0
     /// The file compiled for the preview; nil hides the preview.
     private(set) var previewFile: URL?
-    /// The file the preview last showed, brought back when it's shown again.
+    private(set) var previewMode = PreviewMode.hidden
+    var renamingSpace = false
+    /// The last preview target, retained while hidden.
     private(set) var lastPreviewFile: URL?
     var split: Double { didSet { schedulePersist() } }
     /// Folders open in the sidebar; everything else starts collapsed.
@@ -161,12 +163,15 @@ final class Workspace: EditorLanguage {
         expanded = Set(state.expanded.compactMap(resolve))
         let initial = isDir ? resolve(state.selected) ?? defaultMain() : url
         if let initial { select(initial) }
+        dirty = session?.dirty ?? []
         // New spaces start out previewing their main file; known ones keep their choice, even none.
         if saved == nil {
             previewFile = initial?.pathExtension == "typ" ? initial : defaultMain()
         } else {
             previewFile = resolve(state.preview)
         }
+        previewMode = state.previewMode ?? (previewFile == nil ? .hidden : saved == nil ? .following : .pinned)
+        if previewMode == .following { previewFile = selectedFile.flatMap { Self.isPreviewable($0) ? $0 : nil } }
         lastPreviewFile = resolve(state.lastPreview) ?? previewFile
         followPreviewMode()
         if fontFolders != fontDirs { updateFonts() }
@@ -179,6 +184,8 @@ final class Workspace: EditorLanguage {
         }
         startLive()
         Self.open.append(WeakWorkspace(self))
+        LibraryWatcher.shared.observe(root)
+        if !dirty.isEmpty { scheduleAutosave() }
         fontObserver = NotificationCenter.default.addObserver(forName: FontLibrary.didChange, object: nil, queue: .main) {
             [weak self] _ in
             MainActor.assumeIsolated {
@@ -321,6 +328,7 @@ final class Workspace: EditorLanguage {
         solvengContextCache = nil
         selectedFile = url
         selectedKind = kind
+        if previewMode == .following { updatePreview(Self.isPreviewable(url) ? url : nil) }
         if kind.isEditable {
             text = buffers[url] ?? Self.read(url) ?? ""
             buffers[url] = text
@@ -404,26 +412,45 @@ final class Workspace: EditorLanguage {
     }
 
     func togglePreview(_ url: URL) {
-        setPreview(previewFile == url ? nil : url)
+        if previewMode == .hidden || previewFile != url {
+            previewMode = .following
+            updatePreview(url)
+            schedulePersist()
+        } else {
+            togglePreviewVisibility()
+        }
     }
 
-    /// ⌘- hides the preview, and showing it again brings back the file it last showed.
     func togglePreviewVisibility() {
-        guard previewFile == nil else { return setPreview(nil) }
-        let remembered = [lastPreviewFile, selectedFile, defaultMain()]
-            .compactMap { $0 }
-            .first { isInSpace($0) && Self.isPreviewable($0) && FileManager.default.fileExists(atPath: $0.path) }
-        guard let remembered else { return NSSound.beep() }
-        setPreview(remembered)
+        switch previewMode {
+        case .hidden:
+            previewMode = .following
+            updatePreview(selectedFile.flatMap { Self.isPreviewable($0) ? $0 : nil })
+        case .following:
+            previewMode = previewFile == nil ? .hidden : .pinned
+        case .pinned:
+            previewMode = .hidden
+            updatePreview(nil)
+        }
+        schedulePersist()
     }
 
-    /// ⇧⌘- switches the preview to the selected file.
-    func previewSelectedFile() {
-        guard let file = selectedFile, Self.isPreviewable(file) else { return NSSound.beep() }
-        setPreview(file)
+    /// Double-clicks move an existing preview; the explicit command also opens it.
+    func previewSelectedFile(ifEnabled: Bool = false) {
+        guard !ifEnabled || previewMode != .hidden,
+              let file = selectedFile, Self.isPreviewable(file) else { return }
+        if previewMode == .hidden { previewMode = .following }
+        updatePreview(file)
+        schedulePersist()
     }
 
     func setPreview(_ url: URL?) {
+        previewMode = url == nil ? .hidden : .pinned
+        updatePreview(url)
+        schedulePersist()
+    }
+
+    private func updatePreview(_ url: URL?) {
         guard url != previewFile else { return }
         capturePreviewState()
         previewFile = url
@@ -542,6 +569,7 @@ final class Workspace: EditorLanguage {
         var state = SpaceState()
         state.selected = selectedFile.flatMap(relative)
         state.preview = previewFile.flatMap(relative)
+        state.previewMode = previewMode
         state.lastPreview = lastPreviewFile.flatMap(relative)
         state.split = split
         for (url, s) in editorStates { if let key = relative(url) { state.editors[key] = s } }
@@ -551,7 +579,7 @@ final class Workspace: EditorLanguage {
         if let file = previewFile.flatMap(relative), !previewIsMarkdown {
             state.positions[file, default: DocumentPosition()].mode = renderMode
         }
-        return WorkspaceSession(state: state, buffers: buffers)
+        return WorkspaceSession(state: state, buffers: buffers, dirty: dirty)
     }
 
     func persist() {
@@ -562,10 +590,11 @@ final class Workspace: EditorLanguage {
     func refreshFromDisk() {
         reloadTree()
         solvengContextCache = nil
-        for url in buffers.keys where !dirty.contains(url) {
+        let pending = dirty.union(siblings.flatMap { $0.dirty })
+        for url in buffers.keys where !pending.contains(url) {
             buffers[url] = nil
         }
-        if let selected = selectedFile, selectedKind?.isEditable == true, !dirty.contains(selected),
+        if let selected = selectedFile, selectedKind?.isEditable == true, !pending.contains(selected),
            let disk = Self.read(selected), disk != text {
             text = disk
             buffers[selected] = disk
@@ -829,11 +858,23 @@ final class Workspace: EditorLanguage {
         }
         // Shares at or inside the moved item follow it instead of losing their folder.
         SpaceRepository.shared.noteMoved(from: url, to: target)
-        func moved(_ u: URL) -> URL {
-            if u == url { return target }
-            guard u.path.hasPrefix(url.path + "/") else { return u }
-            return URL(fileURLWithPath: target.path + u.path.dropFirst(url.path.count)).standardizedFileURL
+        followMove(FileMove(from: url, to: target))
+        reloadTree()
+        // Paths in the space's files follow the move.
+        for (file, edits) in references {
+            let file = FileMove(from: url, to: target).applying(to: file)
+            guard let text = bufferText(file) else { continue }
+            updateBuffer(file, text: applyTextEdits(edits: edits, text: text))
         }
+        if !references.isEmpty { flushSaves() }
+        schedulePersist()
+        return true
+    }
+
+    private func followMove(_ move: FileMove) { followMoves([move]) }
+
+    private func followMoves(_ moves: [FileMove]) {
+        let moved: (URL) -> URL = { FileMove.applying(moves, to: $0) }
         func remap<V>(_ d: [URL: V]) -> [URL: V] {
             Dictionary(d.map { (moved($0.key), $0.value) }) { a, _ in a }
         }
@@ -850,16 +891,44 @@ final class Workspace: EditorLanguage {
         if let file = lastPreviewFile, moved(file) != file {
             lastPreviewFile = moved(file)
         }
-        reloadTree()
-        // Paths in the space's files follow the move.
-        for (file, edits) in references {
-            let file = moved(file)
-            guard let text = bufferText(file) else { continue }
-            updateBuffer(file, text: applyTextEdits(edits: edits, text: text))
-        }
-        if !references.isEmpty { flushSaves() }
+        dirty = Set(dirty.map(moved))
+        backHistory = backHistory.map { NavigationPoint(url: moved($0.url), location: $0.location) }
+        forwardHistory = forwardHistory.map { NavigationPoint(url: moved($0.url), location: $0.location) }
+        if let selectedFile { selectedKind = FileKind(url: selectedFile) }
+        solvengContextCache = nil
+        restartLanguageServer()
+        startLive()
+        if !dirty.isEmpty { scheduleAutosave() }
         schedulePersist()
-        return true
+    }
+
+    static func movedExternally(_ moves: [FileMove]) {
+        for workspace in open.compactMap(\.value) where !workspace.isClosed && moves.contains(where: { workspace.isInSpace($0.from) }) {
+            workspace.captureFileState()
+            workspace.capturePreviewState()
+            workspace.followMoves(moves)
+        }
+    }
+
+    static func filesChangedExternally(in root: URL, paths: [URL]) {
+        for workspace in open.compactMap(\.value) where !workspace.isClosed {
+            let base = workspace.root.resolvingSymlinksInPath().path
+            guard paths.contains(where: {
+                let path = $0.resolvingSymlinksInPath().path
+                return path == base || path.hasPrefix(base + "/") || base.hasPrefix(path + "/")
+            }) else { continue }
+            workspace.refreshFromDisk()
+        }
+    }
+
+    /// Transfers unsaved edits before closing the workspace at its vanished path.
+    func sessionAfterMoving(to root: URL) -> WorkspaceSession {
+        var session = session()
+        let move = FileMove(from: self.root, to: root)
+        session.buffers = Dictionary(session.buffers.map { (move.applying(to: $0.key), $0.value) }) { _, new in new }
+        session.dirty = Set(session.dirty.map { move.applying(to: $0) })
+        dirty.removeAll()
+        return session
     }
 
     /// Edits that keep the space's paths pointing at `url` once it moves to `target`, keyed by the files before the move.
@@ -963,11 +1032,17 @@ final class Workspace: EditorLanguage {
     func flushSaves() {
         autosaveTask?.cancel()
         autosaveTask = nil
-        for url in dirty {
-            try? buffers[url]?.write(to: url, atomically: true, encoding: .utf8)
+        var saved: Set<URL> = []
+        for url in dirty where FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try buffers[url]?.write(to: url, atomically: true, encoding: .utf8)
+                saved.insert(url)
+            } catch {
+                NSLog("save %@: %@", url.path, error.localizedDescription)
+            }
         }
-        if !dirty.isEmpty, SpaceList.isInRepository(root) { CommitScheduler.shared.noteChange() }
-        dirty.removeAll()
+        if !saved.isEmpty, SpaceList.isInRepository(root) { CommitScheduler.shared.noteChange() }
+        dirty.subtract(saved)
     }
 
     // MARK: - Other files' buffers
@@ -1754,6 +1829,7 @@ final class Workspace: EditorLanguage {
         guard !isClosed else { return }
         isClosed = true
         Self.open.removeAll { $0.value == nil || $0.value === self }
+        LibraryWatcher.shared.stopObserving(root)
         flushSaves()
         persistTask?.cancel()
         persist()

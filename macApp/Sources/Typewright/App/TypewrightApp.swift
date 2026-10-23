@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !Self.isTesting { Task { await PackageLibrary.shared.refreshUniverse() } }
         SyncService.shared.restart()
         Opener.shared.restoreSession()
+        LibraryWatcher.shared.start()
         // Tests run inside the app; they must neither commit to nor ask about the user's spaces.
         if !Self.isTesting {
             SpaceRepository.shared.setLFSLimit(megabytes: SyncService.shared.lfsThresholdMB)
@@ -119,7 +120,7 @@ struct AppCommands: Commands {
                 .keyboardShortcut(keys.showSpaces)
             Button("Toggle Sidebar") { Opener.shared.toggleSidebar() }
                 .keyboardShortcut(keys.sidebar)
-            Button("Show/Hide Preview") { Opener.shared.togglePreview() }
+            Button("Cycle Preview Mode") { Opener.shared.togglePreview() }
                 .keyboardShortcut(keys.togglePreview)
             Button("Preview Current File") { Opener.shared.previewCurrentFile() }
                 .keyboardShortcut(keys.previewCurrentFile)

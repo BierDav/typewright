@@ -331,7 +331,7 @@ enum ShortcutCommand: String, CaseIterable, Identifiable {
         case .findInSpace: return "Find in Space…"
         case .back: return "Back"
         case .forward: return "Forward"
-        case .togglePreview: return "Show/Hide Preview"
+        case .togglePreview: return "Cycle Preview Mode"
         case .previewCurrentFile: return "Preview Current File"
         case .find: return "Find"
         case .replace: return "Find and Replace"
@@ -435,7 +435,7 @@ enum BuiltinLayout: String, CaseIterable, Identifiable {
         let keys = shortcuts
         switch self {
         case .standard:
-            return "Typewright's usual shortcuts, plus \(keys.togglePreview.display) to show or hide the preview "
+            return "Typewright's usual shortcuts, plus \(keys.togglePreview.display) to cycle the preview mode "
                 + "and \(keys.previewCurrentFile.display) to preview the selected file."
         case .intellij:
             return "IntelliJ IDEA's keys: \(keys.palette.allDisplay) opens the command palette, \(keys.replace.display) replaces, "
@@ -543,7 +543,7 @@ struct KeyLayout: Identifiable, Equatable {
             ("Command Palette…", keys.palette),
             ("Show Spaces", keys.showSpaces),
             ("Toggle Sidebar", keys.sidebar),
-            ("Show/Hide Preview", keys.togglePreview),
+            ("Cycle Preview Mode", keys.togglePreview),
             ("Preview Current File", keys.previewCurrentFile),
         ]
         for (title, binding) in items {

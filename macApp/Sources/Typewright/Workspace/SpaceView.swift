@@ -44,7 +44,7 @@ struct SpaceView: View {
             }
             .onChange(of: compilers.active) { workspace.scheduleCompile(delay: 0) }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                workspace.refreshFromDisk()
+                LibraryWatcher.shared.refresh()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
                 workspace.flushSaves()

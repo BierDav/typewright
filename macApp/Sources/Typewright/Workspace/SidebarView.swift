@@ -38,7 +38,9 @@ struct SidebarView: View {
     var body: some View {
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
-                SpaceHeader(name: workspace.name, isDropTarget: dropTarget?.path == workspace.root.path,
+                SpaceHeader(name: workspace.name,
+                            renaming: Binding(get: { workspace.renamingSpace }, set: { workspace.renamingSpace = $0 }),
+                            isDropTarget: dropTarget?.path == workspace.root.path,
                             canReveal: workspace.selectedFile.map(isInTree) ?? false,
                             onReveal: { revealSelected(proxy) },
                             onRename: onRenameSpace, onShowSpaces: onShowSpaces, menuItems: spaceMenuItems)
@@ -87,6 +89,7 @@ struct SidebarView: View {
                     depth: row.depth,
                     isSelected: row.node.url == workspace.selectedFile,
                     isPreviewed: row.node.url == workspace.previewFile,
+                    previewMode: workspace.previewMode,
                     isExpanded: workspace.expanded.contains(row.node.url),
                     isRenaming: renaming == row.node.url,
                     isDragged: drag?.url == row.node.url,
@@ -187,7 +190,7 @@ struct SidebarView: View {
         } else {
             if node.isPreviewable {
                 let previewed = node.url == workspace.previewFile
-                items.append(.init(previewed ? "Hide Preview" : "Preview", previewed ? "eye.slash" : "eye") {
+                items.append(.init(previewed ? workspace.previewMode.nextTitle : "Preview", previewed ? workspace.previewMode.icon : "eye") {
                     workspace.togglePreview(node.url)
                 })
             }
@@ -296,7 +299,7 @@ struct SidebarView: View {
         } else if node.kind.isOpenable {
             withAnimation(.smooth(duration: 0.3)) { workspace.select(node.url) }
             // The row's drag gesture sees every click, so a double click is read off the mouse-up.
-            if node.isPreviewable, (NSApp.currentEvent?.clickCount ?? 1) >= 2 { workspace.setPreview(node.url) }
+            if node.isPreviewable, (NSApp.currentEvent?.clickCount ?? 1) >= 2 { workspace.previewSelectedFile(ifEnabled: true) }
         }
     }
 }
@@ -557,13 +560,13 @@ private struct MenuAnchor: NSViewRepresentable {
 /// Space name above the file tree; clicking it renames the space folder.
 private struct SpaceHeader: View {
     let name: String
+    @Binding var renaming: Bool
     var isDropTarget = false
     let canReveal: Bool
     let onReveal: () -> Void
     let onRename: (String) -> Void
     let onShowSpaces: () -> Void
     let menuItems: (_ rename: @escaping () -> Void) -> [SidebarMenuItem]
-    @State private var renaming = false
     @State private var hovered = false
 
     var body: some View {
@@ -578,7 +581,7 @@ private struct SpaceHeader: View {
             .buttonStyle(ZenPressStyle())
             .help("Spaces (⌥⌘S)")
             if renaming {
-                RenameField(name: name, base: name) { new in
+                RenameField(name: name, base: name, weight: .semibold) { new in
                     guard renaming else { return }
                     renaming = false
                     if let new { onRename(new) }
@@ -615,68 +618,82 @@ private struct SpaceHeader: View {
     }
 }
 
-/// Inline name editor that preselects `base` and commits on Return, focus loss or an outside click.
-struct RenameField: View {
+/// Native field editing keeps focus and selection stable while the tree redraws.
+struct RenameField: NSViewRepresentable {
     let name: String
     let base: String
+    var weight: NSFont.Weight = .regular
     let onRename: (String?) -> Void
-    @State private var draft = ""
-    @State private var selection: TextSelection?
-    @State private var clickMonitor: Any?
-    @FocusState private var focused: Bool
 
-    var body: some View {
-        TextField("Name", text: $draft, selection: $selection)
-            .textFieldStyle(.plain)
-            .focused($focused)
-            .onSubmit { onRename(draft) }
-            .onExitCommand { onRename(nil) }
-            .onChange(of: focused) { _, now in
-                if now { selectBaseName() } else { onRename(draft) }
-            }
-            .onAppear {
-                draft = name
-                focused = true
-                // Clicks elsewhere don't always take focus, so watch for them directly.
-                clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
-                    if !Self.isTextField(event.window?.contentView?.hitTest(event.locationInWindow)) {
-                        onRename(draft)
-                    }
-                    return event
-                }
-            }
-            .onDisappear {
-                if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
-                clickMonitor = nil
-            }
+    func makeCoordinator() -> Coordinator { Coordinator(onRename: onRename) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = Field(string: name)
+        field.baseLength = (base as NSString).length
+        field.isBordered = false
+        field.isBezeled = false
+        field.focusRingType = .none
+        field.drawsBackground = false
+        field.font = .systemFont(ofSize: 13, weight: weight)
+        field.delegate = context.coordinator
+        field.lineBreakMode = .byClipping
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
     }
 
-    /// Preselects the name without its extension, like Finder.
-    private func selectBaseName() {
-        let length = (base as NSString).length
-        // Focusing selects everything, sometimes a beat later; override it once that settled.
-        for delay in [0.0, 0.05] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard focused else { return }
-                if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isFieldEditor {
-                    editor.setSelectedRange(NSRange(location: 0, length: min(length, (editor.string as NSString).length)))
-                } else {
-                    let end = draft.index(draft.startIndex, offsetBy: min(base.count, draft.count))
-                    selection = TextSelection(range: draft.startIndex..<end)
-                }
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.onRename = onRename
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 100, height: nsView.intrinsicContentSize.height)
+    }
+
+    final class Field: NSTextField {
+        var baseLength = 0
+        private var selectedName = false
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil, !selectedName else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window = self.window, !self.selectedName else { return }
+                guard window.makeFirstResponder(self), let editor = self.currentEditor() else { return }
+                editor.selectedRange = NSRange(location: 0, length: min(self.baseLength, (editor.string as NSString).length))
+                self.selectedName = true
             }
         }
     }
 
-    private static func isTextField(_ view: NSView?) -> Bool {
-        var view = view
-        while let current = view {
-            if current is NSTextField || (current as? NSTextView)?.isFieldEditor == true { return true }
-            view = current.superview
-        }
-        return false
-    }
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var onRename: (String?) -> Void
+        private var finished = false
 
+        init(onRename: @escaping (String?) -> Void) { self.onRename = onRename }
+
+        private func finish(_ name: String?) {
+            guard !finished else { return }
+            finished = true
+            onRename(name)
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            finish(field.stringValue)
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy command: Selector) -> Bool {
+            switch command {
+            case #selector(NSResponder.cancelOperation(_:)):
+                finish(nil)
+            case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
+                finish(textView.string)
+            default:
+                return false
+            }
+            return true
+        }
+    }
 }
 
 /// Floating label under the pointer while a file is dragged.
@@ -704,6 +721,7 @@ private struct FileRow: View {
     let depth: Int
     let isSelected: Bool
     let isPreviewed: Bool
+    let previewMode: PreviewMode
     let isExpanded: Bool
     let isRenaming: Bool
     let isDragged: Bool
@@ -745,10 +763,10 @@ private struct FileRow: View {
                     .help("More")
             } else if node.isPreviewable && !isRenaming && (hovered || isPreviewed) {
                 Button(action: onTogglePreview) {
-                    ZenIcon(systemName: isPreviewed ? "eye.fill" : "eye", active: isPreviewed)
+                    ZenIcon(systemName: isPreviewed ? previewMode.icon : "eye", active: isPreviewed)
                 }
                 .buttonStyle(ZenPressStyle())
-                .help(isPreviewed ? "Hide preview" : "Preview this file")
+                .help(isPreviewed ? previewMode.nextTitle : "Preview this file")
             }
         }
         .font(.system(size: 13))
