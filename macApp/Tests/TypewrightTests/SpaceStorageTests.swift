@@ -239,6 +239,14 @@ final class SpaceStorageTests: XCTestCase {
                        [other])
     }
 
+    func testGitCheckoutsDefaultToStayingWhereTheyAre() throws {
+        let plain = try folder("Essay", files: ["main.typ": "= Essay"])
+        let checkout = try folder("Thesis", files: ["main.typ": "= Thesis"])
+        try FileManager.default.createDirectory(at: checkout.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        XCTAssertEqual(SpaceMigration.defaultChoice(for: plain), .replaceWithLink)
+        XCTAssertEqual(SpaceMigration.defaultChoice(for: checkout), .leaveAsIs)
+    }
+
     // MARK: - Links
 
     func testLinksFollowRenamesAndGoWithTheItem() throws {
@@ -262,6 +270,17 @@ final class SpaceStorageTests: XCTestCase {
         links.removed(renamed)
         XCTAssertTrue(links.links.isEmpty)
         XCTAssertFalse(SpaceFolders.isLink(docs.appendingPathComponent("main.typ")))
+    }
+
+    func testFindsLinksThroughAnotherSpellingOfTheTarget() throws {
+        let space = try folder("Thesis", files: [:])
+        let docs = try folder("Documents", files: [:])
+        let links = SpaceLinks(defaults: defaults())
+        try links.create(to: space, at: docs.appendingPathComponent("Thesis"))
+        // The spaces list holds resolved paths; temporary folders resolve through /private.
+        let spelled = URL(fileURLWithPath: "/private" + space.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: spelled.path))
+        XCTAssertEqual(links.links(to: spelled).count, 1)
     }
 
     func testForgetsLinksDeletedOutsideTheApp() throws {

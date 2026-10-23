@@ -83,6 +83,9 @@ struct SpacesOverlay: View {
         .onAppear { spaces = SpaceList.all }
         .onChange(of: state.spacesProgress > 0) { spaces = SpaceList.all }
         .onChange(of: workspace?.root) { spaces = SpaceList.all }
+        .onReceive(NotificationCenter.default.publisher(for: SpaceList.didChange).receive(on: RunLoop.main)) { _ in
+            spaces = SpaceList.all
+        }
         .onChange(of: wanted, initial: true) { _, now in
             guard !now else {
                 state.selectorMounted = true

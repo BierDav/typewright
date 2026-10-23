@@ -137,8 +137,9 @@ final class SpaceLinks {
 
     /// Links to exactly `item`.
     func links(to item: URL) -> [SpaceLink] {
-        let path = item.standardizedFileURL.path
-        return links.filter { $0.target == path }
+        // Compared resolved, since the list holds resolved paths (`/private/tmp`) and links keep them as made.
+        let path = item.resolvingSymlinksInPath().path
+        return links.filter { $0.target == path || URL(fileURLWithPath: $0.target).resolvingSymlinksInPath().path == path }
     }
 
     /// Makes a symlink at `location` to `item`, replacing nothing.

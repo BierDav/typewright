@@ -10,11 +10,11 @@ final class SettingsWindowController: NSWindowController {
         let tabs = NSTabViewController()
         tabs.tabStyle = .toolbar
         tabs.canPropagateSelectedChildViewControllerTitle = true
-        func tab(_ title: String, _ symbol: String, _ view: some View) -> NSTabViewItem {
-            let host = NSHostingController(rootView: view.frame(width: 560, height: 520))
+        func tab(_ title: String, _ symbol: String, _ view: some View, height: CGFloat = 520) -> NSTabViewItem {
+            let host = NSHostingController(rootView: view.frame(width: 560, height: height))
             host.sizingOptions = []
             host.title = title
-            host.preferredContentSize = NSSize(width: 560, height: 520)
+            host.preferredContentSize = NSSize(width: 560, height: height)
             let item = NSTabViewItem(viewController: host)
             item.label = title
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
@@ -25,7 +25,8 @@ final class SettingsWindowController: NSWindowController {
         tabs.addTabViewItem(tab("Fonts", "character.textbox", FontSettings()))
         tabs.addTabViewItem(tab("Packages", "shippingbox", PackageSettings()))
         tabs.addTabViewItem(tab("Devices", "arrow.triangle.2.circlepath", DeviceSettings()))
-        tabs.addTabViewItem(tab("History", "clock.arrow.circlepath", HistorySettings()))
+        // Taller, so the retention rules and Restore Defaults fit without scrolling.
+        tabs.addTabViewItem(tab("History", "clock.arrow.circlepath", HistorySettings(), height: 620))
 
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]

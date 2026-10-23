@@ -19,6 +19,15 @@ enum FileHistory {
         let repository = SpaceRepository.shared
         return repository.contains(file) && SpaceFolders.gitRepository(containing: file, below: repository.root) == nil
     }
+
+    /// Files the repository leaves untracked (over the LFS limit, or binary like the bridge's sniff), so they have no history.
+    static func isLFS(_ file: URL) -> Bool {
+        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if Double(size) > SyncService.shared.lfsThresholdMB * 1_048_576 { return true }
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: 8192))?.contains(0) ?? false
+    }
 }
 
 extension SpaceRepository {

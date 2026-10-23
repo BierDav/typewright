@@ -315,7 +315,7 @@ private struct NoSpaceView: View {
                 .opacity(0.55)
             Text("No Space Open")
                 .font(.title3.weight(.semibold))
-            Text("Select a space in the sidebar, or link a folder as a new one.")
+            Text("Select a space in the sidebar, create a new one, or import a folder.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 280)

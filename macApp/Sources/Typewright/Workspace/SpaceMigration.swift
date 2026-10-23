@@ -19,6 +19,11 @@ enum SpaceMigration {
 
     private static let key = "spaceMigrationAnswered"
 
+    /// Git checkouts stay untracked inside the library anyway, so they default to staying where they are.
+    static func defaultChoice(for url: URL) -> Choice {
+        SpaceFolders.isGitRepository(url) ? .leaveAsIs : .replaceWithLink
+    }
+
     /// Spaces outside the repository that haven't been asked about.
     static func pending(_ spaces: [URL], repository: URL, answered: Set<String>) -> [URL] {
         let base = repository.resolvingSymlinksInPath().standardizedFileURL.path
@@ -111,7 +116,7 @@ private struct MigrationSheet: View {
             HStack {
                 Button("Ask Later") { done(nil) }
                 Spacer()
-                Button("Continue") { done(spaces.reduce(into: [:]) { $0[$1] = choices[$1] ?? .replaceWithLink }) }
+                Button("Continue") { done(spaces.reduce(into: [:]) { $0[$1] = choices[$1] ?? SpaceMigration.defaultChoice(for: $1) }) }
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -120,6 +125,6 @@ private struct MigrationSheet: View {
     }
 
     private func binding(_ url: URL) -> Binding<SpaceMigration.Choice> {
-        Binding { choices[url] ?? .replaceWithLink } set: { choices[url] = $0 }
+        Binding { choices[url] ?? SpaceMigration.defaultChoice(for: url) } set: { choices[url] = $0 }
     }
 }

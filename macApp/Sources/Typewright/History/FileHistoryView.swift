@@ -69,6 +69,9 @@ struct FileHistoryView: View {
     }
 
     private var emptyDescription: String {
+        if FileHistory.isLFS(model.file) {
+            return "Large and binary files have no history; Typewright syncs them whole."
+        }
         if FileHistory.isAvailable(for: model.file) || workspace == nil {
             return "Versions appear here a few seconds after the file changes."
         }
@@ -119,8 +122,10 @@ struct FileHistoryView: View {
     private func content(_ version: FileVersion) -> some View {
         if let rows = model.rows {
             if rows.allSatisfy({ if case .line(let line) = $0 { line.kind == .same } else { true } }) {
+                // Fills the pane so the header stays at the top.
                 ContentUnavailableView(model.comparison == .current ? "Same as Now" : "No Changes",
                                        systemImage: "equal.circle")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 DiffView(rows: rows) { model.expandedFolds.insert($0) }
             }
@@ -364,9 +369,11 @@ private struct VersionPreview: View {
             } else {
                 ContentUnavailableView("No Preview", systemImage: "doc",
                                        description: Text(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         case .missing:
             ContentUnavailableView("Not in This Version", systemImage: "doc.badge.ellipsis")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .text(let text):
             ScrollView { Text(text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).padding() }
         }

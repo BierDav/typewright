@@ -514,9 +514,15 @@ enum SpaceList {
         return "\(path) · \(branch)"
     }
 
+    /// Posted when the stored list changes, so open sidebars reload it (imports finish after the click).
+    static let didChange = Notification.Name("SpaceListDidChange")
+
     private static var stored: [String] {
         get { UserDefaults.standard.stringArray(forKey: key) ?? [] }
-        set { UserDefaults.standard.set(newValue, forKey: key) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: key)
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
     }
 
     /// Appends new spaces; known ones keep their place.

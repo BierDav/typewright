@@ -270,6 +270,7 @@ struct SpaceView: View {
                 .animation(.smooth(duration: 0.2), value: workspace.find.isVisible)
             } else {
                 ContentUnavailableView("No file selected", systemImage: "doc")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if let file = workspace.selectedFile, SpaceRepository.shared.hasConflict(file) {
                 Divider()

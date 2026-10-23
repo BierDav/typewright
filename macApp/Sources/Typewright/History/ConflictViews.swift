@@ -8,9 +8,11 @@ struct ConflictBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
-            Text("This file has conflicting changes from another device.")
+            // Short, so it fits next to the buttons in a narrow editor; the tooltip has the rest.
+            Text("Conflicting changes")
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .help("This file has changes from another device or the jj CLI that couldn't be merged.")
             Spacer(minLength: 8)
             Button("Show History…", action: onShowHistory)
             Button("Resolve…", action: onResolve)
