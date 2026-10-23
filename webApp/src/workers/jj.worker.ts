@@ -28,6 +28,9 @@ const SIGNATURES: Record<string, { args: ("str" | "str?" | "u32" | "i32" | "u64"
   twj_file_history: { args: ["str", "u32"] },
   twj_file_at: { args: ["str", "str"] },
   twj_restore_file: { args: ["str", "str"] },
+  twj_delete: { args: ["str", "str"] },
+  twj_deleted: { args: ["str", "u32"] },
+  twj_restore_deleted: { args: ["str", "str"] },
   twj_conflicts: { args: ["str"] },
   twj_conflict: { args: ["str"] },
   twj_resolve: { args: ["str", "str?", "i32"] },
@@ -165,7 +168,8 @@ async function call(fn: string, args: Arg[]): Promise<unknown> {
     const text = readString(result);
     exports.twj_string_free(result);
     const value = JSON.parse(text);
-    if (value && typeof value === "object" && "error" in value && typeof value.error === "string") throw new Error(value.error);
+    // A taken destination is an answer, not a failure.
+    if (value && typeof value === "object" && "error" in value && typeof value.error === "string" && !value.exists) throw new Error(value.error);
     return value;
   } finally {
     for (const [ptr, len] of allocated) exports.twj_dealloc(ptr, len);

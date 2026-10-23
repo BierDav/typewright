@@ -76,6 +76,14 @@ function wrapping(): Extension {
   return [EditorView.lineWrapping, EditorView.theme({ ".cm-content": { maxWidth: `${settings.wrapColumn}ch` } }), EditorView.editorAttributes.of({ class: "tw-wrap-guide" })];
 }
 
+/** Images on a paste or drop; text on the clipboard wins over a picture, except for copied image files. */
+function images(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const files = [...data.files].filter((f) => f.type.startsWith("image/"));
+  const text = data.getData("text/plain");
+  return files.filter((f) => !text || (f.name && f.name !== "image.png"));
+}
+
 /** A diagnostic's line and column (from 1, UTF-16) as a range over the token there. */
 function diagnosticRange(state: EditorState, line: number, column: number): { from: number; to: number } {
   const l = state.doc.line(Math.min(Math.max(line, 1), state.doc.lines));
@@ -144,6 +152,10 @@ export default function Editor(props: { workspace: Workspace }) {
         if (update.docChanged && !applyingExternal) {
           const immediate = update.transactions.some((tr) => tr.isUserEvent("input.color"));
           ws.textDidChange(update.state.doc.toString(), immediate);
+          // Undoing a pasted image's reference takes the image away too; redo brings it back.
+          const undo = update.transactions.some((tr) => tr.isUserEvent("undo"));
+          const redo = update.transactions.some((tr) => tr.isUserEvent("redo"));
+          if (undo || redo) ws.editorDidUndo(redo, update.state.doc.toString());
         }
         if (update.selectionSet || update.docChanged) {
           const main = update.state.selection.main;
@@ -153,8 +165,35 @@ export default function Editor(props: { workspace: Workspace }) {
       }),
       EditorView.domEventHandlers({
         scroll: () => rememberState(),
+        paste: (event, view) => {
+          const files = images(event.clipboardData);
+          if (!files.length) return false;
+          event.preventDefault();
+          const { from, to } = view.state.selection.main;
+          void insertImages(view, path, files, from, to);
+          return true;
+        },
+        drop: (event, view) => {
+          const files = images(event.dataTransfer);
+          if (!files.length) return false;
+          event.preventDefault();
+          const at = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
+          void insertImages(view, path, files, at, at);
+          return true;
+        },
       }),
     ];
+  }
+
+  /** Saves the images next to the file and puts their reference in as one undo step. */
+  async function insertImages(view: EditorView, path: string, files: File[], from: number, to: number) {
+    if (!isMarkdown(path) && extension(path) !== "typ") return;
+    const reference = await ws.saveImages(files, path);
+    if (!reference || current !== path) return;
+    // A `#` typed just before keeps the call from getting two.
+    const text = from > 0 && view.state.sliceDoc(from - 1, from) === "#" && reference.startsWith("#") ? reference.slice(1) : reference;
+    view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, userEvent: "input.paste" });
+    view.focus();
   }
 
   function rememberState() {

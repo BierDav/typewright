@@ -10,6 +10,12 @@ import { settings } from "./settings";
 import { spacePath, uniqueName } from "./spaces";
 import * as fs from "./storage";
 import * as syncService from "./sync";
+import { showRecentlyDeleted, toast } from "./app";
+import { FileUndo } from "./fileops";
+import * as jj from "./jj";
+
+/** An image saved for a paste or drop in the editor, with the text that shows it. */
+type PastedImage = { path: string; document: string; reference: string; removed?: jj.DeletedItem[]; pending?: boolean };
 
 export type FileNode = { path: string; name: string; kind: Kind; children?: FileNode[] };
 
@@ -53,6 +59,9 @@ export class Workspace {
   currentText: () => string = () => this.state.text;
   /** Settles once the space's files are listed and its first file is selected. */
   readonly loaded: Promise<void>;
+  /** File tree changes and their undo (⌘Z in the file sidebar). */
+  readonly fileUndo: FileUndo;
+  private pastedImages: PastedImage[] = [];
   private finishLoading!: () => void;
 
   constructor(folder: string) {
@@ -89,6 +98,7 @@ export class Workspace {
     });
     this.state = state;
     this.setState = setState;
+    this.fileUndo = new FileUndo(this);
     const [external, setExternal] = createRoot(() => createSignal(0));
     this.external = external;
     this.setExternal = setExternal;
@@ -278,6 +288,16 @@ export class Workspace {
 
   // MARK: - Creating and moving
 
+  /** `Space/path` for the repository and commit messages. */
+  repoPath(path: string): string {
+    return path ? `${this.folder}/${path}` : this.folder;
+  }
+
+  /** A repo-relative path back to one relative to the space. */
+  spacePath(repoPath: string): string {
+    return repoPath === this.folder ? "" : repoPath.slice(this.folder.length + 1);
+  }
+
   async createFile(dir: string, typed: string): Promise<string> {
     // A name without an extension becomes a Typst file.
     const clean = typed.trim().replace(/\//g, "-");
@@ -289,6 +309,7 @@ export class Workspace {
     await fs.writeFile(fs.join(this.root, path), "");
     await this.reloadTree();
     await this.select(path);
+    this.fileUndo.record("New File", { kind: "delete", paths: [path] }, `Add ${this.repoPath(path)}`);
     return path;
   }
 
@@ -299,7 +320,26 @@ export class Workspace {
     await fs.makeDirectory(fs.join(this.root, path));
     if (dir) this.setState("expanded", (all) => [...new Set([...all, dir])]);
     await this.reloadTree();
+    this.fileUndo.record("New Folder", { kind: "delete", paths: [path] }, `Add ${this.repoPath(path)}`);
     return path;
+  }
+
+  /** A copy next to the original, named like Finder's ("name copy.ext"). */
+  async duplicate(path: string): Promise<string | null> {
+    await this.flushSaves();
+    const source = fs.join(this.root, path);
+    const entry = await fs.stat(source);
+    if (!entry) return null;
+    const base = fs.basename(path);
+    const dot = entry.kind === "file" ? base.lastIndexOf(".") : -1;
+    const name = await uniqueName(fs.join(this.root, fs.dirname(path)), `${dot > 0 ? base.slice(0, dot) : base} copy`, dot > 0 ? base.slice(dot + 1) : null);
+    const target = fs.join(fs.dirname(path), name);
+    if (entry.kind === "file") await fs.copy(source, fs.join(this.root, target));
+    else for (const e of await fs.walk(source)) if (e.kind === "file") await fs.copy(fs.join(source, e.path), fs.join(this.root, target, e.path));
+    await this.reloadTree();
+    if (entry.kind === "file") await this.select(target);
+    this.fileUndo.record(`Duplicate “${base}”`, { kind: "delete", paths: [target] }, `Duplicate ${this.repoPath(path)} as ${this.repoPath(target)}`);
+    return target;
   }
 
   canMove(path: string, dir: string): boolean {
@@ -313,6 +353,8 @@ export class Workspace {
     const caseOnly = target.toLowerCase() === path.toLowerCase();
     if (!caseOnly && (await fs.exists(fs.join(this.root, target)))) return;
     await this.relocate(path, target);
+    this.fileUndo.record(`Rename “${fs.basename(path)}”`, { kind: "move", moves: [{ from: target, to: path }] },
+      `Rename ${this.repoPath(path)} to ${this.repoPath(target)}`);
   }
 
   async move(path: string, dir: string) {
@@ -320,6 +362,16 @@ export class Workspace {
     const target = fs.join(dir, fs.basename(path));
     if (await fs.exists(fs.join(this.root, target))) return;
     await this.relocate(path, target);
+    this.fileUndo.record(`Move “${fs.basename(path)}”`, { kind: "move", moves: [{ from: target, to: path }] },
+      `Move ${this.repoPath(path)} to ${this.repoPath(target)}`);
+  }
+
+  /** Undo's moves: no new undo step; false when the item is gone or its old place is taken. */
+  async moveQuietly(from: string, to: string): Promise<boolean> {
+    if (!(await fs.exists(fs.join(this.root, from)))) return false;
+    if (to.toLowerCase() !== from.toLowerCase() && (await fs.exists(fs.join(this.root, to)))) return false;
+    await this.relocate(from, to);
+    return true;
   }
 
   /** Moves a file or folder and takes buffers, selection, preview and saved state along. */
@@ -349,27 +401,105 @@ export class Workspace {
     this.scheduleCompile(0);
   }
 
+  /** Deletes and commits at once; there's no trash: undo, or Recently Deleted, brings it back from the history. */
   async delete(path: string) {
+    const name = fs.basename(path);
+    await this.fileUndo.perform({ kind: "delete", paths: [path] }, `Delete “${name}”`, `Delete ${this.repoPath(path)}`);
+    toast(`Deleted “${name}”`, [
+      { label: "Undo", run: () => void this.fileUndo.undo() },
+      { label: "Show Recently Deleted", run: () => showRecentlyDeleted(this.repoPath(fs.dirname(path))) },
+    ]);
+  }
+
+  /** The deletion itself, for `FileUndo`: what the history keeps, or null without a repository in this tab. */
+  async deleteNow(paths: string[], message: string): Promise<jj.DeletedItem[] | null> {
     await this.flushSaves();
-    const gone = (p: string) => p === path || p.startsWith(`${path}/`);
+    let items: jj.DeletedItem[] | null = null;
+    if (jj.isOpen()) items = await jj.deleteItems(paths.map((p) => this.repoPath(p)), message);
+    // The tab running the repository commits the deletion; undo isn't possible from here.
+    else for (const path of paths) await fs.remove(fs.join(this.root, path));
+    await this.forgetRemoved(paths);
+    return items;
+  }
+
+  private async forgetRemoved(paths: string[]) {
+    const gone = (p: string) => paths.some((path) => p === path || p.startsWith(`${path}/`));
     for (const p of [...this.buffers.keys()]) if (gone(p)) this.buffers.delete(p);
     for (const p of [...this.dirty]) if (gone(p)) this.dirty.delete(p);
-    await syncService.moveToTrash(this.folder, path);
     batch(() => {
       if (this.state.selected && gone(this.state.selected)) this.setState({ selected: null, selectedKind: null, text: "" });
       if (this.state.preview && gone(this.state.preview)) this.setPreview(null);
     });
-    await this.reloadTree();
     for (const node of [...this.files()]) if (gone(node.path)) compiler.removeFile(node.path);
+    await this.reloadTree();
     this.persist();
   }
 
   /** Files picked or dropped into a folder; text and images become available to typst at once. */
   async importFiles(dir: string, files: { path: string; file: Blob }[]) {
+    const added = new Set<string>();
     for (const { path, file } of files) {
-      await fs.writeFile(fs.join(this.root, dir, path), new Uint8Array(await file.arrayBuffer()));
+      const target = fs.join(this.root, dir, path);
+      // Undo takes away what's new; files that were replaced keep their new content.
+      const top = fs.join(dir, path.split("/")[0]);
+      if (!added.has(top) && !(await fs.exists(fs.join(this.root, top)))) added.add(top);
+      await fs.writeFile(target, new Uint8Array(await file.arrayBuffer()));
     }
     await this.reloadTree();
+    if (!added.size) return;
+    const names = [...added].map(fs.basename);
+    this.fileUndo.record(names.length === 1 ? `Add “${names[0]}”` : `Add ${names.length} Items`, { kind: "delete", paths: [...added] },
+      `Add ${[...added].map((p) => this.repoPath(p)).join(", ")}`);
+  }
+
+  /** Saves images pasted or dropped into the editor next to `document`; returns the text that shows them. */
+  async saveImages(images: File[], document: string): Promise<string | null> {
+    const markdown = isMarkdown(document);
+    const dir = fs.dirname(document);
+    const references: string[] = [];
+    for (const image of images) {
+      const type = image.type.split("/")[1]?.replace("jpeg", "jpg").replace("svg+xml", "svg") || "png";
+      const stamp = new Date().toISOString().slice(0, 19).replace("T", "-").replace(/:/g, "");
+      const given = image.name && image.name !== "image.png" ? image.name : `image-${stamp}.${type}`;
+      const dot = given.lastIndexOf(".");
+      const name = await uniqueName(fs.join(this.root, dir), dot > 0 ? given.slice(0, dot) : given, dot > 0 ? given.slice(dot + 1) : type);
+      const path = fs.join(dir, name);
+      await fs.writeFile(fs.join(this.root, path), new Uint8Array(await image.arrayBuffer()));
+      await this.loadIntoCompiler(path);
+      const reference = markdown ? `![](${name.includes(" ") ? `<${name}>` : name})` : `#image("${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`;
+      references.push(reference);
+      this.pastedImages = [...this.pastedImages, { path, document, reference }].slice(-20);
+    }
+    if (!references.length) return null;
+    await this.reloadTree();
+    void jj.commit(`Add ${this.pastedImages.slice(-references.length).map((i) => this.repoPath(i.path)).join(", ")}`);
+    return references.join("\n");
+  }
+
+  /** Undo in the text took a pasted image's reference out: the image goes too; redo brings both back. */
+  editorDidUndo(redo: boolean, text: string) {
+    const document = this.state.selected;
+    for (const image of this.pastedImages) {
+      if (image.document !== document || image.pending) continue;
+      const present = text.includes(image.reference);
+      if (!redo && !present && !image.removed) {
+        image.pending = true;
+        void this.deleteNow([image.path], `Undo Add ${this.repoPath(image.path)}`).then((items) => {
+          image.pending = false;
+          image.removed = items ?? undefined;
+        });
+      } else if (redo && present && image.removed) {
+        const items = image.removed;
+        image.pending = true;
+        void (async () => {
+          for (const item of items) await jj.restoreDeleted(item, item.path);
+          await this.reloadTree();
+          await this.loadIntoCompiler(image.path);
+          image.pending = false;
+          image.removed = undefined;
+        })();
+      }
+    }
   }
 
   // MARK: - Editing

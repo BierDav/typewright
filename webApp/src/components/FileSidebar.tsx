@@ -1,5 +1,5 @@
 import { createSignal, For, type JSX, Match, Show, Switch } from "solid-js";
-import { alert, confirm, copyText, openSpace, prompt, setOverlay } from "~/lib/app";
+import { alert, copyText, isMac, openSpace, prompt, setOverlay, showRecentlyDeleted } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { pickFiles, readDrop } from "~/lib/drop";
 import { isPreviewable, mimeType } from "~/lib/kinds";
@@ -59,15 +59,34 @@ export default function FileSidebar(props: { workspace: Workspace }) {
   async function rename(node: FileNode) {
     const name = await prompt(`Rename ${node.name}`, node.name, "Rename");
     if (name !== null) await ws.rename(node.path, name);
+    focusTree();
   }
 
   async function moveTo(node: FileNode) {
     setOverlay({ type: "palette", page: `move:${node.path}` });
   }
 
+  /** No confirmation: deleting commits, and undo or Recently Deleted brings it back. */
   async function remove(node: FileNode) {
-    const ok = await confirm(`Delete “${node.name}”?`, "It moves to the trash in Settings › General, where you can bring it back.", "Delete", true);
-    if (ok) await ws.delete(node.path);
+    await ws.delete(node.path);
+    focusTree();
+  }
+
+  let tree: HTMLDivElement | undefined;
+
+  /** After a change made in the tree, ⌘Z there undoes it. */
+  function focusTree() {
+    tree?.focus({ preventScroll: true });
+  }
+
+  function onTreeKey(event: KeyboardEvent) {
+    const mod = isMac ? event.metaKey : event.ctrlKey;
+    if (!mod || event.altKey) return;
+    const redo = (event.code === "KeyZ" && event.shiftKey) || (!isMac && event.code === "KeyY");
+    if (event.code !== "KeyZ" && !redo) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void (redo ? ws.fileUndo.redo() : ws.fileUndo.undo());
   }
 
   async function save(node: FileNode) {
@@ -103,9 +122,11 @@ export default function FileSidebar(props: { workspace: Workspace }) {
       { label: "Move To…", action: () => void moveTo(node) },
       { label: "Copy Relative Path", action: () => void copyText(node.path, "Path copied") },
       { label: node.children ? "Download as Zip" : "Download", action: () => void save(node) },
+      { label: "Duplicate", action: () => void ws.duplicate(node.path).then(focusTree) },
       { separator: true },
-      { label: "Delete", destructive: true, action: () => void remove(node) },
     );
+    if (node.children) items.push({ label: "Show Recently Deleted in This Folder", action: () => showRecentlyDeleted(ws.repoPath(node.path)) });
+    items.push({ label: "Delete", destructive: true, action: () => void remove(node) });
     return items;
   }
 
@@ -124,6 +145,7 @@ export default function FileSidebar(props: { workspace: Workspace }) {
       },
       { separator: true },
       { label: "Rename Space…", action: () => void renameCurrentSpace(ws) },
+      { label: "Show Recently Deleted", action: () => showRecentlyDeleted(ws.folder) },
       { label: "Download Space as Zip", action: async () => download(`${ws.folder}.zip`, await zipSpace(ws.folder), "application/zip") },
       { separator: true },
       synced
@@ -138,8 +160,9 @@ export default function FileSidebar(props: { workspace: Workspace }) {
     event.stopPropagation();
     setDropTarget(null);
     const moved = event.dataTransfer?.getData(DRAG_TYPE);
-    if (moved) return ws.move(moved, dir);
-    if (event.dataTransfer) await ws.importFiles(dir, await readDrop(event.dataTransfer));
+    if (moved) await ws.move(moved, dir);
+    else if (event.dataTransfer) await ws.importFiles(dir, await readDrop(event.dataTransfer));
+    focusTree();
   }
 
   function dropProps(dir: string) {
@@ -214,7 +237,17 @@ export default function FileSidebar(props: { workspace: Workspace }) {
           <Ellipsis size={15} />
         </button>
       </header>
-      <div class="tree" classList={{ "drop-target": dropTarget() === "" }} {...dropProps("")} onContextMenu={(e) => showMenu(e, spaceMenu())}>
+      <div
+        class="tree"
+        ref={tree}
+        tabIndex={-1}
+        aria-label="Files"
+        classList={{ "drop-target": dropTarget() === "" }}
+        {...dropProps("")}
+        onKeyDown={onTreeKey}
+        onMouseDown={() => focusTree()}
+        onContextMenu={(e) => showMenu(e, spaceMenu())}
+      >
         <For each={ws.state.tree}>{(node) => <Row node={node} depth={0} />}</For>
         <Show when={ws.state.loaded && ws.state.tree.length === 0}>
           <div class="empty-state small">

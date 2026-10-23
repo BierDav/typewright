@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createResource, createSignal, For, type JSX, on, onMount, Show } from "solid-js";
-import { confirm, editorView, openSpace, setOverlay, shortcut, workspace } from "~/lib/app";
+import { editorView, openSpace, setOverlay, shortcut, showRecentlyDeleted, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { fuzzyScore } from "~/lib/core";
 import { symbolAt } from "~/lib/editor/refactor";
@@ -246,8 +246,9 @@ async function rootItems(): Promise<Item[]> {
           title: `Delete ${name}`,
           section: "File",
           keywords: ["trash", "remove"],
-          action: { run: async () => (await confirm(`Delete “${name}”?`, "It moves to the trash in Settings › General.", "Delete", true)) && void ws.delete(file) },
+          action: { run: () => void ws.delete(file) },
         },
+        { id: "file.duplicate", title: `Duplicate ${name}`, section: "File", keywords: ["copy"], action: { run: () => void ws.duplicate(file) } },
         {
           id: "file.download",
           title: `Download ${name}`,
@@ -311,6 +312,13 @@ async function rootItems(): Promise<Item[]> {
       action: { run: async () => { const folder = await commands.joinFromLink(); if (folder) openSpace(folder); } },
     },
     { id: "spaces.search", title: "Search All Spaces", section: "Spaces", icon: "search", action: { run: () => setOverlay({ type: "search", allSpaces: true }) } },
+    {
+      id: "spaces.deleted",
+      title: "Recently Deleted…",
+      section: "Spaces",
+      keywords: ["trash", "restore", "undelete", "bin"],
+      action: { run: () => showRecentlyDeleted() },
+    },
     { id: "fonts.install", title: "Install Google Font…", section: "Fonts", keywords: ["download", "typeface"], action: { page: googleFontsPage } },
   );
   if (fonts.fonts.installed.length) items.push({ id: "fonts.remove", title: "Remove Google Font…", section: "Fonts", keywords: ["delete", "uninstall"], action: { page: removeFontsPage } });

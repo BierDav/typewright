@@ -28,12 +28,18 @@ export type Overlay =
   | { type: "palette"; page?: string }
   | { type: "search"; allSpaces: boolean }
   | { type: "settings"; tab?: SettingsTab }
+  /** `scope` is a repo-relative folder (a space or one inside it); null lists every space. */
+  | { type: "deleted"; scope: string | null }
   | null;
 
 export type SettingsTab = "general" | "editor" | "fonts" | "packages" | "devices";
 
 const [overlay, setOverlay] = createSignal<Overlay>(null);
 export { overlay, setOverlay };
+
+export function showRecentlyDeleted(scope: string | null = workspace()?.folder ?? null) {
+  setOverlay({ type: "deleted", scope });
+}
 
 /** The editor view of the shown file, for commands run from outside it. */
 const [editorView, setEditorView] = createSignal<EditorView | null>(null);
@@ -114,13 +120,19 @@ export async function choose(title: string, message: string, options: { label: s
 
 // MARK: - Toasts
 
-const [toasts, setToasts] = createStore<{ id: number; text: string }[]>([]);
+export type ToastAction = { label: string; run: () => void };
+const [toasts, setToasts] = createStore<{ id: number; text: string; actions: ToastAction[] }[]>([]);
 export { toasts };
 
-export function toast(text: string) {
+export function dismissToast(id: number) {
+  setToasts((all) => all.filter((t) => t.id !== id));
+}
+
+/** A short note; with actions (like Undo) it stays a little longer. */
+export function toast(text: string, actions: ToastAction[] = []) {
   const id = ++dialogId;
-  setToasts((all) => [...all, { id, text }]);
-  setTimeout(() => setToasts((all) => all.filter((t) => t.id !== id)), 3500);
+  setToasts((all) => [...all, { id, text, actions }]);
+  setTimeout(() => dismissToast(id), actions.length ? 8000 : 3500);
 }
 
 export async function copyText(text: string, what = "Copied") {

@@ -3,6 +3,8 @@ import { strToU8, unzipSync, zipSync } from "fflate";
 import { createStore } from "solid-js/store";
 import * as core from "./core";
 import { spaceOrderAdd, spaceOrderMove, spaceOrderReplace } from "./core";
+import * as jj from "./jj";
+import type { DeletedItem } from "./jj";
 import * as fs from "./storage";
 
 export const SPACES = "spaces";
@@ -77,10 +79,20 @@ export async function renameSpace(old: string, name: string): Promise<string | n
   return clean;
 }
 
-export async function deleteSpace(name: string) {
-  await fs.remove(spacePath(name));
-  saveOrder(storedOrder().filter((n) => n !== name));
+/** Deletes a space; with the history running in this tab that's a commit, so Recently Deleted can bring it back. */
+export async function deleteSpace(name: string): Promise<DeletedItem | null> {
+  const items = jj.isOpen() ? await jj.deleteItems([name], `Delete space ${name}`) : null;
+  if (!items) await fs.remove(spacePath(name));
+  // The order keeps its entry, so a restored space returns to its place.
   await refreshSpaces();
+  return items?.[0] ?? null;
+}
+
+/** Undoes `deleteSpace`. */
+export async function restoreSpace(item: DeletedItem): Promise<boolean> {
+  const ok = (await jj.restoreDeleted(item, item.path)) === "restored";
+  await refreshSpaces();
+  return ok;
 }
 
 /** Files picked or dropped, with paths relative to the folder they go into. */

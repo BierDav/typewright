@@ -1,9 +1,9 @@
 import { createSignal, For, Show } from "solid-js";
-import { choose, confirm, openSpace, prompt, setOverlay, workspace } from "~/lib/app";
+import { choose, confirm, openSpace, prompt, setOverlay, showRecentlyDeleted, toast, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { pickFiles, stripTopFolder } from "~/lib/drop";
 import { identity } from "~/lib/identity";
-import { createSpace, deleteSpace, download, importFiles, moveSpace, spaces, unzip, zipSpace } from "~/lib/spaces";
+import { createSpace, deleteSpace, download, importFiles, moveSpace, restoreSpace, spaces, unzip, zipSpace } from "~/lib/spaces";
 import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
 import { Cloud, CloudOff, Download, Layers, Link, Plus, Settings, Users } from "./icons";
@@ -39,8 +39,8 @@ async function removeSpace(folder: string) {
   const ok = await confirm(
     `Delete “${folder}”?`,
     synced
-      ? "Its files are deleted from this browser. It stops syncing here first, so your other devices and the people you invited keep their copies."
-      : "Its files are deleted from this browser. Download it as a zip first if you want to keep a copy.",
+      ? "It stops syncing here first, so your other devices and the people you invited keep their copies. You can get it back from Recently Deleted."
+      : "You can undo this, or get it back later from Recently Deleted.",
     "Delete",
     true,
   );
@@ -48,7 +48,13 @@ async function removeSpace(folder: string) {
   // Stopping first keeps the deletion from syncing to everyone else.
   if (synced) syncService.stopSyncing(folder);
   if (workspace()?.folder === folder) openSpace(null);
-  await deleteSpace(folder);
+  const item = await deleteSpace(folder);
+  if (item) {
+    toast(`Deleted “${folder}”`, [
+      { label: "Undo", run: () => void restoreSpace(item).then((ok) => ok && openSpace(folder)) },
+      { label: "Show Recently Deleted", run: () => showRecentlyDeleted(null) },
+    ]);
+  }
 }
 
 async function removeEverywhere(id: string, name: string) {
@@ -85,7 +91,11 @@ function spaceMenu(folder: string): MenuItem[] {
     items.push({ label: "Sync to My Devices", disabled: !syncService.isRunning(), action: () => syncService.share(folder) });
     items.push({ label: "Copy Invite Link…", disabled: !syncService.isRunning(), action: () => void commands.copyInviteLink(folder) });
   }
-  items.push({ separator: true }, { label: "Delete Space…", destructive: true, action: () => void removeSpace(folder) });
+  items.push(
+    { separator: true },
+    { label: "Show Recently Deleted", action: () => showRecentlyDeleted(folder) },
+    { label: "Delete Space…", destructive: true, action: () => void removeSpace(folder) },
+  );
   return items;
 }
 

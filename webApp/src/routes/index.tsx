@@ -7,6 +7,7 @@ import FileViewer from "~/components/FileViewer";
 import { Eye, EyeOff, Link, PanelLeft, PanelRight, Plus, Search, Upload } from "~/components/icons";
 import { MenuHost } from "~/components/Menu";
 import PreviewPane from "~/components/PreviewPane";
+import RecentlyDeleted from "~/components/RecentlyDeleted";
 import SearchPanel from "~/components/SearchPanel";
 import SettingsWindow from "~/components/Settings";
 import SpacesSidebar, { importFolder, importZip, newSpace } from "~/components/SpacesSidebar";
@@ -242,6 +243,9 @@ export default function Home() {
         </Match>
         <Match when={overlay()?.type === "settings"}>
           <SettingsWindow />
+        </Match>
+        <Match when={overlay()?.type === "deleted"}>
+          <RecentlyDeleted />
         </Match>
       </Switch>
       <Dialogs />

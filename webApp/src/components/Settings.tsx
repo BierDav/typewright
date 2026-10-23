@@ -1,5 +1,5 @@
 import { createMemo, createResource, createSignal, For, type JSX, Match, onMount, Show, Switch } from "solid-js";
-import { confirm, openSpace, overlay, prompt, setOverlay, type SettingsTab, workspace } from "~/lib/app";
+import { confirm, openSpace, overlay, prompt, setOverlay, type SettingsTab, showRecentlyDeleted, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import * as fontLib from "~/lib/fonts";
@@ -212,7 +212,14 @@ function General() {
           </div>
         </Row>
       </Section>
-      <Section title="Trash" footer="Deleted files and files other devices deleted wait here.">
+      <Section title="Recently Deleted" footer="Files you delete stay in the history, where Recently Deleted finds them again.">
+        <Row label="Deleted files">
+          <button class="button small" onClick={() => showRecentlyDeleted(null)}>
+            Show Recently Deleted…
+          </button>
+        </Row>
+      </Section>
+      <Section title="Deleted by Sync" footer="Files other devices deleted wait here.">
         <Show when={trash()?.length} fallback={<div class="form-row secondary">The trash is empty.</div>}>
           <For each={trash()!.slice(0, 100)}>
             {(item) => (

@@ -1,5 +1,5 @@
 import { createSignal, For, onMount, Show } from "solid-js";
-import { copyText, type Dialog, dialogs, toasts } from "~/lib/app";
+import { copyText, type Dialog, dialogs, dismissToast, toasts } from "~/lib/app";
 import { Copy } from "./icons";
 
 function DialogView(props: { dialog: Dialog }) {
@@ -76,7 +76,26 @@ export default function Dialogs() {
     <>
       <For each={dialogs}>{(dialog) => <DialogView dialog={dialog} />}</For>
       <div class="toasts" aria-live="polite">
-        <For each={toasts}>{(toast) => <div class="toast glass">{toast.text}</div>}</For>
+        <For each={toasts}>
+          {(toast) => (
+            <div class="toast glass" classList={{ actionable: toast.actions.length > 0 }}>
+              <span>{toast.text}</span>
+              <For each={toast.actions}>
+                {(action) => (
+                  <button
+                    class="toast-action"
+                    onClick={() => {
+                      dismissToast(toast.id);
+                      action.run();
+                    }}
+                  >
+                    {action.label}
+                  </button>
+                )}
+              </For>
+            </div>
+          )}
+        </For>
       </div>
     </>
   );

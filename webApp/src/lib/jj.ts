@@ -22,6 +22,20 @@ export type FileVersion = {
   removed: number;
 };
 
+/** A deleted file or folder the history (or the stash of untracked LFS files) still has. */
+export type DeletedItem = {
+  path: string;
+  kind: "file" | "folder";
+  files: number;
+  /** The deleting commit and its parent, which still has the item; absent for stashed LFS files only. */
+  commit?: string | null;
+  lastCommit?: string | null;
+  stash?: string | null;
+  /** Milliseconds since the epoch. */
+  time: number;
+  description: string;
+};
+
 export type FileContent = { text: string } | { data: Uint8Array } | { missing: true };
 
 export type ConflictHunk = { text: string } | { conflict: { base: string; sides: string[] } };
@@ -227,6 +241,41 @@ export async function restore(path: string, commitId: string): Promise<boolean> 
   if (!(await call<{ commit: string | null }>("twj_restore_file", commitId, path))) return false;
   commitListeners.forEach((l) => l([path]));
   return true;
+}
+
+// MARK: Deleting
+
+/** Deletes and commits `message` at once; there's no trash. Null when this tab doesn't run the repository. */
+export async function deleteItems(paths: string[], message: string): Promise<DeletedItem[] | null> {
+  clearTimers();
+  const result = await call<{ deleted: (DeletedItem & { time: number })[] }>("twj_delete", JSON.stringify(paths), message);
+  if (!result) return null;
+  commitListeners.forEach((l) => l(paths));
+  return result.deleted.map(fromWire);
+}
+
+function fromWire(item: DeletedItem): DeletedItem {
+  return { ...item, description: item.description ?? "", time: item.time * 1000 };
+}
+
+/** Deleted items under `prefix` ("" for all), newest first. */
+export async function deleted(prefix = "", limit = 500): Promise<DeletedItem[]> {
+  return ((await call<DeletedItem[]>("twj_deleted", prefix, limit)) ?? []).map(fromWire);
+}
+
+/** Puts a deleted item back at `dest` (repo-relative; its own path or a free name). */
+export async function restoreDeleted(item: DeletedItem, dest: string): Promise<"restored" | "exists" | "failed"> {
+  const entry = JSON.stringify({ ...item, time: item.time / 1000 });
+  const result = await call<{ commit?: string | null; exists?: boolean }>("twj_restore_deleted", entry, dest);
+  if (!result) return "failed";
+  if (result.exists) return "exists";
+  commitListeners.forEach((l) => l([dest]));
+  return "restored";
+}
+
+/** Whether this tab runs the repository, so history calls work here. */
+export function isOpen(): boolean {
+  return repository.status === "open";
 }
 
 // MARK: Conflicts
