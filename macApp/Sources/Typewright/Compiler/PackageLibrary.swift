@@ -37,6 +37,37 @@ final class PackageLibrary {
         var canUpdate: Bool { isCloned || packages.contains(where: \.isCloned) }
     }
 
+    /// One release in Typst Universe's package list.
+    struct UniversePackage: Codable, Hashable, Identifiable {
+        let name: String
+        let version: String
+        let description: String?
+        let authors: [String]?
+        let license: String?
+        let repository: String?
+        let updatedAt: Int?
+        var id: String { "\(name):\(version)" }
+        var spec: String { "@preview/\(name):\(version)" }
+    }
+
+    /// A package imported at an older version than Typst Universe has.
+    struct Upgrade: Equatable {
+        let spec: String
+        let latest: String
+        let updatedSpec: String
+        let range: NSRange
+    }
+
+    /// A package's `typst.toml`, for docs while offline.
+    struct Manifest {
+        let name: String
+        let version: String
+        let description: String?
+        let authors: [String]
+        let license: String?
+        let repository: String?
+    }
+
     /// Where typst caches downloaded `@preview` packages.
     let cacheDirectory = URL.cachesDirectory.appending(path: "typst/packages", directoryHint: .isDirectory)
     /// Where typst looks for local packages, one folder per namespace.
@@ -49,8 +80,19 @@ final class PackageLibrary {
     private(set) var linkError: String?
     private(set) var cloning: Set<String> = []
 
+    /// Typst Universe's package list, cached so completions, versions and docs work offline.
+    private(set) var universe: [UniversePackage] = []
+    /// Whether the list was fetched from the network this session; offline only uses the cache.
+    private(set) var isOnline = false
+    @ObservationIgnored private var universeByName: [String: [UniversePackage]] = [:]
+    @ObservationIgnored private var refreshingUniverse = false
+
+    private static let universeURL = URL(string: "https://packages.typst.org/preview/index.json")!
+    private static let universeCache = URL.applicationSupportDirectory.appending(path: "Typewright/packages-index.json")
+
     private init() {
         refresh()
+        loadUniverseCache()
     }
 
     func refresh() {
@@ -75,6 +117,201 @@ final class PackageLibrary {
             guard target != nil || fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue else { return nil }
             return Namespace(name: name, url: url, target: target, packages: Self.packages(in: url, namespace: name))
         }
+    }
+
+    // MARK: - Typst Universe
+
+    /// Fetches Universe's package list; the cache keeps versions and docs working offline.
+    func refreshUniverse() async {
+        guard !refreshingUniverse else { return }
+        refreshingUniverse = true
+        defer { refreshingUniverse = false }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: Self.universeURL)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+            let list = try JSONDecoder().decode([UniversePackage].self, from: data)
+            try? FileManager.default.createDirectory(at: Self.universeCache.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? data.write(to: Self.universeCache, options: .atomic)
+            setUniverse(list)
+            isOnline = true
+        } catch {
+            isOnline = false
+        }
+    }
+
+    private func loadUniverseCache() {
+        guard let data = try? Data(contentsOf: Self.universeCache),
+              let list = try? JSONDecoder().decode([UniversePackage].self, from: data) else { return }
+        setUniverse(list)
+    }
+
+    private func setUniverse(_ list: [UniversePackage]) {
+        universe = list
+        universeByName = Dictionary(grouping: list, by: \.name).mapValues { entries in
+            entries.sorted { $0.version.compare($1.version, options: .numeric) == .orderedDescending }
+        }
+    }
+
+    /// Every release, newest first per package, for completing imports and their versions.
+    var universeSpecs: [String] {
+        universeByName.keys.sorted().flatMap { universeByName[$0]?.map(\.spec) ?? [] }
+    }
+
+    func universePackage(for spec: String) -> UniversePackage? {
+        guard let parts = Self.parts(of: spec), parts.namespace == "preview" else { return nil }
+        return universeByName[parts.name]?.first { $0.version == parts.version }
+    }
+
+    /// The newest release Universe lists, or the newest local copy when the list isn't available.
+    func latestVersion(namespace: String, name: String) -> String? {
+        if namespace == "preview", let newest = universeByName[name]?.first?.version { return newest }
+        return localPackages(namespace: namespace, name: name).map(\.version)
+            .max { $0.compare($1, options: .numeric) == .orderedAscending }
+    }
+
+    /// Every version in Universe and on disk, newest first.
+    func versions(namespace: String, name: String) -> [String] {
+        var versions = Set(localPackages(namespace: namespace, name: name).map(\.version))
+        if namespace == "preview" { versions.formUnion(universeByName[name]?.map(\.version) ?? []) }
+        return versions.sorted { $0.compare($1, options: .numeric) == .orderedDescending }
+    }
+
+    private func localPackages(namespace: String, name: String) -> [Package] {
+        let downloaded = namespace == "preview" ? self.downloaded.filter { $0.name == name } : []
+        let local = namespaces.first { $0.name == namespace }?.packages.filter { $0.name == name } ?? []
+        return downloaded + local
+    }
+
+    /// The spec from a completion's label, which tinymist quotes.
+    static func spec(in label: String) -> String? {
+        let trimmed = label.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        return parts(of: trimmed) != nil ? trimmed : nil
+    }
+
+    /// `@namespace/name` and its version, when written.
+    static func parts(of spec: String) -> (namespace: String, name: String, version: String?)? {
+        guard let match = specMatch(spec), let namespace = group(match, 1, in: spec),
+              let name = group(match, 2, in: spec) else { return nil }
+        return (namespace, name, group(match, 3, in: spec))
+    }
+
+    /// Markdown docs for a package, built from the cached list and the package's `typst.toml` so they work offline.
+    func documentation(for spec: String) -> String? {
+        guard let parts = Self.parts(of: spec),
+              let version = parts.version ?? latestVersion(namespace: parts.namespace, name: parts.name) else { return nil }
+        let full = "@\(parts.namespace)/\(parts.name):\(version)"
+        let entry = universePackage(for: full)
+        let manifest = packageFolder(namespace: parts.namespace, name: parts.name, version: version)
+            .flatMap(Self.manifest(at:))
+        var lines: [String] = []
+        if parts.namespace == "preview",
+           let page = URL(string: "https://typst.app/universe/package/\(parts.name)") {
+            var links = ["[Universe](\(page.absoluteString))"]
+            if let repository = entry?.repository ?? manifest?.repository, let url = URL(string: repository) {
+                links.append("[Repository](\(url.absoluteString))")
+            }
+            lines.append(links.joined(separator: " | "))
+        }
+        // Offline without a cached list, don't claim a version is the newest.
+        let newest = parts.namespace == "preview"
+            ? universeByName[parts.name]?.first?.version : latestVersion(namespace: parts.namespace, name: parts.name)
+        lines.append("**Package:** `\(full)`")
+        if let newest {
+            lines.append(newest == version ? "**Up to date** (latest version)" : "**Latest:** `\(newest)`")
+        }
+        let authors = entry?.authors ?? manifest?.authors ?? []
+        if !authors.isEmpty { lines.append("**Authors:** \(authors.joined(separator: ", "))") }
+        if let description = entry?.description ?? manifest?.description, !description.isEmpty {
+            lines.append("**Description:** \(description)")
+        }
+        if let license = entry?.license ?? manifest?.license, !license.isEmpty {
+            lines.append("**License:** \(license)")
+        }
+        if let updated = entry?.updatedAt { lines.append("**Updated:** \(Self.date(updated))") }
+        let releases = versions(namespace: parts.namespace, name: parts.name)
+        if releases.count > 1 {
+            lines.append("**Available Versions (\(releases.count))**")
+            let details = parts.namespace == "preview" ? universeByName[parts.name] ?? [] : []
+            for release in releases {
+                let date = details.first { $0.version == release }?.updatedAt.map { " / \(Self.date($0))" } ?? ""
+                lines.append("- \(release == newest ? "**\(release)**" : release)\(date)")
+            }
+        }
+        return lines.joined(separator: "\n\n")
+    }
+
+    private func packageFolder(namespace: String, name: String, version: String) -> URL? {
+        if let local = localPackages(namespace: namespace, name: name).first(where: { $0.version == version }) {
+            return local.url
+        }
+        let base = namespace == "preview" ? cacheDirectory.appending(path: "preview") : dataDirectory.appending(path: namespace)
+        let url = base.appending(path: "\(name)/\(version)", directoryHint: .isDirectory)
+        return FileManager.default.fileExists(atPath: url.appending(path: "typst.toml").path) ? url : nil
+    }
+
+    /// Packages imported at a version older than the one `latest` names.
+    static func upgrades(in text: String, latest: (String) -> String?) -> [Upgrade] {
+        let s = text as NSString
+        return upgradePattern.matches(in: text, range: NSRange(location: 0, length: s.length)).compactMap { match in
+            guard let name = group(match, 1, in: text), let version = group(match, 2, in: text),
+                  let newest = latest(name), newest != version else { return nil }
+            return Upgrade(spec: s.substring(with: match.range), latest: newest,
+                           updatedSpec: "@preview/\(name):\(newest)", range: match.range)
+        }
+    }
+
+    static func manifest(at folder: URL) -> Manifest? {
+        guard let toml = try? String(contentsOf: folder.appending(path: "typst.toml"), encoding: .utf8),
+              let core = packageManifest(toml: toml) else { return nil }
+        return Manifest(name: core.name, version: core.version,
+                        description: tomlString("description", in: toml),
+                        authors: tomlStrings("authors", in: toml) ?? tomlString("authors", in: toml).map { [$0] } ?? [],
+                        license: tomlString("license", in: toml),
+                        repository: tomlString("repository", in: toml))
+    }
+
+    private static let specPattern = try! NSRegularExpression(
+        pattern: #"^@([A-Za-z_][A-Za-z0-9_-]*)/([A-Za-z0-9_-]+)(?::([A-Za-z0-9_.-]+))?$"#)
+    private static let upgradePattern = try! NSRegularExpression(
+        pattern: #"@preview/([A-Za-z0-9_-]+):([A-Za-z0-9_.-]+)"#)
+
+    private static func specMatch(_ spec: String) -> NSTextCheckingResult? {
+        specPattern.firstMatch(in: spec, range: NSRange(location: 0, length: (spec as NSString).length))
+    }
+
+    private static func group(_ match: NSTextCheckingResult, _ index: Int, in text: String) -> String? {
+        let range = match.range(at: index)
+        return range.location == NSNotFound ? nil : (text as NSString).substring(with: range)
+    }
+
+    private static func tomlString(_ key: String, in toml: String) -> String? {
+        let pattern = "(?m)^\\s*" + NSRegularExpression.escapedPattern(for: key) + "\\s*=\\s*\"([^\"]*)\""
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: toml, range: NSRange(location: 0, length: (toml as NSString).length)) else {
+            return nil
+        }
+        return group(match, 1, in: toml)
+    }
+
+    private static func tomlStrings(_ key: String, in toml: String) -> [String]? {
+        let pattern = "(?m)^\\s*" + NSRegularExpression.escapedPattern(for: key) + "\\s*=\\s*\\[([^\\]]*)\\]"
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: toml, range: NSRange(location: 0, length: (toml as NSString).length)),
+              let inner = group(match, 1, in: toml),
+              let quotes = try? NSRegularExpression(pattern: #""([^"]*)""#) else { return nil }
+        return quotes.matches(in: inner, range: NSRange(location: 0, length: (inner as NSString).length))
+            .compactMap { group($0, 1, in: inner) }
+    }
+
+    private static let universeDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    private static func date(_ timestamp: Int) -> String {
+        universeDate.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp)))
     }
 
     /// `<dir>/<name>/<version>` folders.

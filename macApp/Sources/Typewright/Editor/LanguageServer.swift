@@ -165,6 +165,8 @@ struct CompletionItem: Equatable {
     var documentation: String? = nil
     /// The server's item, sent back to resolve docs it left out.
     var raw: Data? = nil
+    /// Whether `detail` is a signature to show above the docs, rather than a label like "Downloaded".
+    var showsDetailAsSignature = true
 }
 
 /// A stdio JSON-RPC client for one tinymist process serving one space.

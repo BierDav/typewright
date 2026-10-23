@@ -23,6 +23,7 @@ struct SpaceView: View {
 
     private var diagnostics: [Diagnostic] {
         workspace.diagnostics.filter { !(ignoreLibraryWarnings && $0.isFromPackage && $0.severity == .warning) }
+            + workspace.packageDiagnostics
     }
 
     private var fileDiagnostics: [Diagnostic] {

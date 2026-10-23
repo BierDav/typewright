@@ -144,7 +144,7 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
         docsTask = Task { [weak self] in
             let docs = await self?.docsProvider?(item)
             guard let self, !Task.isCancelled, self.showsDocs, self.isVisible else { return }
-            let signature = item.detail.map { "```typc\n\($0)\n```\n\n" } ?? ""
+            let signature = item.showsDetailAsSignature ? item.detail.map { "```typc\n\($0)\n```\n\n" } ?? "" : ""
             self.showDocs(docs ?? signature + "No documentation")
         }
     }

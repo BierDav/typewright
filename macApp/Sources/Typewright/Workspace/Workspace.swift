@@ -71,6 +71,20 @@ final class Workspace: EditorLanguage {
     /// The previewed Markdown file as HTML.
     private(set) var markdownHTML: String?
     private(set) var diagnostics: [Diagnostic] = []
+    /// Universe packages imported at an older version; shown while the package list could be fetched.
+    var packageDiagnostics: [Diagnostic] {
+        guard PackageLibrary.shared.isOnline, selectedKind == .typst, let file = selectedFile, let path = relative(file) else {
+            return []
+        }
+        let source = text as NSString
+        let library = PackageLibrary.shared
+        return PackageLibrary.upgrades(in: text) { library.latestVersion(namespace: "preview", name: $0) }.map { upgrade in
+            let (line, column) = Self.lineAndColumn(of: upgrade.range.location, in: source)
+            return Diagnostic(path: path, line: line + 1, column: column + 1, severity: .warning,
+                              message: "Package \(upgrade.spec) can be updated to \(upgrade.latest).",
+                              length: upgrade.range.length)
+        }
+    }
     /// Compiler output when compilation failed without diagnostics.
     private(set) var failureLog: String?
     private(set) var isCompiling = false
@@ -1057,6 +1071,10 @@ final class Workspace: EditorLanguage {
     func documentation(of item: CompletionItem) async -> String? {
         // solveng's functions document themselves, the same as their hover.
         if item.kind == .function, let f = SolvengSupport.function(item.label) { return FunctionDocs.markdown(for: f) }
+        // Package docs come from the cache and the downloaded manifest, so they work offline.
+        if let spec = PackageLibrary.spec(in: item.label), let docs = PackageLibrary.shared.documentation(for: spec) {
+            return docs
+        }
         guard let client = languageClient() else { return item.documentation }
         if let docs = await client.documentation(of: item) { return docs }
         guard let file = selectedFile, selectedKind == .typst else { return nil }
@@ -1069,8 +1087,14 @@ final class Workspace: EditorLanguage {
         if let solveng, solveng.exclusive { return solveng.items }
         let packages = packageCompletions(at: offset)
         guard let client = languageClient() else { return (solveng?.items ?? []) + packages }
-        let items = await client.completions(in: file, text: text as NSString, at: offset)
-        let labels = Set(items.map(\.label))
+        let items = await client.completions(in: file, text: text as NSString, at: offset).map { item -> CompletionItem in
+            guard PackageLibrary.spec(in: item.label) != nil else { return item }
+            var item = item
+            item.showsDetailAsSignature = false
+            return item
+        }
+        // tinymist quotes package specs; compare them with the package list's unquoted ones.
+        let labels = Set(items.map { PackageLibrary.spec(in: $0.label) ?? $0.label })
         // In math the calculation's names come before Typst's symbols.
         let names = solveng?.items ?? []
         let named = Set(names.map(\.label))
@@ -1232,16 +1256,33 @@ final class Workspace: EditorLanguage {
     }
 
     /// tinymist only knows `@preview`; local namespaces and downloaded packages come from the package folders.
+    /// Universe's cached list adds every online version, so names and versions complete offline too.
     private func packageCompletions(at offset: Int) -> [CompletionItem] {
         let start = Int(packageSpecStart(text: text, offset: Int32(offset)))
         guard start >= 0 else { return [] }
         let library = PackageLibrary.shared
-        let specs = library.namespaces.flatMap(\.packages).map(\.spec) + library.downloaded.map(\.spec)
+        let local = library.namespaces.flatMap(\.packages) + library.downloaded
+        let localSpecs = Set(local.map(\.spec))
+        var seen = Set<String>()
+        let specs = (library.universeSpecs + local.map(\.spec)).filter { seen.insert($0).inserted }
+        let latest = Dictionary(grouping: library.universe, by: \.name).compactMapValues {
+            $0.max { $0.version.compare($1.version, options: .numeric) == .orderedAscending }?.version
+        }
         let typed = (text as NSString).substring(with: NSRange(location: start, length: offset - start))
         let range = NSRange(location: start, length: offset - start)
-        return packageCandidates(typed: typed, specs: specs).map { spec in
-            CompletionItem(label: spec, detail: spec.hasPrefix("@preview/") ? "Downloaded" : "Local package", kind: .file,
-                           filterText: spec, sortText: spec, newText: spec, isSnippet: false, range: range)
+        return packageCandidates(typed: typed, specs: specs).enumerated().map { index, spec in
+            let detail: String
+            if localSpecs.contains(spec) {
+                detail = spec.hasPrefix("@preview/") ? "Downloaded" : "Local package"
+            } else if let parts = PackageLibrary.parts(of: spec), let version = parts.version,
+                      library.universePackage(for: spec) != nil {
+                detail = latest[parts.name] == version ? "Typst Universe · Latest" : "Typst Universe"
+            } else {
+                detail = "Typst Universe"
+            }
+            return CompletionItem(label: spec, detail: detail, kind: .file, filterText: spec,
+                                  sortText: String(format: "%05d", index), newText: spec, isSnippet: false,
+                                  range: range, showsDetailAsSignature: false)
         }
     }
 
@@ -1255,6 +1296,13 @@ final class Workspace: EditorLanguage {
                 return (FunctionDocs.markdown(for: f), range)
             }
             return (solveng.markdown, range)
+        }
+        // Offline, tinymist's package hover fails; the cache and the package's manifest still describe it.
+        if !PackageLibrary.shared.isOnline,
+           let range = Self.stringLiteralRange(at: offset, in: text as NSString),
+           let spec = PackageLibrary.spec(in: (text as NSString).substring(with: range)),
+           let docs = PackageLibrary.shared.documentation(for: spec) {
+            return (docs, range)
         }
         var docs = await languageClient()?.hover(in: file, text: text as NSString, at: offset)
         if docs == nil { docs = await languageClient()?.parameterDocs(in: file, text: text as NSString, at: offset) }
@@ -1340,7 +1388,26 @@ final class Workspace: EditorLanguage {
     }
 
     func quickFixes(for diagnostic: Diagnostic) -> [QuickFix] {
-        QuickFixes.fixes(for: diagnostic, root: root) + quotingFixes(for: diagnostic)
+        QuickFixes.fixes(for: diagnostic, root: root) + packageUpgradeFixes(for: diagnostic) + quotingFixes(for: diagnostic)
+    }
+
+    /// Replaces an outdated package's version where the diagnostic underlines it.
+    private func packageUpgradeFixes(for diagnostic: Diagnostic) -> [QuickFix] {
+        guard diagnostic.message.hasPrefix("Package "), let file = selectedFile,
+              diagnostic.path == relativePath(of: file), let tv = find.textView,
+              let length = diagnostic.length else { return [] }
+        let s = text as NSString
+        guard let line = CodeEditor.lineRange(diagnostic.line, in: s) else { return [] }
+        let range = NSRange(location: line.location + max(diagnostic.column - 1, 0), length: length)
+        guard NSMaxRange(range) <= s.length else { return [] }
+        let spec = s.substring(with: range)
+        guard let parts = PackageLibrary.parts(of: spec), let latest = PackageLibrary.shared.latestVersion(
+            namespace: parts.namespace, name: parts.name), latest != parts.version else { return [] }
+        let updated = "@\(parts.namespace)/\(parts.name):\(latest)"
+        return [QuickFix(id: "package.update", title: "Update to \(latest)", icon: "arrow.up.circle") {
+            guard tv.string == s as String else { return }
+            tv.insertText(updated, replacementRange: range)
+        }]
     }
 
     /// Typst reads a word of several letters in math as a variable of its own; solveng's names and units are quoted

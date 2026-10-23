@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         BuiltinCompiler.warmUp()
         Task { await CompilerManager.shared.setUp() }
         Task { await LanguageServerManager.shared.setUp() }
+        if !Self.isTesting { Task { await PackageLibrary.shared.refreshUniverse() } }
         SyncService.shared.restart()
         Opener.shared.restoreSession()
         // Tests run inside the app; they must neither commit to nor ask about the user's spaces.
