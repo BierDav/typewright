@@ -119,13 +119,16 @@ pub unsafe extern "C" fn twj_deleted(repo: *mut TWJRepo, prefix: *const c_char, 
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_restore_path(
-    repo: *mut TWJRepo,
-    commit: *const c_char,
-    path: *const c_char,
-    dest: *const c_char,
-) -> *mut c_char {
-    guard_repo(repo, |r| r.restore_path(unsafe { text(commit) }?, unsafe { text(path) }?, unsafe { text(dest) }?))
+pub unsafe extern "C" fn twj_delete(repo: *mut TWJRepo, paths: *const c_char, message: *const c_char) -> *mut c_char {
+    guard_repo(repo, |r| {
+        let paths: Vec<String> = serde_json::from_str(unsafe { text(paths) }?)?;
+        r.delete(&paths, unsafe { text(message) }?)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn twj_restore_deleted(repo: *mut TWJRepo, entry: *const c_char, dest: *const c_char) -> *mut c_char {
+    guard_repo(repo, |r| r.restore_deleted(unsafe { text(entry) }?, unsafe { text(dest) }?))
 }
 
 #[unsafe(no_mangle)]

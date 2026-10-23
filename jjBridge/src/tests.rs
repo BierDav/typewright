@@ -466,27 +466,58 @@ fn recently_deleted_groups_folders_and_dedups() {
     assert_eq!(paths(&all), [("T".into(), "folder".into()), ("S/figs".into(), "folder".into()), ("S/notes.typ".into(), "file".into())]);
     assert_eq!(all[1]["files"], 2);
     assert_eq!(all[2]["description"], "Delete S/notes.typ");
-    let notes = &all[2];
+    let notes = all[2].clone();
     assert_eq!(repo.file_at(notes["lastCommit"].as_str().unwrap(), "S/notes.typ").unwrap()["text"], "notes v2\n");
     // Scoped to a folder.
     assert_eq!(paths(&repo.deleted("S", 50).unwrap()).len(), 2);
     assert_eq!(paths(&repo.deleted("S", 1).unwrap()).len(), 1);
 
     // Restoring a folder brings all its files back and drops it from the list.
-    let figs = all[1]["lastCommit"].as_str().unwrap().to_owned();
-    let restored = repo.restore_path(&figs, "S/figs", "S/figs").unwrap();
+    let restored = repo.restore_deleted(&all[1].to_string(), "S/figs").unwrap();
     assert_eq!(restored["files"], 2);
     assert_eq!(read(&repo, "S/figs/sub/b.typ"), "b\n");
     assert_eq!(paths(&repo.deleted("", 50).unwrap()).len(), 2);
     // Something at the destination is never overwritten; another name works.
-    let lc = notes["lastCommit"].as_str().unwrap().to_owned();
     write(&repo, "S/notes.typ", "new\n");
-    assert_eq!(repo.restore_path(&lc, "S/notes.typ", "S/notes.typ").unwrap()["exists"], true);
-    repo.restore_path(&lc, "S/notes.typ", "S/notes 2.typ").unwrap();
+    assert_eq!(repo.restore_deleted(&notes.to_string(), "S/notes.typ").unwrap()["exists"], true);
+    repo.restore_deleted(&notes.to_string(), "S/notes 2.typ").unwrap();
     assert_eq!(read(&repo, "S/notes 2.typ"), "notes v2\n");
     assert_eq!(read(&repo, "S/notes.typ"), "new\n");
     // A file that exists again isn't listed.
     assert!(paths(&repo.deleted("", 50).unwrap()).iter().all(|(p, _)| p != "S/notes.typ"));
+}
+
+#[test]
+fn delete_commits_and_stashes_lfs_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut repo = open(dir.path());
+    write(&repo, "S/main.typ", "main\n");
+    write(&repo, "S/fig/plot.png", [0x89, b'P', b'N', b'G', 0, 1, 2]);
+    write(&repo, "S/fig/plot.typ", "plot\n");
+    write(&repo, "S/photo.jpg", "jpeg bytes");
+    repo.commit("Add").unwrap();
+    // An unsaved edit goes into the history before the deletion.
+    write(&repo, "S/fig/plot.typ", "plot v2\n");
+    let result = repo.delete(&["S/fig".into(), "S/photo.jpg".into()], "Delete S/fig and S/photo.jpg").unwrap();
+    assert!(result["commit"].is_string());
+    assert!(!repo.root().join("S/fig").exists());
+    let entries = result["deleted"].as_array().unwrap();
+    assert!(entries[0]["stash"].is_string() && entries[1]["stash"].is_string());
+    // Both show up: the folder through jj with its stash, the LFS-only file through the stash alone.
+    let deleted = repo.deleted("S", 10).unwrap();
+    let mut listed = paths(&deleted);
+    listed.sort();
+    assert_eq!(listed, [("S/fig".into(), "folder".into()), ("S/photo.jpg".into(), "file".into())]);
+    // Undo with the entries `delete` returned.
+    repo.restore_deleted(&entries[0].to_string(), "S/fig").unwrap();
+    assert_eq!(read(&repo, "S/fig/plot.typ"), "plot v2\n");
+    assert_eq!(fs::read(repo.root().join("S/fig/plot.png")).unwrap(), [0x89, b'P', b'N', b'G', 0, 1, 2]);
+    let photo = repo.deleted("S", 10).unwrap()[0].clone();
+    assert_eq!(photo["path"], "S/photo.jpg");
+    repo.restore_deleted(&photo.to_string(), "S/photo.jpg").unwrap();
+    assert_eq!(read(&repo, "S/photo.jpg"), "jpeg bytes");
+    assert!(repo.deleted("S", 10).unwrap().as_array().unwrap().is_empty());
+    assert!(repo.commit("Edit").unwrap().commit.is_none());
 }
 
 #[test]

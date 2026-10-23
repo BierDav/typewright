@@ -62,15 +62,18 @@ char *_Nonnull twj_file_at(TWJRepo *_Nonnull repo, const char *_Nonnull commit, 
 /// Writes the file's content from `commit` into the working copy (atomically) and commits "Restore <path>". `{"commit"}`.
 char *_Nonnull twj_restore_file(TWJRepo *_Nonnull repo, const char *_Nonnull commit, const char *_Nonnull path);
 
+/// Deletes files and folders (JSON array of paths) from disk and commits `message`; there is no trash. LFS files among
+/// them are stashed in `.jj/typewright/deleted/` for 30 days, since jj never had them. Pending edits are committed
+/// first. `{"commit", "deleted": [entry, …]}` with entries as `twj_deleted` lists them, for undo.
+char *_Nonnull twj_delete(TWJRepo *_Nonnull repo, const char *_Nonnull paths, const char *_Nonnull message);
 /// Files and folders under `prefix` ("" for all) deleted in the history and not back, newest deletion first, at most
 /// `limit`: `[{"path", "kind": "file"|"folder", "files": n, "commit": deleting commit, "lastCommit": its parent (still
-/// has it), "time", "description"}]`. A folder deleted as a whole is one entry; each path shows once, at its last
-/// deletion. LFS files were never tracked, so they can't show up.
+/// has it), "stash"?: id of stashed LFS files, "time", "description"}]`. A folder deleted as a whole is one entry;
+/// each path shows once, at its last deletion. An entry may have only a stash (LFS files deleted on their own).
 char *_Nonnull twj_deleted(TWJRepo *_Nonnull repo, const char *_Nonnull prefix, uint32_t limit);
-/// Writes the file or folder `path` as it was in `commit` to `dest` (may equal `path`) and commits "Restore <dest>".
-/// `{"commit", "files": n}`; `{"error", "exists": true}` if something is at `dest` already.
-char *_Nonnull twj_restore_path(TWJRepo *_Nonnull repo, const char *_Nonnull commit, const char *_Nonnull path,
-                                const char *_Nonnull dest);
+/// Puts a deleted entry (JSON, from `twj_deleted` or `twj_delete`) back at `dest` (may differ from its path) and
+/// commits "Restore <dest>". `{"commit", "files": n}`; `{"error", "exists": true}` if something is at `dest` already.
+char *_Nonnull twj_restore_deleted(TWJRepo *_Nonnull repo, const char *_Nonnull entry, const char *_Nonnull dest);
 
 /// Conflicted files of the working-copy commit under `prefix` ("" for all): `["Space/a.typ", …]`.
 char *_Nonnull twj_conflicts(TWJRepo *_Nonnull repo, const char *_Nonnull prefix);
