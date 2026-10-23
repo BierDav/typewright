@@ -1051,7 +1051,7 @@ button.issue:hover:not(:disabled) {
 /* solveng's = or -> that shows a result: as bold as Mathcad's, past what the font's weights give */
 .tw-evaluate {
   font-weight: 900;
-  -webkit-text-stroke: 0.06em currentColor;
+  -webkit-text-stroke: 0.1em currentColor;
 }
 .tw-label {
   color: var(--hl-label);
@@ -1059,6 +1059,12 @@ button.issue:hover:not(:disabled) {
 .tw-comment {
   color: var(--hl-comment);
   font-style: italic;
+}
+.tw-unit-reference {
+  color: var(--hl-comment);
+}
+.tw-plain {
+  color: var(--text);
 }
 .tw-math {
   color: var(--hl-math);

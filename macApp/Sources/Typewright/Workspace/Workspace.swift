@@ -1462,7 +1462,42 @@ final class Workspace: EditorLanguage {
     }
 
     func quickFixes(for diagnostic: Diagnostic) -> [QuickFix] {
-        QuickFixes.fixes(for: diagnostic, root: root) + packageUpgradeFixes(for: diagnostic) + quotingFixes(for: diagnostic)
+        QuickFixes.fixes(for: diagnostic, root: root) + missingPackageFixes(for: diagnostic)
+            + packageUpgradeFixes(for: diagnostic) + quotingFixes(for: diagnostic) + unitBindingFixes(for: diagnostic)
+    }
+
+    private func unitBindingFixes(for diagnostic: Diagnostic) -> [QuickFix] {
+        guard let file = selectedFile, diagnostic.path == relativePath(of: file), let tv = find.textView else { return [] }
+        let source = text as NSString
+        guard let line = CodeEditor.lineRange(diagnostic.line, in: source) else { return [] }
+        let offset = line.location + max(diagnostic.column - 1, 0)
+        return SolvengSupport.unitFixes(text, context: solvengContext(), offset: offset).map { fix in
+            QuickFix(id: "solveng.unit.\(fix.start)", title: fix.title, icon: "number") {
+                guard tv.string == source as String else { return }
+                tv.insertText(fix.text, replacementRange: NSRange(location: fix.start, length: fix.end - fix.start))
+            }
+        }
+    }
+
+    /// Replaces an import's spec with one that's here instead, from the same namespace or another.
+    private func missingPackageFixes(for diagnostic: Diagnostic) -> [QuickFix] {
+        guard let spec = PackageLibrary.missingSpec(in: diagnostic.message), let file = selectedFile,
+              diagnostic.path == relativePath(of: file), let tv = find.textView else { return [] }
+        let s = text as NSString
+        guard let line = CodeEditor.lineRange(diagnostic.line, in: s) else { return [] }
+        let lineText = s.substring(with: line) as NSString
+        // The spec where the diagnostic points, else the first one on the line.
+        let column = min(max(diagnostic.column - 1, 0), lineText.length)
+        var found = lineText.range(of: spec, options: [], range: NSRange(location: column, length: lineText.length - column))
+        if found.location == NSNotFound { found = lineText.range(of: spec) }
+        guard found.location != NSNotFound else { return [] }
+        let range = NSRange(location: line.location + found.location, length: found.length)
+        return PackageLibrary.shared.alternatives(to: spec).prefix(4).map { alternative in
+            QuickFix(id: "package.missing.\(alternative)", title: "Use \(alternative)", icon: "shippingbox") {
+                guard tv.string == s as String else { return }
+                tv.insertText(alternative, replacementRange: range)
+            }
+        }
     }
 
     /// Replaces an outdated package's version where the diagnostic underlines it.

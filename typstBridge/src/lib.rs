@@ -401,7 +401,10 @@ fn classify(leaf: &LinkedNode) -> (HlTag, u32) {
         }
         node = n.parent().cloned();
     }
-    (tag.unwrap_or(HlTag::Plain), flags)
+    let tag = if flags & HL_MATH != 0 && matches!(leaf.get().leaf_text().as_str(), "+" | "-" | "*" | "/" | "−" | "×" | "÷" | "∗" | "⋅" | "(" | ")" | "[" | "]" | "{" | "}" | ",") {
+        HlTag::Operator
+    } else { tag.unwrap_or(HlTag::Plain) };
+    (tag, flags)
 }
 
 pub(crate) fn highlight_runs(text: &str, code: bool) -> Vec<u32> {

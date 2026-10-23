@@ -17,6 +17,13 @@ final class PackageLibraryTests: XCTestCase {
         XCTAssertEqual((text as NSString).substring(with: upgrades[0].range), "@preview/foo:1.0.0")
     }
 
+    func testPackageNotFoundMessagesNameTheirSpec() {
+        XCTAssertEqual(PackageLibrary.missingSpec(in: "package not found (searched for @solveng/solveng:0.2.0)"),
+                       "@solveng/solveng:0.2.0")
+        XCTAssertNil(PackageLibrary.missingSpec(in: "unknown variable: x"))
+        XCTAssertNil(PackageLibrary.missingSpec(in: "package found, but version 0.2.0 does not exist (latest is 1.0.0)"))
+    }
+
     func testCompletionLabelsNamePackageSpecs() {
         XCTAssertEqual(PackageLibrary.spec(in: "\"@preview/cetz:0.3.1\""), "@preview/cetz:0.3.1")
         XCTAssertEqual(PackageLibrary.spec(in: "@preview/cetz:0.3.1"), "@preview/cetz:0.3.1")

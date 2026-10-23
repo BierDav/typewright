@@ -46,4 +46,52 @@ final class QuickFixTests: XCTestCase {
         XCTAssertEqual(editor.string, "#graph($ \"tri\"(x) $)")
     }
 
+    func testDocsCommandLinksReplaceThePackageVersion() throws {
+        let text = "#import \"@solveng/solveng:0.2.0\": *\n"
+        let link = try XCTUnwrap(URL(string: "command:tinymist.replaceText?%7B%22range%22%3A%7B%22end%22%3A%7B%22character%22%3A32%2C%22line%22%3A0%7D%2C%22start%22%3A%7B%22character%22%3A8%2C%22line%22%3A0%7D%7D%2C%22replace%22%3A%22%5C%22%40solveng%2Fsolveng%3A1%2E0%2E0%5C%22%22%7D"))
+        let edit = try XCTUnwrap(LanguageCommand.replaceText(in: link, text: text))
+        XCTAssertEqual((text as NSString).substring(with: edit.range), "\"@solveng/solveng:0.2.0\"")
+        XCTAssertEqual(edit.text, "\"@solveng/solveng:1.0.0\"")
+        XCTAssertNil(LanguageCommand.replaceText(in: try XCTUnwrap(URL(string: "https://typst.app")), text: text))
+    }
+
+    func testMissingPackagesOfferVersionsHereAndInOtherNamespaces() throws {
+        let library = PackageLibrary.shared
+        let here = "twfix\(Int.random(in: 1000...9999))"
+        let other = "twother\(Int.random(in: 1000...9999))"
+        let name = "twdemo\(Int.random(in: 1000...9999))"
+        defer {
+            for namespace in [here, other] {
+                try? FileManager.default.removeItem(at: library.dataDirectory.appending(path: namespace))
+            }
+            library.refresh()
+        }
+        for (namespace, version) in [(here, "1.0.0"), (other, "0.3.0")] {
+            let folder = library.dataDirectory.appending(path: "\(namespace)/\(name)/\(version)", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try "[package]\nname = \"\(name)\"\nversion = \"\(version)\"\n"
+                .write(to: folder.appendingPathComponent("typst.toml"), atomically: true, encoding: .utf8)
+        }
+        library.refresh()
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = "#import \"@\(here)/\(name):0.2.0\": *\n"
+        let main = root.appendingPathComponent("main.typ")
+        try document.write(to: main, atomically: true, encoding: .utf8)
+        let workspace = Workspace(url: main)
+        defer { workspace.close() }
+        let editor = TypstTextView(frame: .zero)
+        editor.string = document
+        workspace.find.textView = editor
+        let diagnostic = Diagnostic(path: "main.typ", line: 1, column: 10, severity: .error,
+                                    message: "package not found (searched for @\(here)/\(name):0.2.0)")
+        let fixes = workspace.quickFixes(for: diagnostic)
+        XCTAssertEqual(fixes.map(\.id), ["package.missing.@\(here)/\(name):1.0.0",
+                                        "package.missing.@\(other)/\(name):0.3.0"])
+        fixes.first?.run?()
+        XCTAssertEqual(editor.string, "#import \"@\(here)/\(name):1.0.0\": *\n")
+    }
+
 }

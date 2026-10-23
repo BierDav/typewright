@@ -19,6 +19,7 @@ const TAG_CLASS: Record<number, string> = {
   13: "tw-keyword",
   14: "tw-keyword",
   15: "tw-keyword",
+  16: "tw-plain",
   17: "tw-number",
   18: "tw-string",
   19: "tw-function",
@@ -34,7 +35,7 @@ const MATH = 4;
 
 /** `highlight::kind` from the Rust core. */
 // Then solveng's: parameters, variables that stand out, and the = or -> showing a result, bold as in Mathcad.
-const CODE_CLASS = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit", "tw-param tw-parameter", "tw-keyword tw-evaluate"];
+const CODE_CLASS = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit", "tw-param tw-parameter", "tw-keyword tw-evaluate", "tw-plain", "tw-type", "tw-unit-reference"];
 
 const marks = new Map<string, Decoration>();
 function mark(cls: string): Decoration {

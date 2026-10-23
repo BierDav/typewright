@@ -33,6 +33,8 @@ export const Solveng = {
     compiler.solveng<{ from: number; to?: number; items: SolvengItem[]; exclusive: boolean } | null>("complete", document, context, offset),
   conversions: (document: string, context: string, offset: number) =>
     compiler.solveng<{ title: string; start: number; end: number; text: string }[]>("conversions", document, context, offset),
+  fixes: (document: string, context: string, offset: number) =>
+    compiler.solveng<{ title: string; start: number; end: number; text: string }[]>("fixes", document, context, offset),
   hover: (document: string, context: string, offset: number) =>
     compiler.solveng<{ start: number; end: number; markdown: string } | null>("hover", document, context, offset),
   /** Where the solveng name at `offset` is defined; no `path` means the document itself. */
@@ -62,7 +64,9 @@ export type Conversion = { title: string; run: () => void };
 /** solveng math ⇄ a solveng code block at the caret; `around` is the text of the files around. */
 export async function conversions(view: EditorView, around: string): Promise<Conversion[]> {
   const text = view.state.doc.toString();
-  return (await Solveng.conversions(text, around, view.state.selection.main.head)).map((c) => ({
+  const offset = view.state.selection.main.head;
+  const [fixes, rewrites] = await Promise.all([Solveng.fixes(text, around, offset), Solveng.conversions(text, around, offset)]);
+  return [...fixes, ...rewrites].map((c) => ({
     title: c.title,
     run: () => {
       if (view.state.doc.toString() !== text) return;

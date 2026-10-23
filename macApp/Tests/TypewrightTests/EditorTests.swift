@@ -457,10 +457,87 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(color(call, "h]"), Highlighter.unitColor)
     }
 
+    func testArithmeticOperatorsUseTextColor() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        for prefix in ["", "#show: worksheet\n"] {
+            let storage = NSTextStorage(string: prefix + "$-$ $a + b - c * d / e$")
+            Highlighter.apply(to: storage, font: font)
+            let source = storage.string as NSString
+            for symbol in ["-", "+", "*", "/"] {
+                let at = source.range(of: symbol).location
+                XCTAssertEqual(storage.attribute(.foregroundColor, at: at, effectiveRange: nil) as? NSColor, .textColor, symbol)
+            }
+        }
+    }
+
+    func testSolvengFunctionStyles() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        for body in ["$f(x) := sin(x) + cos(x)$ $y := f(tri(1)) + rect(2)$",
+                     "```solveng\nf(x) := sin(x) + cos(x)\ny := f(tri(1)) + rect(2)\n```"] {
+            let storage = NSTextStorage(string: "#show: worksheet\n" + body)
+            Highlighter.apply(to: storage, font: font)
+            let source = storage.string as NSString
+            for (needle, color) in [("f(x) :=", Highlighter.functionColor), ("f(tri", NSColor.textColor),
+                                    ("sin", Highlighter.typeColor), ("cos", Highlighter.typeColor),
+                                    ("tri", Highlighter.typeColor), ("rect", Highlighter.typeColor)] {
+                XCTAssertEqual(storage.attribute(.foregroundColor, at: source.range(of: needle).location, effectiveRange: nil) as? NSColor, color, needle)
+            }
+        }
+    }
+
+    func testNestedCallParenthesesUseTextColor() {
+        let source = "#show: worksheet\n$a(x) := x$\n$m_2(x) := a(sin(x)) ->$"
+        let storage = NSTextStorage(string: source)
+        Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let call = (source as NSString).range(of: "a(sin(x))")
+        for offset in call.location..<NSMaxRange(call) where ["(", ")"].contains((source as NSString).substring(with: NSRange(location: offset, length: 1))) {
+            XCTAssertEqual(storage.attribute(.foregroundColor, at: offset, effectiveRange: nil) as? NSColor, .textColor)
+        }
+    }
+
+    func testUnitVisibilityAndTypstBindings() {
+        let source = "#show: worksheet.with(units: (s: none, to: \"10km\"))\n#let to = unit(\"m\")\n$x := 2s$ $y := 2ms$ $z := 23to$"
+        let storage = NSTextStorage(string: source)
+        Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        for (needle, color) in [("s$", Highlighter.paramColor), ("ms$", Highlighter.unitColor), ("to$", Highlighter.paramColor)] {
+            let at = (source as NSString).range(of: needle).location
+            XCTAssertEqual(storage.attribute(.foregroundColor, at: at, effectiveRange: nil) as? NSColor, color)
+        }
+        let offset = (source as NSString).range(of: "to$").location
+        XCTAssertNil(SolvengSupport.renameTarget(source, context: "", offset: offset))
+    }
+
+    func testExplicitUnitBindingHashAndCompletion() throws {
+        let source = "#show: worksheet.with(builtin-units: false, units: (s: \"s\"))\n#let s = unit(\"s\")\n$x := 34#s$"
+        let storage = NSTextStorage(string: source)
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        Highlighter.apply(to: storage, font: font)
+        let hash = (source as NSString).range(of: "#s$").location
+        XCTAssertEqual(storage.attribute(.foregroundColor, at: hash, effectiveRange: nil) as? NSColor, Highlighter.commentColor)
+        let completion = try XCTUnwrap(SolvengSupport.complete(source, context: "", offset: hash + 2))
+        XCTAssertEqual(completion.from, hash)
+        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "\"s\"")
+        let bare = source.replacingOccurrences(of: "34#s", with: "34s")
+        let offset = (bare as NSString).range(of: "s$").location
+        let fix = try XCTUnwrap(SolvengSupport.unitFixes(bare, context: "", offset: offset).first { $0.text == "#" })
+        XCTAssertEqual(fix.start, offset)
+        XCTAssertEqual(fix.end, offset)
+        XCTAssertEqual(fix.text, "#")
+    }
+
+    func testGreekUnitConcealsInNamesAndConstructorStrings() {
+        let source = "#show: worksheet.with(units: (alpha: \"m\"))\n#let α = unit(\"alpha\")\n$x := 34\"alpha\"$"
+        let conceals = Highlighter.conceals(in: source)
+        for needle in ["alpha\")", "alpha\"$"] {
+            let at = (source as NSString).range(of: needle).location
+            XCTAssertTrue(conceals.contains { $0.range == NSRange(location: at, length: 5) && $0.replacement == 0x03B1 })
+        }
+    }
+
     func testSolvengResultsAreBold() {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         // The = and -> that show a result stand out as in Mathcad; = in a definition or a step doesn't.
-        let storage = NSTextStorage(string: "#show: worksheet\n$t := Q_0/I = 1 h$ $V := 2 A = 2000 mA$ $x^2 = 4 -> solve(x)$\n")
+        let storage = NSTextStorage(string: "#show: worksheet\n$t := Q_0/I = 1 \"h\"$ $V := 2 \"A\" = 2000 mA$ $x^2 = 4 -> solve(x)$\n")
         Highlighter.apply(to: storage, font: font)
         let s = storage.string as NSString
         func isBold(_ needle: String, from: String) -> Bool {
@@ -468,8 +545,10 @@ final class EditorTests: XCTestCase {
             let font = storage.attribute(.font, at: at, effectiveRange: nil) as? NSFont
             return font?.fontDescriptor.symbolicTraits.contains(.bold) == true
         }
-        XCTAssertTrue(isBold("= 1 h", from: "= 1 h$"))
+        XCTAssertTrue(isBold("= 1 \"h\"", from: "= 1 \"h\"$"))
         XCTAssertTrue(isBold("->", from: "-> solve"))
+        XCTAssertEqual(storage.attribute(.strokeWidth, at: s.range(of: "= 1 \"h\"$").location, effectiveRange: nil) as? Int, -3)
+        XCTAssertNil(storage.attribute(.strokeWidth, at: s.range(of: "= 2000").location, effectiveRange: nil))
         XCTAssertFalse(isBold("=", from: "= 2000"))
         XCTAssertTrue(isBold(":=", from: ":= Q_0"))
         XCTAssertEqual(storage.attribute(.foregroundColor, at: s.range(of: "solve(").location, effectiveRange: nil) as? NSColor,

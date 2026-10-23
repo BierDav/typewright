@@ -60,7 +60,8 @@ enum Highlighter {
         case .label, .ref: labelColor
         case .comment: commentColor
         case .link: .linkColor
-        case .plain, .punctuation, .operator, .strong, .emph, .listTerm, .error: nil
+        case .operator: .textColor
+        case .plain, .punctuation, .strong, .emph, .listTerm, .error: nil
         }
     }
 

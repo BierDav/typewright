@@ -119,6 +119,7 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
                 "complete" => json!(solveng_ide::complete(document, &c, offset)),
                 "hover" => json!(solveng_ide::hover(document, &c, offset)),
                 "conversions" => json!(solveng_ide::conversions(document, &c, offset)),
+                "fixes" => json!(solveng_ide::unit_fixes(document, &c, offset)),
                 "diagnostics" => json!(solveng_ide::diagnostics(document, &c)),
                 "definition" => json!(solveng_ide::definition(document, &c, offset)),
                 "usages" => json!(solveng_ide::usages(document, &c, offset)),

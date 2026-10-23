@@ -1815,6 +1815,7 @@ struct CodeEditor: NSViewRepresentable {
         tv.onQuickFix = { [weak c] in c?.showQuickFixes(at: $0) }
         tv.hasQuickFixes = { [weak c] in !(c?.quickFixes(at: $0).isEmpty ?? true) }
         c.hover?.fixesProvider = language.map { l in { l.quickFixes(for: $0) } }
+        c.hover?.command = { [weak c] url in c?.runCommand(url) ?? false }
         tv.onRedo = { [weak c] in c?.redoRename() == true || c?.live?.undo(redo: true) == true }
         if c.live !== live {
             c.live?.applyEdits = nil
@@ -2194,14 +2195,16 @@ struct CodeEditor: NSViewRepresentable {
             let fixes = hover.diagnostics
                 .filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index }
                 .flatMap { language.quickFixes(for: $0.diagnostic) }
-            return fixes + solvengConversions(at: index)
+            return fixes + solvengConversions(at: index).filter { conversion in !fixes.contains { $0.title == conversion.title } }
         }
 
         /// solveng math ⇄ a solveng code block.
         private func solvengConversions(at index: Int) -> [QuickFix] {
             guard let tv = textView else { return [] }
             let text = tv.string
-            let found = SolvengSupport.conversions(text, context: language?.solvengContext() ?? "", offset: index)
+            let context = language?.solvengContext() ?? ""
+            let found = SolvengSupport.unitFixes(text, context: context, offset: index)
+                + SolvengSupport.conversions(text, context: context, offset: index)
             return found.map { conversion in
                 let edit = TextEdit(range: NSRange(location: conversion.start, length: conversion.end - conversion.start),
                                     newText: conversion.text)
@@ -2618,6 +2621,15 @@ struct CodeEditor: NSViewRepresentable {
             popover.contentViewController = NSHostingController(rootView: Text(message).padding(10))
             Popups.track(popover, in: tv.window)
             popover.show(relativeTo: tv.caretAnchor(), of: tv, preferredEdge: .maxY)
+        }
+
+        /// Runs a command the docs link to, like tinymist replacing an outdated package's version.
+        @discardableResult
+        func runCommand(_ url: URL) -> Bool {
+            guard let tv = textView,
+                  let edit = LanguageCommand.replaceText(in: url, text: tv.string) else { return false }
+            apply([TextEdit(range: edit.range, newText: edit.text)], actionName: "Replace Text")
+            return true
         }
 
         /// Applies edits as one undoable change, keeping the caret and scroll position in place.

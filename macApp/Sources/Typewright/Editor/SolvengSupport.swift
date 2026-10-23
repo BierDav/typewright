@@ -157,6 +157,11 @@ enum SolvengSupport {
         decode(call("conversions", document, context: context, offset: offset)) ?? []
     }
 
+    static func unitFixes(_ document: String, context: String, offset: Int) -> [Conversion] {
+        decode(call("fixes", document, context: context, offset: offset)) ?? []
+    }
+
+
     /// The definition of the solveng name at `offset`.
     static func definition(_ document: String, context: String, offset: Int) -> Location? {
         decode(call("definition", document, context: context, offset: offset))

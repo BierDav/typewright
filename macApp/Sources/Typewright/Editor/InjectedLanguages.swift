@@ -12,6 +12,9 @@ enum InjectedLanguages {
     static let parameter: Int32 = 10
     /// solveng's `=` or `->` that shows a result, set very bold as Mathcad does.
     static let evaluate: Int32 = 11
+    static let functionCall: Int32 = 12
+    static let builtinFunction: Int32 = 13
+    static let unitReference: Int32 = 14
 
     /// Bounds Markdown in Typst in Markdown …, since each level highlights its body again.
     static let maxDepth = 3
@@ -67,7 +70,18 @@ enum InjectedLanguages {
             if tokens[i + 2] == evaluate, start + count <= length {
                 let r = NSRange(location: location + start, length: count)
                 storage.addAttributes([.foregroundColor: Highlighter.keywordColor,
-                                       .font: Highlighter.operatorFont(size: font.pointSize), .ligature: 2], range: r)
+                                       .font: Highlighter.operatorFont(size: font.pointSize), .ligature: 2,
+                                       .strokeWidth: -3, .strokeColor: Highlighter.keywordColor], range: r)
+                continue
+            }
+            if (tokens[i + 2] == functionCall || tokens[i + 2] == builtinFunction), start + count <= length {
+                let r = NSRange(location: location + start, length: count)
+                storage.addAttribute(.foregroundColor, value: tokens[i + 2] == builtinFunction ? Highlighter.typeColor : NSColor.textColor, range: r)
+                continue
+            }
+            if tokens[i + 2] == unitReference, start + count <= length {
+                storage.addAttribute(.foregroundColor, value: Highlighter.commentColor,
+                                     range: NSRange(location: location + start, length: count))
                 continue
             }
             guard let kind = Kind(rawValue: tokens[i + 2]), start + count <= length else { continue }

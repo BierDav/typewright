@@ -177,6 +177,20 @@ final class PackageLibrary {
         return versions.sorted { $0.compare($1, options: .numeric) == .orderedDescending }
     }
 
+    /// Other specs an import may mean when it isn't here: the name's other versions here, then in other namespaces.
+    func alternatives(to spec: String) -> [String] {
+        guard let parts = Self.parts(of: spec) else { return [] }
+        let here = versions(namespace: parts.namespace, name: parts.name)
+            .filter { $0 != parts.version }
+            .map { "@\(parts.namespace)/\(parts.name):\($0)" }
+        var elsewhere: [String] = []
+        for namespace in Set(namespaces.map(\.name) + ["preview"]).sorted() where namespace != parts.namespace {
+            guard let newest = latestVersion(namespace: namespace, name: parts.name) else { continue }
+            elsewhere.append("@\(namespace)/\(parts.name):\(newest)")
+        }
+        return here + elsewhere
+    }
+
     private func localPackages(namespace: String, name: String) -> [Package] {
         let downloaded = namespace == "preview" ? self.downloaded.filter { $0.name == name } : []
         let local = namespaces.first { $0.name == namespace }?.packages.filter { $0.name == name } ?? []
@@ -194,6 +208,15 @@ final class PackageLibrary {
         guard let match = specMatch(spec), let namespace = group(match, 1, in: spec),
               let name = group(match, 2, in: spec) else { return nil }
         return (namespace, name, group(match, 3, in: spec))
+    }
+
+    /// The package a "package not found" message names, like `@preview/cetz:0.3.1`.
+    static func missingSpec(in message: String) -> String? {
+        let prefix = "package not found (searched for "
+        guard let start = message.range(of: prefix)?.upperBound,
+              let end = message[start...].firstIndex(of: ")") else { return nil }
+        let spec = String(message[start..<end])
+        return parts(of: spec) != nil ? spec : nil
     }
 
     /// Markdown docs for a package, built from the cached list and the package's `typst.toml` so they work offline.

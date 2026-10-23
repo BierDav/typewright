@@ -239,6 +239,7 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// Lower is better: prefix, then substring, then scattered letters; nil if it doesn't match.
     private static func score(_ typed: String, _ key: String) -> Int? {
+        if !typed.isEmpty, key.split(separator: " ").first == Substring(typed) { return -1 }
         if typed.isEmpty || key.hasPrefix(typed) { return 0 }
         if key.contains(typed) { return 1 }
         var rest = Substring(key)

@@ -7,6 +7,8 @@ final class HoverController {
     private weak var textView: NSTextView?
     var provider: ((Int) async -> (markdown: String, range: NSRange?)?)?
     var fixesProvider: ((Diagnostic) -> [QuickFix])?
+    /// Commands the docs link to, like tinymist replacing an outdated package's version; true when it ran.
+    var command: ((URL) -> Bool)?
     /// Diagnostics with the text they cover.
     var diagnostics: [(range: NSRange, diagnostic: Diagnostic)] = [] {
         didSet { refreshDiagnostics() }
@@ -182,6 +184,8 @@ final class HoverController {
         let docs = await provider?(symbol)
         // Something may have opened on top while the server answered.
         guard !Task.isCancelled, docs != nil, isTopmost(at: point) else { return }
+        // Docs only for the glyph under the pointer, not a symbol its range stops short of.
+        if let range = docs?.range, !NSLocationInRange(symbol, range) { return }
 
         let currentErrors = diagnostics.filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index }
         let range = docs?.range ?? currentErrors.first?.range ?? NSRange(location: index, length: 1)
@@ -219,6 +223,10 @@ final class HoverController {
             if docs == nil, index > 0 { docs = await self?.provider?(index - 1) }
             guard let self, !Task.isCancelled else { return }
             guard let tv = self.textView, tv.selectedRange().location == index else { return self.isPinned = false }
+            // Docs only for the symbol the caret touches, not one across a space or an operator.
+            if let range = docs?.range, !(range.location <= index && index <= NSMaxRange(range)) {
+                docs = nil
+            }
             guard let docs else {
                 self.isPinned = false
                 self.documentationOnly = false
@@ -255,6 +263,9 @@ final class HoverController {
         let trail = DocsTrail()
         let content = HoverContent(errors: errors, markdown: markdown, width: width,
                                    fixes: fixesProvider ?? { _ in [] }, onClose: { [weak self] in self?.hide() },
+                                   command: command.map { run in { [weak self] url in
+                                       if run(url) { self?.hide() }
+                                   } },
                                    onSize: { size in
             // Fixes can arrive later, e.g. once Google Fonts' list loaded; the panel grows away from the text.
             guard let panel = placedPanel, size.height > 0, abs(panel.frame.height - size.height) > 0.5 else { return }
@@ -378,6 +389,8 @@ struct HoverContent: View {
     let width: CGFloat
     let fixes: (Diagnostic) -> [QuickFix]
     let onClose: () -> Void
+    /// Runs a link that is a command, like tinymist replacing a package version.
+    var command: ((URL) -> Void)?
     let onSize: (CGSize) -> Void
     /// The links followed in function docs, for popups that step back on Esc.
     var trail: DocsTrail?
@@ -451,6 +464,12 @@ struct HoverContent: View {
             }
         }
         .font(.callout)
+        .environment(\.openURL, OpenURLAction { url in
+            // The system has no app for tinymist's command links; they run here or do nothing.
+            guard url.scheme == "command" else { return .systemAction }
+            command?(url)
+            return .handled
+        })
         .frame(width: width, alignment: .leading)
         .onGeometryChange(for: CGSize.self) { $0.size } action: { onSize($0) }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
