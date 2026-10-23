@@ -68,6 +68,8 @@ pub struct Repo {
     pub recovered_from: Option<PathBuf>,
     /// Fixed commit time for tests.
     pub(crate) clock: Option<Timestamp>,
+    /// The local UTC offset in minutes, for hosts without a time zone database (WASI reports UTC).
+    pub(crate) utc_offset: Option<i32>,
 }
 
 pub struct Committed {
@@ -178,6 +180,7 @@ impl Repo {
             wrote_files: false,
             recovered_from,
             clock: None,
+            utc_offset: None,
         };
         repo.save_state()?;
         repo.write_excludes()?;
@@ -221,9 +224,17 @@ impl Repo {
         Signature {
             name: USER_NAME.into(),
             email: USER_EMAIL.into(),
-            timestamp: self.clock.unwrap_or_else(Timestamp::now),
+            timestamp: {
+                let mut time = self.clock.unwrap_or_else(Timestamp::now);
+                if let Some(offset) = self.utc_offset {
+                    time.tz_offset = offset;
+                }
+                time
+            },
         }
     }
+
+    pub fn set_utc_offset(&mut self, minutes: i32) { self.utc_offset = Some(minutes) }
 
     pub(crate) fn disk_path(&self, path: &RepoPath) -> Result<PathBuf> {
         path.to_fs_path(self.root()).map_err(|e| anyhow!("{e}"))

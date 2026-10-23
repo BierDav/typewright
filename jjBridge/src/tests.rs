@@ -166,6 +166,28 @@ fn squash_by_policy() {
 }
 
 #[test]
+fn utc_offset_makes_days_local() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut repo = open(dir.path());
+    // UTC+2: 21:30 UTC is still day 1 locally, 22:30 and 23:00 UTC are day 2.
+    repo.set_utc_offset(120);
+    let day1 = 20_000 * DAY;
+    let hour = 3_600_000;
+    for (i, t) in [day1 + 43 * hour / 2, day1 + 45 * hour / 2, day1 + 23 * hour, day1 + 3 * DAY].iter().enumerate() {
+        repo.clock = Some(millis(*t));
+        write(&repo, "S/f.typ", format!("v{i}\n"));
+        repo.commit(&format!("c{i}")).unwrap();
+    }
+    let head = repo.head().unwrap();
+    let wc = repo.wc_commit(&head).unwrap();
+    let parent = jj_lib::repo::Repo::store(head.as_ref()).get_commit(&wc.parent_ids()[0]).unwrap();
+    assert_eq!(parent.author().timestamp.tz_offset, 120);
+    let daily = Policy { last: 1, hourly: 0, daily: -1, weekly: 0, monthly: 0, yearly: 0 };
+    // In UTC the first three would share a day and two would go.
+    assert_eq!(repo.squash(&daily).unwrap(), (1, 3));
+}
+
+#[test]
 fn lfs_files_stay_out_of_history() {
     let dir = tempfile::tempdir().unwrap();
     let mut repo = open(dir.path());

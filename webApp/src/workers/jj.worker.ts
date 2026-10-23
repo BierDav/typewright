@@ -22,6 +22,7 @@ const GUEST_ROOT = "/repo";
 /** Argument kinds after the repo handle, as in `jjBridge/include/JJBridge.h`; `void` calls return nothing. */
 const SIGNATURES: Record<string, { args: ("str" | "str?" | "u32" | "i32" | "u64")[]; void?: true }> = {
   twj_set_lfs_limit: { args: ["u64"], void: true },
+  twj_set_utc_offset: { args: ["i32"], void: true },
   twj_commit: { args: ["str"] },
   twj_squash: { args: ["str"] },
   twj_file_history: { args: ["str", "u32"] },
@@ -157,6 +158,8 @@ async function call(fn: string, args: Arg[]): Promise<unknown> {
       allocated.push(s);
       return s[0];
     });
+    // WASI has no time zone; commits carry the browser's offset so history and retention use local days.
+    await wasi.call("twj_set_utc_offset", repo, -new Date().getTimezoneOffset());
     const result = await wasi.call(fn, repo, ...raw);
     if (signature.void) return null;
     const text = readString(result);

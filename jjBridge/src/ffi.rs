@@ -79,6 +79,9 @@ pub unsafe extern "C" fn twj_close(repo: *mut TWJRepo) {
 pub unsafe extern "C" fn twj_set_lfs_limit(repo: *mut TWJRepo, bytes: u64) { unsafe { self::repo(repo) }.set_lfs_limit(bytes) }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn twj_set_utc_offset(repo: *mut TWJRepo, minutes: i32) { unsafe { self::repo(repo) }.set_utc_offset(minutes) }
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_commit(repo: *mut TWJRepo, message: *const c_char) -> *mut c_char {
     guard_repo(repo, |r| {
         let c = r.commit(unsafe { text(message) }?)?;

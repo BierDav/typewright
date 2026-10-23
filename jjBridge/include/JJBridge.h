@@ -28,6 +28,9 @@ void twj_close(TWJRepo *_Nonnull repo);
 /// Files above `bytes` are LFS files: never tracked by jj (no history, no diffs), synced whole by hash. Also written
 /// to the repo config as `snapshot.max-new-file-size` for the CLI.
 void twj_set_lfs_limit(TWJRepo *_Nonnull repo, uint64_t bytes);
+/// The local UTC offset (minutes east) stamped on new commits, so retention counts local hours and days. Only needed
+/// where the platform has no time zone (WASI reports UTC); call again when it changes (DST).
+void twj_set_utc_offset(TWJRepo *_Nonnull repo, int32_t minutes);
 
 /// Snapshots the working copy and, if anything changed, commits @ with `message` and starts a new empty change on it.
 /// Commits on top of wherever the user moved @ (`jj new`/`jj edit`, merges); a description the user gave @ is kept,
