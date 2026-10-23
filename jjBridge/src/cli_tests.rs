@@ -74,9 +74,15 @@ fn cli_reads_managed_config_and_ignores_lfs() {
     assert_eq!(jj_ok(root, &["config", "get", "ui.conflict-marker-style"]).trim(), "git");
     let path = jj_ok(root, &["config", "path", "--repo"]);
     let text = fs::read_to_string(path.trim()).unwrap();
-    assert_eq!(crate::config::version(&text), Some("2"));
+    assert_eq!(crate::config::version(&text), Some("3"));
     assert!(jj_ok(root, &["tw-help"]).contains("For people and AI agents"));
     jj_ok(root, &["tw-log"]);
+    write(root, "S/old.typ", "old\n");
+    repo.commit("Add S/old.typ").unwrap();
+    fs::remove_file(root.join("S/old.typ")).unwrap();
+    repo.commit("Delete S/old.typ").unwrap();
+    let deleted = jj_ok(root, &["tw-deleted", "--no-graph", "-T", "description.first_line() ++ \"\\n\""]);
+    assert_eq!(deleted.trim(), "Delete S/old.typ");
     jj_ok(root, &["log", "-r", "tw_autosaves()"]);
     jj_ok(root, &["st"]);
     // New LFS files the app hasn't seen yet stay untracked by the CLI as well.

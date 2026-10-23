@@ -114,6 +114,21 @@ pub unsafe extern "C" fn twj_restore_file(repo: *mut TWJRepo, commit: *const c_c
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn twj_deleted(repo: *mut TWJRepo, prefix: *const c_char, limit: u32) -> *mut c_char {
+    guard(|| unsafe { self::repo(repo) }.deleted(unsafe { text(prefix) }?, limit))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn twj_restore_path(
+    repo: *mut TWJRepo,
+    commit: *const c_char,
+    path: *const c_char,
+    dest: *const c_char,
+) -> *mut c_char {
+    guard_repo(repo, |r| r.restore_path(unsafe { text(commit) }?, unsafe { text(path) }?, unsafe { text(dest) }?))
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn twj_conflicts(repo: *mut TWJRepo, prefix: *const c_char) -> *mut c_char {
     guard(|| Ok(json!(unsafe { self::repo(repo) }.conflicts(unsafe { text(prefix) }?)?)))
 }

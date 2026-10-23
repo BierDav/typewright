@@ -3,6 +3,7 @@
 
 mod config;
 mod conflicts;
+mod deleted;
 mod ffi;
 mod fsutil;
 mod history;

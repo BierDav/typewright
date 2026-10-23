@@ -62,6 +62,16 @@ char *_Nonnull twj_file_at(TWJRepo *_Nonnull repo, const char *_Nonnull commit, 
 /// Writes the file's content from `commit` into the working copy (atomically) and commits "Restore <path>". `{"commit"}`.
 char *_Nonnull twj_restore_file(TWJRepo *_Nonnull repo, const char *_Nonnull commit, const char *_Nonnull path);
 
+/// Files and folders under `prefix` ("" for all) deleted in the history and not back, newest deletion first, at most
+/// `limit`: `[{"path", "kind": "file"|"folder", "files": n, "commit": deleting commit, "lastCommit": its parent (still
+/// has it), "time", "description"}]`. A folder deleted as a whole is one entry; each path shows once, at its last
+/// deletion. LFS files were never tracked, so they can't show up.
+char *_Nonnull twj_deleted(TWJRepo *_Nonnull repo, const char *_Nonnull prefix, uint32_t limit);
+/// Writes the file or folder `path` as it was in `commit` to `dest` (may equal `path`) and commits "Restore <dest>".
+/// `{"commit", "files": n}`; `{"error", "exists": true}` if something is at `dest` already.
+char *_Nonnull twj_restore_path(TWJRepo *_Nonnull repo, const char *_Nonnull commit, const char *_Nonnull path,
+                                const char *_Nonnull dest);
+
 /// Conflicted files of the working-copy commit under `prefix` ("" for all): `["Space/a.typ", …]`.
 char *_Nonnull twj_conflicts(TWJRepo *_Nonnull repo, const char *_Nonnull prefix);
 /// A conflicted file split into hunks: `{"path", "binary": bool, "sides": ["This Mac", "Laptop"], "hunks": [

@@ -433,3 +433,85 @@ fn exclude_patterns_are_escaped() {
     assert_eq!(crate::config::test_pattern("S/a[1]*.png"), "/S/a\\[1\\]\\*.png");
     assert_eq!(crate::config::test_pattern("S/#x !y "), "/S/\\#x \\!y\\ ");
 }
+
+fn paths(value: &Value) -> Vec<(String, String)> {
+    value.as_array().unwrap().iter().map(|v| (v["path"].as_str().unwrap().to_owned(), v["kind"].as_str().unwrap().to_owned())).collect()
+}
+
+#[test]
+fn recently_deleted_groups_folders_and_dedups() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut repo = open(dir.path());
+    write(&repo, "S/main.typ", "main\n");
+    write(&repo, "S/notes.typ", "notes v1\n");
+    write(&repo, "S/figs/a.typ", "a\n");
+    write(&repo, "S/figs/sub/b.typ", "b\n");
+    write(&repo, "T/x.typ", "x\n");
+    repo.commit("Add").unwrap();
+    // notes: deleted, restored, edited, deleted again; only the last deletion counts.
+    fs::remove_file(repo.root().join("S/notes.typ")).unwrap();
+    repo.commit("Delete S/notes.typ").unwrap();
+    write(&repo, "S/notes.typ", "notes v2\n");
+    repo.commit("Restore").unwrap();
+    fs::remove_file(repo.root().join("S/notes.typ")).unwrap();
+    repo.commit("Delete S/notes.typ").unwrap();
+    // A whole folder in one commit is one entry.
+    fs::remove_dir_all(repo.root().join("S/figs")).unwrap();
+    repo.commit("Delete S/figs").unwrap();
+    // A whole space too.
+    fs::remove_dir_all(repo.root().join("T")).unwrap();
+    repo.commit("Delete T").unwrap();
+
+    let all = repo.deleted("", 50).unwrap();
+    assert_eq!(paths(&all), [("T".into(), "folder".into()), ("S/figs".into(), "folder".into()), ("S/notes.typ".into(), "file".into())]);
+    assert_eq!(all[1]["files"], 2);
+    assert_eq!(all[2]["description"], "Delete S/notes.typ");
+    let notes = &all[2];
+    assert_eq!(repo.file_at(notes["lastCommit"].as_str().unwrap(), "S/notes.typ").unwrap()["text"], "notes v2\n");
+    // Scoped to a folder.
+    assert_eq!(paths(&repo.deleted("S", 50).unwrap()).len(), 2);
+    assert_eq!(paths(&repo.deleted("S", 1).unwrap()).len(), 1);
+
+    // Restoring a folder brings all its files back and drops it from the list.
+    let figs = all[1]["lastCommit"].as_str().unwrap().to_owned();
+    let restored = repo.restore_path(&figs, "S/figs", "S/figs").unwrap();
+    assert_eq!(restored["files"], 2);
+    assert_eq!(read(&repo, "S/figs/sub/b.typ"), "b\n");
+    assert_eq!(paths(&repo.deleted("", 50).unwrap()).len(), 2);
+    // Something at the destination is never overwritten; another name works.
+    let lc = notes["lastCommit"].as_str().unwrap().to_owned();
+    write(&repo, "S/notes.typ", "new\n");
+    assert_eq!(repo.restore_path(&lc, "S/notes.typ", "S/notes.typ").unwrap()["exists"], true);
+    repo.restore_path(&lc, "S/notes.typ", "S/notes 2.typ").unwrap();
+    assert_eq!(read(&repo, "S/notes 2.typ"), "notes v2\n");
+    assert_eq!(read(&repo, "S/notes.typ"), "new\n");
+    // A file that exists again isn't listed.
+    assert!(paths(&repo.deleted("", 50).unwrap()).iter().all(|(p, _)| p != "S/notes.typ"));
+}
+
+#[test]
+fn recently_deleted_survives_squashing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut repo = open(dir.path());
+    let start = 20_000 * DAY;
+    repo.clock = Some(millis(start));
+    write(&repo, "S/gone.typ", "bye\n");
+    write(&repo, "S/f.typ", "v\n");
+    repo.commit("Add").unwrap();
+    for i in 0..20 {
+        repo.clock = Some(millis(start + DAY + (i + 1) * 60_000));
+        write(&repo, "S/f.typ", format!("v{i}\n"));
+        if i == 5 {
+            fs::remove_file(repo.root().join("S/gone.typ")).unwrap();
+        }
+        repo.commit("Autosave").unwrap();
+    }
+    // The day of the deletion collapses to one commit; the file's deletion is part of it.
+    let policy = Policy { last: 1, hourly: 0, daily: -1, weekly: 0, monthly: 0, yearly: 0 };
+    let (squashed, _) = repo.squash(&policy).unwrap();
+    assert!(squashed > 0);
+    let deleted = repo.deleted("", 10).unwrap();
+    assert_eq!(paths(&deleted), [("S/gone.typ".into(), "file".into())]);
+    let last = deleted[0]["lastCommit"].as_str().unwrap();
+    assert_eq!(repo.file_at(last, "S/gone.typ").unwrap()["text"], "bye\n");
+}
