@@ -130,6 +130,16 @@ test("a temp file renamed while open replaces its target, like an atomic save", 
   expect(await h.cat("tmp")).toBe("errno 44");
 });
 
+test("reading a file renamed over a cached one gives the new bytes", async () => {
+  // jj saves its working-copy state like this; stale bytes made every call look like a stale working copy.
+  const h = host();
+  await h.create("state", "op 1");
+  expect(await h.cat("state")).toBe("op 1");
+  await h.create("state.tmp", "op 2");
+  expect(await h.imports.path_rename(h.preopen, ...h.str("state.tmp"), h.preopen, ...h.str("state"))).toBe(0);
+  expect(await h.cat("state")).toBe("op 2");
+});
+
 test("a lock held elsewhere is waited out", async () => {
   const h = host();
   await h.create("busy", "x");

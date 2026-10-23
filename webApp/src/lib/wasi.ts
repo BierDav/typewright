@@ -459,6 +459,8 @@ export class OpfsFS {
       }
       const cached = this.content.get(from);
       this.forget(from);
+      // The target's old bytes must go even when the source wasn't cached (a temp file just written).
+      this.content.delete(to);
       if (cached) this.content.set(to, cached);
       this.setFileMeta(to, meta.size, meta.mtime);
     } else {
