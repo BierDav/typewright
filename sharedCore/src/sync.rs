@@ -48,9 +48,10 @@ pub fn conflict_path(path: &str, exists: impl Fn(&str) -> bool) -> String {
         .unwrap()
 }
 
+// The path-by-path engine below (with its Trash action) only serves the web app's sync now; the Mac syncs jj nodes.
+
 /// A file on this device, hashed like blobs are (BLAKE3 hex).
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
 #[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
 #[cfg_attr(target_arch = "wasm32", serde(rename_all = "camelCase"))]
 pub struct LocalFile {
@@ -62,7 +63,6 @@ pub struct LocalFile {
 
 /// The newest replica entry of a path; deletions keep their path with `deleted`.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
 #[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
 pub struct RemoteEntry {
     pub path: String,
@@ -72,7 +72,6 @@ pub struct RemoteEntry {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
 #[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
 #[cfg_attr(target_arch = "wasm32", serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase"))]
 pub enum SyncAction {
@@ -90,7 +89,6 @@ pub enum SyncAction {
     ConflictCopy { path: String, copy_path: String, hash: String, size: f64 },
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
 impl SyncAction {
     pub fn path(&self) -> String {
         match self {

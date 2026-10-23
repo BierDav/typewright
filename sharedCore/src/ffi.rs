@@ -1,7 +1,6 @@
 //! UniFFI's objects and the functions that take callbacks; plain functions are exported where they live.
 use crate::references::PathReference;
-use crate::sync::{LocalFile, RemoteEntry, SyncAction};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::RwLock;
 
 /// Answers a yes/no question about a path, like whether it's taken.
 #[uniffi::export(callback_interface)]
@@ -56,77 +55,3 @@ impl IgnoreRules {
     }
 }
 
-/// How one space's folder and its replica converge; see `sync::SpaceSync`.
-#[derive(uniffi::Object)]
-pub struct SpaceSync(Mutex<crate::sync::SpaceSync>);
-
-#[uniffi::export]
-impl SpaceSync {
-    #[uniffi::constructor(default(lfs_threshold = 1048576.0))]
-    pub fn new(lfs_threshold: f64) -> Self {
-        Self(Mutex::new(crate::sync::SpaceSync::new(lfs_threshold)))
-    }
-
-    pub fn lfs_threshold(&self) -> f64 {
-        self.0.lock().unwrap().lfs_threshold
-    }
-
-    pub fn set_lfs_threshold(&self, bytes: f64) {
-        self.0.lock().unwrap().lfs_threshold = bytes;
-    }
-
-    /// Restores the bases saved with `save`.
-    pub fn load(&self, state: &str) {
-        self.0.lock().unwrap().load(state);
-    }
-
-    pub fn save(&self) -> String {
-        self.0.lock().unwrap().save()
-    }
-
-    pub fn synced_paths(&self) -> Vec<String> {
-        self.0.lock().unwrap().synced_paths()
-    }
-
-    /// Compares a full scan of the folder (without ignored files) against the bases.
-    pub fn scan(&self, files: Vec<LocalFile>, ignore: Arc<IgnoreRules>) -> Vec<SyncAction> {
-        self.0.lock().unwrap().scan(&files, &ignore.0.read().unwrap())
-    }
-
-    /// A replica change; `local` is the file's current state and `exists` tells which paths are taken on disk.
-    pub fn remote(
-        &self,
-        entry: RemoteEntry,
-        local: Option<LocalFile>,
-        ignore: Arc<IgnoreRules>,
-        exists: Box<dyn PathCheck>,
-    ) -> Vec<SyncAction> {
-        let ignore = ignore.0.read().unwrap();
-        self.0.lock().unwrap().remote(&entry, local.as_ref(), &ignore, |p| exists.test(p.to_string()))
-    }
-
-    /// A merge that left conflicts falls back to a conflict copy.
-    pub fn merge_failed(&self, path: &str, remote_hash: &str, size: f64, exists: Box<dyn PathCheck>) -> Vec<SyncAction> {
-        self.0.lock().unwrap().merge_failed(path, remote_hash, size, |p| exists.test(p.to_string()))
-    }
-
-    /// The merged text is on disk.
-    pub fn merged(&self, path: &str, remote_hash: &str) {
-        self.0.lock().unwrap().merged(path, remote_hash);
-    }
-
-    /// A remote version that a live editing session already holds.
-    pub fn accepted(&self, path: &str, hash: &str) {
-        self.0.lock().unwrap().accepted(path, hash);
-    }
-
-    /// A `Write` finished; `ok` false leaves the path as it was.
-    pub fn wrote(&self, path: &str, hash: &str, ok: bool) {
-        self.0.lock().unwrap().wrote(path, hash, ok);
-    }
-
-    /// The replica accepted a `Publish` or `Unpublish`.
-    pub fn published(&self, path: &str, hash: &str, deleted: bool) {
-        self.0.lock().unwrap().published(path, hash, deleted);
-    }
-}
