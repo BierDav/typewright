@@ -299,7 +299,7 @@ private struct SpacesPane: View {
                         }
                     } onForget: {
                         if SpaceList.isInRepository(url) {
-                            Opener.shared.trash(space: url)
+                            Opener.shared.deleteSpace(url, in: state)
                             withAnimation(.smooth(duration: 0.3)) { onChange() }
                         } else {
                             forget(url)
@@ -629,8 +629,9 @@ private struct SpaceRow: View {
             Divider()
             if inRepository {
                 Button("Link to…") { Opener.shared.link(url) }
+                Button("Show Recently Deleted") { RecentlyDeleted.show(in: url) }
                 Divider()
-                Button("Move to Trash…", action: onForget)
+                Button("Delete Space…", action: onForget)
             } else {
                 Button("Import Into Typewright…") {
                     Task { await Opener.shared.importSpace(url) }

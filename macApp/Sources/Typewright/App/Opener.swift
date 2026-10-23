@@ -179,6 +179,30 @@ final class Opener {
 
     func previewCurrentFile() { keyState?.workspace?.previewSelectedFile() }
 
+    /// History of a file that may be deleted, in the window showing its space (opened if needed).
+    func showHistory(of file: URL, inSpace space: URL) {
+        func workspace() -> Workspace? {
+            controllers.first { $0.state.workspace?.root.standardizedFileURL == space.standardizedFileURL }?.state.workspace
+        }
+        if let ws = workspace() {
+            _ = focus(space)
+            return FileHistory.show(file, in: ws)
+        }
+        open(space)
+        // The window builds its space on the next updates.
+        Task {
+            for _ in 0..<30 {
+                try? await Task.sleep(for: .milliseconds(100))
+                if let ws = workspace() { return FileHistory.show(file, in: ws) }
+            }
+        }
+    }
+
+    /// Recently Deleted for the key window's space, or the whole library.
+    func showRecentlyDeleted() {
+        RecentlyDeleted.show(in: (keyState?.workspace?.root).flatMap { SpaceList.isInRepository($0) ? $0 : nil })
+    }
+
     /// The menu can't follow the key window, so files without history (git checkouts, outside the library) beep.
     func showFileHistory() {
         guard let ws = keyState?.workspace, let file = ws.selectedFile else { return }
@@ -361,29 +385,39 @@ final class Opener {
         }
     }
 
-    /// Moves a repository space to the Trash; links to it go too.
-    func trash(space url: URL) {
+    /// Deletes a repository space after asking; it stays in the history (Recently Deleted) and undo brings it back.
+    /// Links to it stay where they are and work again once it's back.
+    func deleteSpace(_ url: URL, in state: WindowState? = nil) {
         let url = url.standardizedFileURL
         let alert = NSAlert()
-        alert.messageText = "Move “\(url.lastPathComponent)” to the Trash?"
-        alert.informativeText = "Its files go to the Trash, where you can still get them back."
+        alert.messageText = "Delete “\(url.lastPathComponent)”?"
+        alert.informativeText = "You can undo this, or get the space back later from File › Recently Deleted…."
         if SyncService.shared.isSynced(url) { alert.informativeText += " This Mac stops syncing it; your other devices keep it." }
-        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let manager = (state ?? keyState)?.undoManager
+        FileOperations.spaces.perform(.deleteSpace(url), name: "Delete “\(url.lastPathComponent)”",
+                                      message: "Delete space \(url.lastPathComponent)", undoManager: manager)
+    }
+
+    /// The deletion itself, for `FileOperations`: windows showing the space close it, and its sync stops.
+    func deleteSpaceNow(_ url: URL, message: String) async -> DeletedItem? {
         let windows = windows(showing: url)
         windows.forEach { $0.state.workspace?.flushSaves() }
         SyncService.shared.stopSyncing(url)
-        do {
-            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-        } catch {
-            NSAlert(error: error).runModal()
-            return
+        guard let item = await SpaceRepository.shared.delete([url], message: message)?.first else {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't delete “\(url.lastPathComponent)”"
+            alert.informativeText = SpaceRepository.shared.lastError ?? ""
+            alert.runModal()
+            return nil
         }
         windows.forEach { $0.state.space = nil }
-        SpaceLinks.shared.removed(url)
-        SpaceList.remove(url)
+        // The list keeps its entry, so the space returns to its place when restored.
+        NotificationCenter.default.post(name: SpaceList.didChange, object: nil)
+        return item
     }
 
     /// Asks where to put a link to a space or an item in one, ~/Documents first.
@@ -408,7 +442,7 @@ final class Opener {
 
     /// Renames a space's folder on disk; every window showing it, its saved state, its links and its sync follow along.
     @discardableResult
-    func rename(space old: URL, to name: String) -> URL? {
+    func rename(space old: URL, to name: String, registersUndo: Bool = true) -> URL? {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let old = old.standardizedFileURL
         guard !name.isEmpty, !name.contains("/"), name != old.lastPathComponent else { return nil }
@@ -433,6 +467,12 @@ final class Opener {
         SpaceLinks.shared.moved(from: old, to: target)
         relocate(windows, from: old, to: target)
         SpaceList.replace(old, with: target)
+        if registersUndo, SpaceList.isInRepository(target) {
+            FileOperations.spaces.performed(inverse: .renameSpace(FileOp.Move(from: target, to: old)),
+                                            name: "Rename “\(old.lastPathComponent)”",
+                                            message: "Rename space \(old.lastPathComponent) to \(target.lastPathComponent)",
+                                            undoManager: keyState?.undoManager)
+        }
         return target
     }
 

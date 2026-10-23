@@ -115,6 +115,12 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored private var languageObserver: (any NSObjectProtocol)?
     @ObservationIgnored private var packageObserver: (any NSObjectProtocol)?
     @ObservationIgnored private var syncObservers: [any NSObjectProtocol] = []
+    /// File tree changes with undo; its undo manager is the window's.
+    @ObservationIgnored lazy var fileOps = FileOperations(workspace: self)
+    /// The note after a deletion, offering undo.
+    var notice: FileNotice?
+    /// Images pasted into the editor, removed again when undo takes their reference out.
+    @ObservationIgnored var pastedImages: [PastedImage] = []
 
     init(url: URL, session: WorkspaceSession? = nil) {
         let url = url.standardizedFileURL
@@ -570,6 +576,7 @@ final class Workspace: EditorLanguage {
         FileManager.default.createFile(atPath: url.path, contents: Data())
         reloadTree()
         select(url)
+        recordCreation([url], name: "New File", verb: "Add")
         return url
     }
 
@@ -579,7 +586,38 @@ final class Workspace: EditorLanguage {
         let url = Self.unique(in: dir ?? root, name: typed.isEmpty ? "New Folder" : typed, ext: nil)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         reloadTree()
+        recordCreation([url], name: "New Folder", verb: "Add")
         return url
+    }
+
+    /// A copy next to the original, named like Finder's ("name copy.ext").
+    @discardableResult
+    func duplicate(_ url: URL) -> URL? {
+        flushSaves()
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+        let ext = isDir.boolValue || url.pathExtension.isEmpty ? nil : url.pathExtension
+        let base = (ext == nil ? url.lastPathComponent : url.deletingPathExtension().lastPathComponent) + " copy"
+        let target = Self.unique(in: url.deletingLastPathComponent(), name: base, ext: ext)
+        do {
+            try FileManager.default.copyItem(at: url, to: target)
+        } catch {
+            NSAlert(error: error).runModal()
+            return nil
+        }
+        reloadTree()
+        if !isDir.boolValue { select(target) }
+        let repo = SpaceRepository.shared
+        fileOps.performed(inverse: .delete([target]), name: "Duplicate “\(url.lastPathComponent)”",
+                          message: "Duplicate \(repo.messagePath(url)) as \(repo.messagePath(target))")
+        return target
+    }
+
+    /// Undo for new items deletes them; in spaces outside the library there's no history, so no undo.
+    private func recordCreation(_ urls: [URL], name: String, verb: String) {
+        guard SpaceList.isInRepository(root), !urls.isEmpty else { return }
+        let paths = urls.map(SpaceRepository.shared.messagePath).joined(separator: ", ")
+        fileOps.performed(inverse: .delete(urls), name: name, message: "\(verb) \(paths)")
     }
 
     /// Renames a file or folder and moves buffers, selection, preview and saved state along.
@@ -590,7 +628,15 @@ final class Workspace: EditorLanguage {
         // Case-only renames hit the same file on case-insensitive volumes.
         let caseOnly = target.path.lowercased() == url.path.lowercased()
         guard caseOnly || !FileManager.default.fileExists(atPath: target.path) else { return }
-        relocate(url, to: target)
+        guard relocate(url, to: target) else { return }
+        recordMove(url, to: target, name: "Rename “\(url.lastPathComponent)”", verb: "Rename")
+    }
+
+    private func recordMove(_ url: URL, to target: URL, name: String, verb: String) {
+        guard SpaceList.isInRepository(root) else { return }
+        let repo = SpaceRepository.shared
+        fileOps.performed(inverse: .move([FileOp.Move(from: target, to: url)]), name: name,
+                          message: "\(verb) \(repo.messagePath(url)) to \(repo.messagePath(target))")
     }
 
     /// Whether `url` can be moved into the folder `dir`.
@@ -602,18 +648,24 @@ final class Workspace: EditorLanguage {
     /// Moves a file or folder into `dir`, keeping its name.
     func move(_ url: URL, into dir: URL) {
         guard canMove(url, into: dir) else { return NSSound.beep() }
-        relocate(url, to: dir.appendingPathComponent(url.lastPathComponent).standardizedFileURL)
+        let target = dir.appendingPathComponent(url.lastPathComponent).standardizedFileURL
+        guard relocate(url, to: target) else { return }
         if dir.path != root.path { expanded.insert(dir.standardizedFileURL) }
+        recordMove(url, to: target, name: "Move “\(url.lastPathComponent)”", verb: "Move")
     }
 
     /// Moves (or copies) files dropped from other apps into `dir`; name clashes get a number, like Finder.
     func importItems(_ urls: [URL], into dir: URL, copy: Bool) {
         let fm = FileManager.default
         var imported: [(url: URL, isDir: Bool)] = []
+        var inverses: [FileOp] = []
         for url in urls.map(\.standardizedFileURL) {
             // Items already in the space move like tree drags.
             if url.path.hasPrefix(root.path + "/") {
-                if canMove(url, into: dir) { move(url, into: dir) }
+                if canMove(url, into: dir) {
+                    let target = dir.appendingPathComponent(url.lastPathComponent).standardizedFileURL
+                    if relocate(url, to: target) { inverses.append(.move([FileOp.Move(from: target, to: url)])) }
+                }
                 continue
             }
             guard url.path != root.path, !root.path.hasPrefix(url.path + "/") else { continue }
@@ -625,15 +677,22 @@ final class Workspace: EditorLanguage {
             do {
                 if copy { try fm.copyItem(at: url, to: target) } else { try fm.moveItem(at: url, to: target) }
                 imported.append((target, isDir.boolValue))
+                // Undo takes copies away and puts moved items back where they came from.
+                inverses.append(copy ? .delete([target]) : .moveExternal([FileOp.Move(from: target, to: url)]))
             } catch {
                 NSAlert(error: error).runModal()
             }
         }
-        guard !imported.isEmpty else { return }
-        if dir.path != root.path { expanded.insert(dir.standardizedFileURL) }
+        if dir.path != root.path, !inverses.isEmpty { expanded.insert(dir.standardizedFileURL) }
         reloadTree()
         if imported.count == 1, let file = imported.first, !file.isDir { select(file.url) }
         schedulePersist()
+        guard SpaceList.isInRepository(root), !inverses.isEmpty else { return }
+        let names = urls.map(\.lastPathComponent)
+        let name = names.count == 1 ? "Add “\(names[0])”" : "Add \(names.count) Items"
+        let paths = imported.map { SpaceRepository.shared.messagePath($0.url) }
+        fileOps.performed(inverse: .batch(inverses.reversed()), name: name,
+                          message: paths.isEmpty ? "Move \(names.joined(separator: ", "))" : "Add \(paths.joined(separator: ", "))")
     }
 
     /// Saves images on the pasteboard next to the shown Typst or Markdown file and returns the text that shows them.
@@ -660,11 +719,20 @@ final class Workspace: EditorLanguage {
         }
         guard !saved.isEmpty else { return nil }
         reloadTree()
-        return saved.map { url in
+        let references = saved.map { url in
             let name = url.lastPathComponent
             if markdown { return "![](\(name.contains(" ") ? "<\(name)>" : name))" }
             return "#image(\"\(name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\")"
-        }.joined(separator: "\n")
+        }
+        if SpaceList.isInRepository(root) {
+            for (url, reference) in zip(saved, references) {
+                pastedImages.append(PastedImage(file: url, document: file, reference: reference))
+            }
+            pastedImages = pastedImages.suffix(20)
+            let paths = saved.map(SpaceRepository.shared.messagePath).joined(separator: ", ")
+            Task { await SpaceRepository.shared.commit("Add \(paths)") }
+        }
+        return references.joined(separator: "\n")
     }
 
     /// PNG and JPEG are written as they are; everything else (screenshots arrive as TIFF) becomes PNG.
@@ -676,23 +744,39 @@ final class Workspace: EditorLanguage {
         return (png, "png")
     }
 
-    /// Moves a file or folder to the Trash and drops everything that pointed into it.
-    func delete(_ url: URL) {
+    /// Deletes a file or folder; in the library that's a commit, undone through the history (there's no trash).
+    /// Outside it the item goes to the Trash as before.
+    func delete(_ url: URL) { delete([url]) }
+
+    func delete(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
         flushSaves()
-        do {
-            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-        } catch {
-            NSAlert(error: error).runModal()
+        guard SpaceList.isInRepository(root) else {
+            for url in urls {
+                do { try FileManager.default.trashItem(at: url, resultingItemURL: nil) } catch { NSAlert(error: error).runModal() }
+            }
+            forgetRemoved(urls)
             return
         }
-        func gone(_ u: URL) -> Bool { u == url || u.path.hasPrefix(url.path + "/") }
+        let repo = SpaceRepository.shared
+        let title = urls.count == 1 ? "“\(urls[0].lastPathComponent)”" : "\(urls.count) Items"
+        let paths = urls.map(repo.messagePath).joined(separator: ", ")
+        fileOps.perform(.delete(urls), name: "Delete \(title)", message: "Delete \(paths)")
+        // The tree drops the rows at once; the commit follows.
+        forgetRemoved(urls, onDisk: false)
+        notice = FileNotice(text: "Deleted \(title)", folder: urls.count == 1 ? urls[0].deletingLastPathComponent() : root)
+    }
+
+    /// Drops buffers, selection, preview and tree rows that pointed into removed items.
+    func forgetRemoved(_ urls: [URL], onDisk: Bool = true) {
+        func gone(_ u: URL) -> Bool { urls.contains { u == $0 || u.path.hasPrefix($0.path + "/") } }
         buffers = buffers.filter { !gone($0.key) }
         dirty = dirty.filter { !gone($0) }
         editorStates = editorStates.filter { !gone($0.key) }
         previewStates = previewStates.filter { !gone($0.key) }
         positions = positions.filter { !gone($0.key) }
         expanded = expanded.filter { !gone($0) }
-        reloadTree()
+        if onDisk { reloadTree() } else { tree = Self.removing(tree, where: gone) }
         if let file = previewFile, gone(file) { setPreview(nil) }
         lastPreviewFile = lastPreviewFile.flatMap { gone($0) ? nil : $0 }
         if let file = selectedFile, gone(file) {
@@ -700,19 +784,34 @@ final class Workspace: EditorLanguage {
             selectedKind = nil
             text = ""
             revision += 1
-            if let main = defaultMain() { select(main) }
+            if let main = defaultMain(), !gone(main) { select(main) }
         }
         schedulePersist()
     }
 
-    private func relocate(_ url: URL, to target: URL) {
+    private static func removing(_ nodes: [FileNode], where gone: (URL) -> Bool) -> [FileNode] {
+        nodes.filter { !gone($0.url) }.map { node in
+            FileNode(url: node.url, kind: node.kind, children: node.children.map { removing($0, where: gone) })
+        }
+    }
+
+    /// Undo's moves: `relocate` without registering another undo; the target's folder is made if it went away.
+    func relocateForUndo(_ url: URL, to target: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path), !FileManager.default.fileExists(atPath: target.path)
+                || target.path.lowercased() == url.path.lowercased() else { return false }
+        try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        return relocate(url, to: target)
+    }
+
+    @discardableResult
+    private func relocate(_ url: URL, to target: URL) -> Bool {
         flushSaves()
-        guard let references = referenceEdits(moving: url, to: target) else { return }
+        guard let references = referenceEdits(moving: url, to: target) else { return false }
         do {
             try FileManager.default.moveItem(at: url, to: target)
         } catch {
             NSAlert(error: error).runModal()
-            return
+            return false
         }
         func moved(_ u: URL) -> URL {
             if u == url { return target }
@@ -744,6 +843,7 @@ final class Workspace: EditorLanguage {
         }
         if !references.isEmpty { flushSaves() }
         schedulePersist()
+        return true
     }
 
     /// Edits that keep the space's paths pointing at `url` once it moves to `target`, keyed by the files before the move.

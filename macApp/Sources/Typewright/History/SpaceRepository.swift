@@ -31,6 +31,66 @@ struct FileVersion: Identifiable, Hashable, Decodable {
     }
 }
 
+/// A deleted file or folder as the history (or the LFS stash) still has it.
+struct DeletedItem: Identifiable, Hashable, Codable {
+    enum Kind: String, Codable { case file, folder }
+
+    let path: String
+    let kind: Kind
+    let files: Int
+    /// The deleting commit and its parent, which still has the item; nil for stashed LFS files only.
+    let commit: String?
+    let lastCommit: String?
+    /// Stashed LFS files, which jj never tracked.
+    let stash: String?
+    let time: Date
+    let description: String
+
+    var id: String { "\(path)@\(time.timeIntervalSince1970)" }
+    var name: String { (path as NSString).lastPathComponent }
+    /// The space folder it was in.
+    var space: String { String(path.split(separator: "/").first ?? "") }
+
+    private enum CodingKeys: String, CodingKey { case path, kind, files, commit, lastCommit, stash, time, description }
+
+    init(path: String, kind: Kind, files: Int, commit: String?, lastCommit: String?, stash: String?, time: Date, description: String) {
+        self.path = path
+        self.kind = kind
+        self.files = files
+        self.commit = commit
+        self.lastCommit = lastCommit
+        self.stash = stash
+        self.time = time
+        self.description = description
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        kind = try c.decodeIfPresent(Kind.self, forKey: .kind) ?? .file
+        files = try c.decodeIfPresent(Int.self, forKey: .files) ?? 1
+        commit = try c.decodeIfPresent(String.self, forKey: .commit)
+        lastCommit = try c.decodeIfPresent(String.self, forKey: .lastCommit)
+        stash = try c.decodeIfPresent(String.self, forKey: .stash)
+        time = Date(timeIntervalSince1970: try c.decode(Double.self, forKey: .time))
+        description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(path, forKey: .path)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(files, forKey: .files)
+        try c.encodeIfPresent(commit, forKey: .commit)
+        try c.encodeIfPresent(lastCommit, forKey: .lastCommit)
+        try c.encodeIfPresent(stash, forKey: .stash)
+        try c.encode(time.timeIntervalSince1970, forKey: .time)
+        try c.encode(description, forKey: .description)
+    }
+
+    var json: String { (try? JSONEncoder().encode(self)).map { String(decoding: $0, as: UTF8.self) } ?? "{}" }
+}
+
 /// A file's content in some commit.
 enum FileContent: Equatable {
     case text(String)
@@ -126,6 +186,16 @@ final class SpaceRepository {
 
     func url(of relativePath: String) -> URL { root.appendingPathComponent(relativePath) }
 
+    /// Like `relativePath(of:)` for a path that may not exist yet, where links can't be resolved.
+    func pathAllowingMissing(_ url: URL) -> String? {
+        if let path = relativePath(of: url) { return path }
+        let path = url.standardizedFileURL.path
+        for base in [root.path, root.resolvingSymlinksInPath().path] where path.hasPrefix(base + "/") {
+            return String(path.dropFirst(base.count + 1))
+        }
+        return nil
+    }
+
     func setLFSLimit(bytes: UInt64) {
         run { twj_set_lfs_limit($0, bytes) }
     }
@@ -163,13 +233,13 @@ final class SpaceRepository {
     }
 
     func history(of url: URL, limit: Int = 500) async -> [FileVersion] {
-        guard let path = relativePath(of: url) else { return [] }
+        guard let path = pathAllowingMissing(url) else { return [] }
         return await call({ twj_file_history($0, path, UInt32(clamping: limit)) }) ?? []
     }
 
     func content(of url: URL, at commit: String) async -> FileContent {
         struct Result: Decodable { let text: String?; let data: String?; let missing: Bool? }
-        guard let path = relativePath(of: url), let result: Result = await call({ twj_file_at($0, commit, path) })
+        guard let path = pathAllowingMissing(url), let result: Result = await call({ twj_file_at($0, commit, path) })
         else { return .missing }
         if let text = result.text { return .text(text) }
         if let data = result.data.flatMap({ Data(base64Encoded: $0) }) { return .data(data) }
@@ -179,10 +249,51 @@ final class SpaceRepository {
     /// Puts the file back as it was in `commit`; editors reload through `didCommit`.
     func restore(_ url: URL, from commit: String) async -> Bool {
         struct Result: Decodable { let commit: String? }
-        guard let path = relativePath(of: url), let _: Result = await call({ twj_restore_file($0, commit, path) })
+        guard let path = pathAllowingMissing(url), let _: Result = await call({ twj_restore_file($0, commit, path) })
         else { return false }
         postDidCommit([path], wrote: true)
         return true
+    }
+
+    // MARK: - Deleting
+
+    /// Deletes files and folders and commits `message` at once; there's no trash, the history keeps them.
+    /// Returns what was deleted, for undo; nil when it failed.
+    func delete(_ urls: [URL], message: String) async -> [DeletedItem]? {
+        struct Result: Decodable { let deleted: [DeletedItem] }
+        let paths = urls.compactMap(pathAllowingMissing)
+        guard paths.count == urls.count, let data = try? JSONEncoder().encode(paths) else { return nil }
+        let json = String(decoding: data, as: UTF8.self)
+        guard let result: Result = await call({ twj_delete($0, json, message) }) else { return nil }
+        postDidCommit(paths, wrote: false)
+        return result.deleted
+    }
+
+    /// Deleted items under `folder` (a space or folder in the repository; nil for all), newest first.
+    func deleted(in folder: URL? = nil, limit: Int = 500) async -> [DeletedItem] {
+        let prefix = folder.flatMap(relativePath(of:)) ?? ""
+        if folder != nil, prefix.isEmpty, folder?.standardizedFileURL != root { return [] }
+        return await call({ twj_deleted($0, prefix, UInt32(clamping: limit)) }) ?? []
+    }
+
+    enum RestoreOutcome: Equatable {
+        case restored
+        /// Something else is at the destination now.
+        case exists
+        case failed
+    }
+
+    /// Puts a deleted item back at `url` (its own path, or another name for "Keep Both").
+    func restore(_ item: DeletedItem, to url: URL) async -> RestoreOutcome {
+        struct Result: Decodable { let commit: String?; let files: Int? }
+        struct Exists: Decodable { let exists: Bool? }
+        guard let dest = pathAllowingMissing(url) else { return .failed }
+        let entry = item.json
+        guard let data = await json({ twj_restore_deleted($0, entry, dest) }) else { return .failed }
+        if (try? JSONDecoder().decode(Exists.self, from: data))?.exists == true { return .exists }
+        guard case .ok = decode(data) as Reply<Result> else { return .failed }
+        postDidCommit([dest], wrote: true)
+        return .restored
     }
 
     // MARK: - Conflicts
@@ -268,6 +379,10 @@ final class SpaceRepository {
 
     private func reply<T: Decodable>(_ body: @escaping @Sendable (OpaquePointer) -> UnsafeMutablePointer<CChar>?) async -> Reply<T> {
         guard let data = await json(body) else { return .failed }
+        return decode(data)
+    }
+
+    private func decode<T: Decodable>(_ data: Data) -> Reply<T> {
         let meta = try? JSONDecoder().decode(Meta.self, from: data)
         if let stale = meta?.staleWorkspaces, !stale.isEmpty {
             NSLog("jj: left stale, run `jj workspace update-stale` there: %@", stale.joined(separator: ", "))

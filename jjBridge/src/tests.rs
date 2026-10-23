@@ -521,6 +521,18 @@ fn delete_commits_and_stashes_lfs_files() {
 }
 
 #[test]
+fn deleting_the_last_file_of_a_folder_lists_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut repo = open(dir.path());
+    write(&repo, "S/ch/one.typ", "one\n");
+    repo.commit("Add").unwrap();
+    repo.delete(&["S/ch/one.typ".into()], "Delete S/ch/one.typ").unwrap();
+    // The folder stays on disk (empty), so the file is what was deleted.
+    assert!(repo.root().join("S/ch").is_dir());
+    assert_eq!(paths(&repo.deleted("S", 10).unwrap()), [("S/ch/one.typ".into(), "file".into())]);
+}
+
+#[test]
 fn recently_deleted_survives_squashing() {
     let dir = tempfile::tempdir().unwrap();
     let mut repo = open(dir.path());

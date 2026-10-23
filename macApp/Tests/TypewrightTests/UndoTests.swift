@@ -6,7 +6,9 @@ import XCTest
 @MainActor
 final class UndoTests: XCTestCase {
     private var window: NSWindow!
-    private var undo: UndoManager { window.undoManager! }
+    private var coordinator: CodeEditor.Coordinator!
+    /// The text's own, apart from the window's (file tree changes).
+    private var undo: UndoManager { coordinator.textUndo }
 
     private func setUp(_ text: String) -> (TypstTextView, CodeEditor.Coordinator) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled],
@@ -18,8 +20,11 @@ final class UndoTests: XCTestCase {
         window.makeFirstResponder(tv)
         tv.string = text
         let c = CodeEditor.Coordinator()
+        coordinator = c
         c.textView = tv
         tv.delegate = c
+        XCTAssert(tv.undoManager === c.textUndo)
+        XCTAssert(window.undoManager !== c.textUndo)
         undo.groupsByEvent = false
         undo.removeAllActions()
         return (tv, c)

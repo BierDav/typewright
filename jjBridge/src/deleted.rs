@@ -179,7 +179,11 @@ impl Repo {
                     if dir.is_root() || !in_prefix(dir.as_internal_file_string(), prefix) {
                         break;
                     }
-                    if is_absent(&after.path_value(dir).block_on()?) && is_tree(&before.path_value(dir).block_on()?) {
+                    // jj has no empty folders: a folder still on disk only lost files.
+                    if is_absent(&after.path_value(dir).block_on()?)
+                        && is_tree(&before.path_value(dir).block_on()?)
+                        && self.disk_path(dir)?.symlink_metadata().is_err()
+                    {
                         key = (dir.to_owned(), true);
                     }
                 }

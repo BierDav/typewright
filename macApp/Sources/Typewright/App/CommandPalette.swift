@@ -420,6 +420,9 @@ struct CommandPalette: View {
                         action: .run { Opener.shared.openPanel(in: state) }),
             PaletteItem(id: "spaces.search", title: "Search All Spaces", icon: "magnifyingglass", section: "Spaces",
                         action: .run { DispatchQueue.main.async { state.overlay = .search(allSpaces: true) } }),
+            PaletteItem(id: "spaces.deleted", title: "Recently Deleted…", icon: "trash", section: "Spaces",
+                        keywords: ["trash", "restore", "undelete", "deleted files", "bin"],
+                        action: .run { DispatchQueue.main.async { Opener.shared.showRecentlyDeleted() } }),
             PaletteItem(id: "app.settings", title: "Settings…", icon: "gearshape", shortcut: keys.settings.display, section: "App",
                         action: .run { SettingsWindowController.shared.show() }),
             PaletteItem(id: "app.window", title: "New Window", icon: "macwindow.badge.plus", shortcut: keys.newWindow.display, section: "App",
@@ -489,9 +492,12 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "file.move", title: "Move \(name) to…", icon: "folder.badge.gearshape", shortcut: keys.moveFile.display, section: "File",
                                      action: .page(PalettePage(title: "Move \(name)", placeholder: "Choose a folder…",
                                                                kind: .list { moveTargets(file, ws) }))))
-            items.append(PaletteItem(id: "file.trash", title: "Move \(name) to Trash", icon: "trash", section: "File",
-                                     keywords: ["delete", "remove"],
+            let inLibrary = SpaceList.isInRepository(ws.root)
+            items.append(PaletteItem(id: "file.delete", title: inLibrary ? "Delete \(name)" : "Move \(name) to Trash", icon: "trash",
+                                     section: "File", keywords: ["delete", "remove", "trash"],
                                      action: .run { withAnimation(.smooth(duration: 0.2)) { ws.delete(file) } }))
+            items.append(PaletteItem(id: "file.duplicate", title: "Duplicate \(name)", icon: "plus.square.on.square", section: "File",
+                                     keywords: ["copy"], action: .run { withAnimation(.smooth(duration: 0.2)) { _ = ws.duplicate(file) } }))
             items.append(PaletteItem(id: "file.window", title: "Open \(name) in New Window", icon: "macwindow.badge.plus",
                                      section: "File", action: .run { Opener.shared.openInNewWindow(ws.root, file: file) }))
             items.append(PaletteItem(id: "file.finder", title: "Reveal \(name) in Finder", icon: "folder", section: "File",
@@ -525,6 +531,9 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "space.link", title: "Link \(ws.name) to…", icon: "link", section: "Space",
                                      keywords: ["symlink", "alias", "shortcut"],
                                      action: .run { DispatchQueue.main.async { Opener.shared.link(ws.root) } }))
+            items.append(PaletteItem(id: "space.deleted", title: "Recently Deleted in \(ws.name)…", icon: "trash", section: "Space",
+                                     keywords: ["trash", "restore", "undelete"],
+                                     action: .run { DispatchQueue.main.async { RecentlyDeleted.show(in: ws.root) } }))
         }
         if SyncService.shared.isSynced(ws.root) {
             // The confirmation alert waits until the palette is gone.

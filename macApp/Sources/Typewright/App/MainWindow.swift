@@ -49,6 +49,8 @@ final class WindowState {
 
     /// The space shown, for menu commands.
     @ObservationIgnored weak var workspace: Workspace?
+    /// File tree and space changes; the editor's text has its own.
+    @ObservationIgnored let undoManager = UndoManager()
     /// Live selector progress while a two-finger swipe drives it.
     var swipe: CGFloat?
     /// Whether the selector overlay is in the view tree; it stays a moment after closing to animate out.
@@ -135,6 +137,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         Opener.shared.closed(self)
     }
 
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { state.undoManager }
+
     // The empty toolbar would stay as an opaque strip; it comes down with the menu bar instead.
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
         proposedOptions.union([.fullScreen, .autoHideMenuBar, .autoHideToolbar])
@@ -190,6 +194,9 @@ struct MainWindow: View {
             state.pendingReveal = nil
             if let next, let file = state.pendingFile, file.path.hasPrefix(next.root.path + "/") { next.select(file) }
             state.pendingFile = nil
+            next?.fileOps.undoManager = state.undoManager
+            // File changes undo within their space only.
+            if let previous { state.undoManager.removeAllActions(withTarget: previous.fileOps) }
             state.workspace = next
             // The selector slides away while the new space zooms in behind it.
             withAnimation(WindowState.spacesAnimation) {

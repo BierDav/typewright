@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import TypewrightCore
+import UniformTypeIdentifiers
 
 /// A use of a symbol, listed when ⌘B is pressed on its definition.
 struct SymbolUsage {
@@ -159,6 +160,23 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// Saves pasted images next to the shown file and returns the text that shows them; nil pastes as usual.
     var onPasteImage: ((NSPasteboard) -> String?)?
+    /// After an undo (false) or redo (true) with the resulting text, so pasted images can go and come back with it.
+    var onDidUndo: ((Bool, String) -> Void)?
+
+    /// Image files dropped from Finder are saved like pasted ones and referenced at the drop point.
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        let pasteboard = sender.draggingPasteboard
+        let images = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+            .filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
+        guard isEditable, !images.isEmpty, let onPasteImage else { return super.performDragOperation(sender) }
+        let index = characterIndexForInsertion(at: convert(sender.draggingLocation, from: nil))
+        setSelectedRange(NSRange(location: index, length: 0))
+        guard let reference = onPasteImage(pasteboard) else { return false }
+        window?.makeFirstResponder(self)
+        replace(NSRange(location: index, length: 0), with: reference,
+                select: NSRange(location: index + (reference as NSString).length, length: 0), action: "Drop Image")
+        return true
+    }
 
     override func paste(_ sender: Any?) {
         if isColumnMode { return pasteInColumns() }
@@ -1180,10 +1198,12 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     // The Edit menu's Undo and Redo reach the text view first, so a rename's own history wins there too.
     @objc func undo(_ sender: Any?) {
         if onUndo?() != true { undoManager?.undo() }
+        onDidUndo?(false, string)
     }
 
     @objc func redo(_ sender: Any?) {
         if onRedo?() != true { undoManager?.redo() }
+        onDidUndo?(true, string)
     }
 
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -1233,8 +1253,14 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         guard window?.firstResponder === self else { return super.performKeyEquivalent(with: event) }
         let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
         // Z
-        if event.keyCode == 6, flags == .command, onUndo?() == true { return true }
-        if event.keyCode == 6, flags == [.command, .shift], onRedo?() == true { return true }
+        if event.keyCode == 6, flags == .command, onUndo?() == true {
+            onDidUndo?(false, string)
+            return true
+        }
+        if event.keyCode == 6, flags == [.command, .shift], onRedo?() == true {
+            onDidUndo?(true, string)
+            return true
+        }
         let keys = KeyLayout.current.shortcuts
         if keys.find.matches(event), let onFind {
             onFind(false)
@@ -1664,6 +1690,8 @@ struct CodeEditor: NSViewRepresentable {
     var onJump: ((Int) -> Void)?
     /// Saves pasted images and returns the text that shows them; nil pastes them as usual.
     var onPasteImage: ((NSPasteboard) -> String?)?
+    /// After undo or redo in the text, with the resulting text.
+    var onDidUndo: ((Bool, String) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1747,6 +1775,7 @@ struct CodeEditor: NSViewRepresentable {
         guard let tv = c.textView as? TypstTextView else { return }
         tv.onJump = onJump
         tv.onPasteImage = onPasteImage
+        tv.onDidUndo = onDidUndo
         tv.comments = comments
         tv.glidingCaret = glidingCursor
         tv.concealsMath = concealsMath && highlights
@@ -1916,6 +1945,10 @@ struct CodeEditor: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate, NSPopoverDelegate {
         /// The color panel is shared; only the editor that last opened it drives it.
         private static weak var colorOwner: Coordinator?
+        /// The text's own undo, apart from the window's, which holds file tree changes.
+        let textUndo = UndoManager()
+
+        func undoManager(for view: NSTextView) -> UndoManager? { textUndo }
         weak var textView: NSTextView?
         weak var ruler: NSRulerView?
         weak var markers: DiagnosticMarkers?

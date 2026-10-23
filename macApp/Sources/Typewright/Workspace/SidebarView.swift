@@ -59,6 +59,11 @@ struct SidebarView: View {
                     // Avoid flashing scrollers while the selector slides.
                     .scrollIndicators(CGFloat(rows.count) * Self.rowPitch + 8 > geo.size.height ? .automatic : .never)
                 }
+                if let notice = workspace.notice {
+                    FileNoticeBar(notice: notice, workspace: workspace)
+                        .padding(.horizontal, 10)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 HStack {
                     SpacesButton(active: false, action: onShowSpaces)
                     Spacer()
@@ -160,12 +165,14 @@ struct SidebarView: View {
         let target = folder(at: location)
         let copy = NSEvent.modifierFlags.contains(.option)
         withAnimation(.smooth(duration: 0.25)) { workspace.importItems(urls, into: target, copy: copy) }
+        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     private func drop() {
         expandTask?.cancel()
         if let drag, let target = dropTarget {
             withAnimation(.smooth(duration: 0.25)) { workspace.move(drag.url, into: target) }
+            NSApp.keyWindow?.makeFirstResponder(nil)
         }
         drag = nil
     }
@@ -205,9 +212,15 @@ struct SidebarView: View {
             copyPath(String(node.url.path.dropFirst(workspace.root.path.count + 1)))
         })
         items.append(.divider)
-        items.append(.init("Move to Trash", "trash") {
-            withAnimation(.smooth(duration: 0.2)) { workspace.delete(node.url) }
-        })
+        items.append(.init("Duplicate", "plus.square.on.square") { treeAction { workspace.duplicate(node.url) } })
+        if SpaceList.isInRepository(workspace.root) {
+            if node.children != nil {
+                items.append(.init("Show Recently Deleted in This Folder", "trash.slash") { RecentlyDeleted.show(in: node.url) })
+            }
+            items.append(.init("Delete", "trash") { treeAction { workspace.delete(node.url) } })
+        } else {
+            items.append(.init("Move to Trash", "trash") { treeAction { workspace.delete(node.url) } })
+        }
         return items
     }
 
@@ -217,7 +230,10 @@ struct SidebarView: View {
             .init("Rename Space…", "pencil", action: rename),
             .init("Reveal in Finder", "folder") { NSWorkspace.shared.activateFileViewerSelecting([workspace.root]) },
             .init("Copy Path", "doc.on.doc") { copyPath(workspace.root) },
-        ] + (SpaceList.isInRepository(workspace.root) ? [.init("Link to…", "link") { Opener.shared.link(workspace.root) }] : []) + [
+        ] + (SpaceList.isInRepository(workspace.root) ? [
+            .init("Link to…", "link") { Opener.shared.link(workspace.root) },
+            .init("Show Recently Deleted", "trash.slash") { RecentlyDeleted.show(in: workspace.root) },
+        ] : []) + [
             .divider,
             .init("Open in New Window", "macwindow.badge.plus") { Opener.shared.openInNewWindow(workspace.root) },
             .init("Close Space", "xmark") { Opener.shared.closeSpace() },
@@ -229,6 +245,12 @@ struct SidebarView: View {
             .init("New File", "doc.badge.plus") { create { workspace.createFile(in: dir) } },
             .init("New Folder", "folder.badge.plus") { create { workspace.createFolder(in: dir) } },
         ]
+    }
+
+    /// A change made in the tree: ⌘Z should undo it, so the editor gives up the keyboard.
+    private func treeAction(_ body: () -> Void) {
+        withAnimation(.smooth(duration: 0.2)) { body() }
+        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     /// Expands the parent and starts renaming the new item.
@@ -274,6 +296,49 @@ struct SidebarView: View {
             // The row's drag gesture sees every click, so a double click is read off the mouse-up.
             if node.isPreviewable, (NSApp.currentEvent?.clickCount ?? 1) >= 2 { workspace.setPreview(node.url) }
         }
+    }
+}
+
+/// "Deleted ‘x’" with Undo and Show Recently Deleted; goes away on its own.
+private struct FileNoticeBar: View {
+    let notice: FileNotice
+    let workspace: Workspace
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "trash").foregroundStyle(.secondary)
+            Text(notice.text).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 4)
+            Button("Undo") {
+                if workspace.fileOps.undoManager?.canUndo == true { workspace.fileOps.undoManager?.undo() }
+                dismiss()
+            }
+            Menu {
+                Button("Show Recently Deleted") {
+                    RecentlyDeleted.show(in: notice.folder)
+                    dismiss()
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuStyle(.button)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More")
+        }
+        .buttonStyle(.borderless)
+        .font(.system(size: 12))
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .glassEffect(.regular, in: .capsule)
+        .task(id: notice.id) {
+            try? await Task.sleep(for: .seconds(8))
+            if workspace.notice?.id == notice.id { dismiss() }
+        }
+    }
+
+    private func dismiss() {
+        withAnimation(.smooth(duration: 0.25)) { if workspace.notice?.id == notice.id { workspace.notice = nil } }
     }
 }
 
