@@ -333,6 +333,13 @@ export function stopSyncingId(id: string) {
   forget(id);
 }
 
+/** Drops a share stopped by a deletion, so restoring the item no longer resumes it. */
+export function forgetParked(id: string) {
+  setSync("parked", id, undefined!);
+  delete rejoining[id];
+  persist();
+}
+
 /** Stops syncing a share on every device; each keeps its files. */
 export function removeEverywhere(id: string) {
   if (!node) return;
@@ -348,6 +355,7 @@ function forget(id: string) {
     setSync("problems", id, undefined!);
   });
   runtimes.delete(id);
+  void fs.remove(lfsListPath(id), true).catch(() => {});
   clearTimeout(publishTimers.get(id));
   publishTimers.delete(id);
   for (const key of [...livePaths]) if (key.startsWith(`${id}/`)) livePaths.delete(key);
@@ -445,6 +453,7 @@ function open(id: string) {
   } else {
     node.openShare(id, settings.deviceName);
   }
+  enqueue(id, () => seed(id));
   schedulePublish(id, 0);
 }
 
@@ -683,8 +692,31 @@ async function publish(id: string) {
     await current.publishNode(id, JSON.stringify(manifest), objects, seeds);
     seeds.forEach(([hash]) => r.seeded.add(hash));
     r.published = manifest.node;
+    await fs.writeFile(lfsListPath(id), JSON.stringify(lfs.map(([rel, f]) => [f.blake3, rel])), true);
   }
   mergeHeads(id);
+}
+
+function lfsListPath(id: string): string {
+  return `${dataDir}/lfs/${id}.json`;
+}
+
+/** Puts the LFS files of the last published node back into the blob store after a reload, so other devices can
+ * fetch them even while publishing waits (on conflicts, say). */
+async function seed(id: string) {
+  const current = node;
+  const sp = sharePath(id);
+  const text = await fs.readText(lfsListPath(id));
+  if (!current || !sp || !text) return;
+  const r = runtime(id);
+  const pairs: [string, Uint8Array][] = [];
+  for (const [hash, rel] of JSON.parse(text) as [string, string][]) {
+    if (r.seeded.has(hash)) continue;
+    const bytes = await fs.readFile(fs.join(SPACES, core.shareFilePath(sp, rel)));
+    if (bytes) pairs.push([hash, bytes]);
+  }
+  if (!pairs.length || node !== current) return;
+  for (const hash of await current.seedLfs(id, pairs)) r.seeded.add(hash);
 }
 
 /** Fetches another device's head and merges it into the share; a clean merge is published right away. */

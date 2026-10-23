@@ -8,68 +8,21 @@ use anyhow::{Result, anyhow};
 use iroh::{Endpoint, EndpointId, SecretKey, endpoint::presets};
 use iroh_blobs::{Hash, store::mem::MemStore};
 use iroh_docs::{
-    AuthorId, Capability, ContentStatus, NamespaceSecret, Record, RecordIdentifier,
+    AuthorId,
     engine::{DefaultAuthorStorage, Engine},
     protocol::Docs,
     store::{Query, Store},
 };
 use iroh_gossip::net::Gossip;
 use n0_future::{StreamExt, task::spawn};
-use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use crate::{
     Inner, MAX_GOSSIP_MESSAGE, Parts, account_author, account_namespace, begin_join, bundle, hex, live, parse_hex32,
-    shares, space_author,
+    shares,
+    snapshot::{ReplicaSnapshot, SNAPSHOT_BLOB_LIMIT, SNAPSHOT_MAGIC, Snapshot, restore},
+    space_author,
 };
-
-/// Blobs up to this size ride along in snapshots: account entries and small node bundles.
-const SNAPSHOT_BLOB_LIMIT: u64 = 256 * 1024;
-/// Snapshots since shares start with this; older ones (account and space replicas) still read.
-const SNAPSHOT_MAGIC: &[u8] = b"tws snapshot v2\n";
-
-#[derive(Serialize, Deserialize)]
-struct Snapshot {
-    replicas: Vec<ReplicaSnapshot>,
-    blobs: Vec<Vec<u8>>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ReplicaSnapshot {
-    namespace: [u8; 32],
-    /// Secret of the author the replica's entries are written as (beside the account's).
-    author: [u8; 32],
-    /// Author, key, content hash, length and timestamp of every entry.
-    entries: Vec<([u8; 32], Vec<u8>, [u8; 32], u64, u64)>,
-}
-
-/// Before shares: each replica's namespace secret also derived its author.
-#[derive(Deserialize)]
-struct OldSnapshot {
-    replicas: Vec<OldReplica>,
-    blobs: Vec<Vec<u8>>,
-}
-
-#[derive(Deserialize)]
-struct OldReplica {
-    secret: [u8; 32],
-    entries: Vec<([u8; 32], Vec<u8>, [u8; 32], u64, u64)>,
-}
-
-fn read_snapshot(bytes: &[u8]) -> Result<Snapshot> {
-    if let Some(rest) = bytes.strip_prefix(SNAPSHOT_MAGIC) {
-        return Ok(postcard::from_bytes(rest)?);
-    }
-    let old: OldSnapshot = postcard::from_bytes(bytes)?;
-    Ok(Snapshot {
-        replicas: old
-            .replicas
-            .into_iter()
-            .map(|r| ReplicaSnapshot { namespace: r.secret, author: r.secret, entries: r.entries })
-            .collect(),
-        blobs: old.blobs,
-    })
-}
 
 #[wasm_bindgen]
 pub struct SyncNode {
@@ -82,28 +35,6 @@ fn js(err: anyhow::Error) -> JsError {
 
 fn key32(bytes: &[u8], what: &str) -> Result<[u8; 32], JsError> {
     bytes.try_into().map_err(|_| JsError::new(&format!("{what} must be 32 bytes")))
-}
-
-/// Rebuilds the replicas a snapshot describes; returns the blobs it carried.
-async fn restore(store: &mut Store, account: &[u8; 32], bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let snapshot = read_snapshot(bytes)?;
-    let own = account_author(account);
-    for replica in &snapshot.replicas {
-        let namespace = NamespaceSecret::from_bytes(&replica.namespace);
-        let authors = [own.clone(), space_author(&replica.author)];
-        store.import_namespace(Capability::Write(namespace.clone()))?;
-        let mut open = store.open_replica(&namespace.id())?;
-        for (author, key, hash, len, timestamp) in &replica.entries {
-            let Some(author) = authors.iter().find(|a| a.id().as_bytes() == author) else { continue };
-            let id = RecordIdentifier::new(namespace.id(), author.id(), key);
-            let entry = iroh_docs::Entry::new(id, Record::new(Hash::from_bytes(*hash), *len, *timestamp));
-            let _ = open.insert_remote_entry(entry.sign(&namespace, author), [0; 32], ContentStatus::Complete).await;
-        }
-        drop(open);
-        store.close_replica(namespace.id());
-    }
-    store.flush()?;
-    Ok(snapshot.blobs)
 }
 
 /// `[[id, bytes], …]` pairs from JavaScript.
@@ -251,11 +182,10 @@ impl SyncNode {
         let manifest: serde_json::Value = serde_json::from_str(&manifest).map_err(|e| js(e.into()))?;
         let objects = pairs(&objects, "objects")?;
         let bytes = bundle::encode(&manifest, &objects).map_err(js)?;
-        for (hash, data) in pairs(&lfs, "lfs")? {
-            let tag = self.inner.blobs.add_bytes(data).await.map_err(|e| js(e.into()))?;
-            if tag.hash.to_hex().to_string() != hash {
-                return Err(JsError::new(&format!("LFS file {hash} changed while it was published")));
-            }
+        let seeded = self.seed(&share, &lfs).await?;
+        let wanted = bundle::lfs_hashes(&manifest);
+        if let Some(missing) = pairs(&lfs, "lfs")?.into_iter().map(|(h, _)| h).find(|h| wanted.contains(h) && !seeded.contains(h)) {
+            return Err(JsError::new(&format!("LFS file {missing} changed while it was published")));
         }
         // Everything the bundle names was seeded above or is already listed, so nothing gets added here.
         shares::publish_node(self.inner.clone(), share, bytes, bundle::lfs_hashes(&manifest), |_, _, key| async move {
@@ -263,6 +193,25 @@ impl SyncNode {
         })
         .await
         .map_err(js)
+    }
+
+    /// Adds `lfs` (`[blake3, bytes]` pairs read from disk) to the blob store after a reload, without waiting for
+    /// the next publish; returns the hashes that matched (a file edited since its node was published doesn't).
+    #[wasm_bindgen(js_name = seedLfs)]
+    pub async fn seed_lfs(&self, share: String, lfs: js_sys::Array) -> Result<Vec<String>, JsError> {
+        self.seed(&share, &lfs).await
+    }
+
+    async fn seed(&self, share: &str, lfs: &js_sys::Array) -> Result<Vec<String>, JsError> {
+        let mut added = Vec::new();
+        for (hash, data) in pairs(lfs, "lfs")? {
+            let tag = self.inner.blobs.add_bytes(data).await.map_err(|e| js(e.into()))?;
+            if tag.hash.to_hex().to_string() == hash {
+                added.push(tag.hash);
+            }
+        }
+        shares::announce_lfs(&self.inner, share, &added).await.map_err(js)?;
+        Ok(added.iter().map(|h| h.to_hex().to_string()).collect())
     }
 
     /// `device`'s current head: `{manifest: string, objects: [oid, bytes][], lfs: [blake3, bytes][]}`, without the

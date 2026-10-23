@@ -40,6 +40,7 @@ Run from the repository root.
 - Test: `xcodebuild -project macApp/Typewright.xcodeproj -scheme Typewright -derivedDataPath .build test`
 - Rust core tests: `cargo test --manifest-path sharedCore/Cargo.toml --target-dir .build/cargo`; the jj bridge's the same with `jjBridge/Cargo.toml` (some drive the `jj` CLI and skip without it)
 - Sync over the network (two devices in one process, real n0 relays): `TEST_RUNNER_TYPEWRIGHT_NETWORK_TESTS=1 xcodebuild -project macApp/Typewright.xcodeproj -scheme Typewright -derivedDataPath .build test -only-testing:TypewrightTests/SyncNetworkTests` and `cargo test --release --manifest-path irohBridge/Cargo.toml --target-dir .build/cargo -- --ignored`
+- Sync with the web app (this Mac against a headless browser, real n0 relays): run `bun run dev --port 5391` and `bun tests/webpeer.ts <folder> http://localhost:5391/` in `webApp/` (Chromium from `bunx playwright install chromium`), then `TEST_RUNNER_TYPEWRIGHT_WEB_PEER_DIR=<folder> xcodebuild … test -only-testing:TypewrightTests/WebPeerSyncTests`
 - Web app: `scripts/build-webApp-wasm.sh` (needs Homebrew's `llvm`) first, then `bun install` and `bun run dev` / `bun run check` / `bun run build` in `webApp/`
 - Release bundle: `scripts/build-macApp.sh <version>`
 - Icon: `swift scripts/make-icon-macApp.swift`

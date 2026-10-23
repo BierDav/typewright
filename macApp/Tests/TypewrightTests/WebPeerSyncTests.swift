@@ -144,6 +144,20 @@ final class WebPeerSyncTests: XCTestCase {
         }
         try signal("done")
         try await browser("done")
+
+        // 7. A large LFS file the browser adds and reloads right after; the Mac still gets it.
+        var big = Data((0..<(4 << 20)).map { UInt8(($0 * 7) % 251) })
+        big.replaceSubrange(0..<4, with: [0x89, 0x50, 0x4E, 0x47])
+        try await browser("7")
+        do {
+            try await eventually("the browser's large file after its reload", timeout: 240) {
+                (try? Data(contentsOf: root.appendingPathComponent("figures/big.png"))) == big
+            }
+        } catch {
+            print("sync state: connected \(mac.connected) \(mac.statuses) \(mac.problems) \(mac.lastError ?? "") conflicted \(repository.conflicted)")
+            throw error
+        }
+        try signal("7")
     }
 }
 

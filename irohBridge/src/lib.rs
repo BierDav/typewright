@@ -41,6 +41,8 @@ pub mod bundle;
 mod ffi;
 mod live;
 mod shares;
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod snapshot;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
@@ -90,6 +92,9 @@ pub(crate) struct Inner {
     shares: Mutex<HashMap<String, Space>>,
     /// Heads per share whose bundle or LFS files haven't arrived yet: device → bundle hash.
     waiting: Mutex<HashMap<String, HashMap<String, Hash>>>,
+    /// Waiting heads whose content is fetched from their device directly: share, device, bundle hash.
+    chasing: Mutex<HashSet<(String, String, Hash)>>,
+    downloader: iroh_blobs::api::downloader::Downloader,
     /// What the account replica says about each share's keys.
     infos: Mutex<HashMap<String, SpaceInfo>>,
     /// Devices of other accounts syncing a shared share, from its record or the invite's hints.
@@ -240,6 +245,7 @@ pub(crate) async fn start(parts: Parts, account: [u8; 32], sink: Sink) -> Result
     docs.author_import(author.clone()).await?;
     let account_doc = docs.import_namespace(Capability::Write(account_namespace(&account))).await?;
 
+    let downloader = blobs.downloader(&endpoint);
     let inner = Arc::new(Inner {
         endpoint,
         _router: router,
@@ -252,6 +258,8 @@ pub(crate) async fn start(parts: Parts, account: [u8; 32], sink: Sink) -> Result
         gossip,
         shares: Mutex::new(HashMap::new()),
         waiting: Mutex::new(HashMap::new()),
+        chasing: Mutex::new(HashSet::new()),
+        downloader,
         infos: Mutex::new(HashMap::new()),
         space_devices: Mutex::new(HashMap::new()),
         topics: Mutex::new(HashMap::new()),

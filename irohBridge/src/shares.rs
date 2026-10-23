@@ -18,7 +18,12 @@ use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use iroh_blobs::Hash;
 use iroh_docs::{Capability, NamespaceSecret, api::Doc, engine::LiveEvent, store::Query};
-use n0_future::{StreamExt, task::spawn};
+use iroh::EndpointId;
+use n0_future::{
+    StreamExt,
+    task::spawn,
+    time::{Duration, sleep},
+};
 use serde_json::json;
 
 use crate::{
@@ -181,41 +186,95 @@ pub(crate) async fn list_heads(inner: &Arc<Inner>, id: &str) -> Result<()> {
 }
 
 /// Emits `head` once the bundle and its LFS files are local, or remembers it until they are.
-async fn check_head(inner: &Inner, id: &str, doc: &Doc, device: &str, bundle_hash: Hash) {
+async fn check_head(inner: &Arc<Inner>, id: &str, doc: &Doc, device: &str, bundle_hash: Hash) {
     if device == inner.endpoint.id().to_string() {
         return;
     }
-    let ready = async {
-        if !inner.blobs.has(bundle_hash).await? {
-            return Ok::<_, anyhow::Error>(None);
-        }
-        let bytes = inner.blobs.get_bytes(bundle_hash).await?;
-        let manifest = bundle::manifest(&bytes)?;
-        for hash in bundle::lfs_hashes(&manifest) {
-            if !inner.blobs.has(Hash::from_str(&hash)?).await? {
-                return Ok(None);
-            }
-        }
-        Ok(Some(manifest))
-    }
-    .await;
-    match ready {
-        Ok(Some(manifest)) => {
-            inner.waiting.lock().unwrap().entry(id.to_string()).or_default().remove(device);
-            let name = match latest(doc, format!("name/{device}").as_bytes()).await {
-                Ok(Some(entry)) => inner.blobs.get_bytes(entry.content_hash()).await.ok().map(|b| String::from_utf8_lossy(&b).into_owned()),
-                _ => None,
-            };
-            inner.emit(json!({
-                "type": "head", "share": id, "device": device, "node": manifest["node"], "name": name,
-                "parents": manifest["parents"],
-            }));
-        }
+    match head_ready(inner, bundle_hash).await {
+        Ok(Some(manifest)) => emit_head(inner, id, doc, device, &manifest).await,
         Ok(None) => {
             inner.waiting.lock().unwrap().entry(id.to_string()).or_default().insert(device.to_string(), bundle_hash);
+            chase_head(inner, id, doc, device, bundle_hash);
         }
         Err(err) => inner.error("share head", err),
     }
+}
+
+/// The head's manifest once its bundle and LFS files are local.
+async fn head_ready(inner: &Inner, bundle_hash: Hash) -> Result<Option<serde_json::Value>> {
+    Ok(if missing_content(inner, bundle_hash).await?.is_empty() {
+        Some(bundle::manifest(&inner.blobs.get_bytes(bundle_hash).await?)?)
+    } else {
+        None
+    })
+}
+
+/// The bundle if it isn't local, else the LFS files it names that aren't.
+async fn missing_content(inner: &Inner, bundle_hash: Hash) -> Result<Vec<Hash>> {
+    if !inner.blobs.has(bundle_hash).await? {
+        return Ok(vec![bundle_hash]);
+    }
+    let manifest = bundle::manifest(&inner.blobs.get_bytes(bundle_hash).await?)?;
+    let mut missing = Vec::new();
+    for hash in bundle::lfs_hashes(&manifest) {
+        let hash = Hash::from_str(&hash)?;
+        if !inner.blobs.has(hash).await? {
+            missing.push(hash);
+        }
+    }
+    Ok(missing)
+}
+
+async fn emit_head(inner: &Inner, id: &str, doc: &Doc, device: &str, manifest: &serde_json::Value) {
+    inner.waiting.lock().unwrap().entry(id.to_string()).or_default().remove(device);
+    let name = match latest(doc, format!("name/{device}").as_bytes()).await {
+        Ok(Some(entry)) => inner.blobs.get_bytes(entry.content_hash()).await.ok().map(|b| String::from_utf8_lossy(&b).into_owned()),
+        _ => None,
+    };
+    inner.emit(json!({
+        "type": "head", "share": id, "device": device, "node": manifest["node"], "name": name,
+        "parents": manifest["parents"],
+    }));
+}
+
+/// Fetches what a waiting head lacks from the device that wrote it, retrying while the head waits: the replica
+/// doesn't retry a transfer that broke off (a browser reloading, say), as it still counts it as running.
+fn chase_head(inner: &Arc<Inner>, id: &str, doc: &Doc, device: &str, bundle_hash: Hash) {
+    let Ok(provider) = EndpointId::from_str(device) else { return };
+    let key = (id.to_string(), device.to_string(), bundle_hash);
+    if !inner.chasing.lock().unwrap().insert(key.clone()) {
+        return;
+    }
+    let (inner, doc) = (inner.clone(), doc.clone());
+    spawn(async move {
+        let (id, device, _) = &key;
+        // The replica usually fetches it first; this only steps in when it doesn't.
+        let mut delay = Duration::from_secs(10);
+        loop {
+            sleep(delay).await;
+            let waiting = inner.waiting.lock().unwrap().get(id).and_then(|w| w.get(device)).copied();
+            if waiting != Some(bundle_hash) || !inner.shares.lock().unwrap().contains_key(id) {
+                break;
+            }
+            for hash in missing_content(&inner, bundle_hash).await.unwrap_or_default() {
+                if inner.downloader.download(hash, vec![provider]).await.is_err() {
+                    break;
+                }
+            }
+            match head_ready(&inner, bundle_hash).await {
+                Ok(Some(manifest)) => {
+                    emit_head(&inner, id, &doc, device, &manifest).await;
+                    break;
+                }
+                Ok(None) => delay = (delay * 2).min(Duration::from_secs(60)),
+                Err(err) => {
+                    inner.error("share head", err);
+                    break;
+                }
+            }
+        }
+        inner.chasing.lock().unwrap().remove(&key);
+    });
 }
 
 /// Reports heads as their content arrives.
@@ -282,6 +341,19 @@ where
     let key = head_key(&inner.endpoint.id().to_string());
     share.doc.set_hash(share.author, Bytes::from(key.into_bytes()), tag.hash, size).await?;
     inner.emit(json!({"type": "published-node", "share": id, "node": manifest["node"]}));
+    Ok(())
+}
+
+/// Writes the LFS entries of `hashes` (held here) again, so devices that failed to fetch them from here retry:
+/// blobs added straight to the store, as the browser does after a reload, announce nothing.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) async fn announce_lfs(inner: &Arc<Inner>, id: &str, hashes: &[Hash]) -> Result<()> {
+    let share = share_doc(inner, id).await?;
+    for hash in hashes {
+        let size = inner.blobs.get_bytes(*hash).await?.len() as u64;
+        let key = lfs_key(&hash.to_hex().to_string());
+        share.doc.set_hash(share.author, Bytes::from(key.into_bytes()), *hash, size).await?;
+    }
     Ok(())
 }
 
