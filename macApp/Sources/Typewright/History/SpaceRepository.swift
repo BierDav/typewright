@@ -83,13 +83,18 @@ final class SpaceRepository {
 
     init(root: URL = SpaceRepository.defaultRoot) {
         self.root = root.standardizedFileURL
+        if Self.isTestHost {
+            // The bridge writes jj's repo config under XDG_CONFIG_HOME; keep tests out of the real ~/.config.
+            let config = FileManager.default.temporaryDirectory.appendingPathComponent("TypewrightTests/config")
+            setenv("XDG_CONFIG_HOME", config.path, 1)
+        }
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         handle = twj_open(root.path)
     }
 
     nonisolated static var defaultRoot: URL {
         // The test host must never open the real library; a fixed path keeps it one repo across runs.
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+        if isTestHost {
             return FileManager.default.temporaryDirectory.appendingPathComponent("TypewrightTests/Spaces", isDirectory: true)
         }
         #if DEBUG
@@ -103,6 +108,8 @@ final class SpaceRepository {
         return URL(fileURLWithPath: home, isDirectory: true)
             .appendingPathComponent("Library/Application Support/Typewright/Spaces", isDirectory: true)
     }
+
+    nonisolated static var isTestHost: Bool { ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil }
 
     var isOpen: Bool { handle != nil }
 
