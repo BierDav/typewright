@@ -6,8 +6,16 @@ import { compiler } from "../compiler";
 
 export type SolvengLocation = { path?: string | null; start: number; end: number };
 
-/** `filter`, when set, is what typing matches instead of `insert`: `Delta_R` for `Δ_R`. */
-export type SolvengItem = { label: string; kind: number; detail: string; insert: string; documentation?: string; filter?: string };
+/** Replace `start..<end` with `text`, in the document (no `path`) or one of the files around. */
+export type SolvengEdit = { path?: string | null; start: number; end: number; text: string };
+
+/**
+ * `filter`, when set, is what typing matches instead of `insert`: `Delta_R` for `Δ_R`. `edits` come with it, like the
+ * `#import units: km` a shorthand needs.
+ */
+export type SolvengItem = { label: string; kind: number; detail: string; insert: string; documentation?: string; filter?: string; edits?: SolvengEdit[] };
+
+type SolvengConversion = { title: string; start: number; end: number; text: string; edits?: SolvengEdit[] };
 
 /** Offsets are UTF-16; `context` comes from `Solveng.context`. */
 export const Solveng = {
@@ -32,11 +40,11 @@ export const Solveng = {
   complete: (document: string, context: string, offset: number) =>
     compiler.solveng<{ from: number; to?: number; items: SolvengItem[]; exclusive: boolean } | null>("complete", document, context, offset),
   conversions: (document: string, context: string, offset: number) =>
-    compiler.solveng<{ title: string; start: number; end: number; text: string }[]>("conversions", document, context, offset),
+    compiler.solveng<SolvengConversion[]>("conversions", document, context, offset),
   format: (document: string, context: string) =>
     compiler.solveng<{ start: number; end: number; text: string }[]>("format", document, context),
   fixes: (document: string, context: string, offset: number) =>
-    compiler.solveng<{ title: string; start: number; end: number; text: string }[]>("fixes", document, context, offset),
+    compiler.solveng<SolvengConversion[]>("fixes", document, context, offset),
   hover: (document: string, context: string, offset: number) =>
     compiler.solveng<{ start: number; end: number; markdown: string } | null>("hover", document, context, offset),
   /** Where the solveng name at `offset` is defined; no `path` means the document itself. */
@@ -72,7 +80,8 @@ export async function conversions(view: EditorView, around: string): Promise<Con
     title: c.title,
     run: () => {
       if (view.state.doc.toString() !== text) return;
-      view.dispatch({ changes: { from: c.start, to: c.end, insert: c.text }, scrollIntoView: true, userEvent: "input.refactor" });
+      const extra = (c.edits ?? []).filter((e) => !e.path).map((e) => ({ from: e.start, to: e.end, insert: e.text }));
+      view.dispatch({ changes: [{ from: c.start, to: c.end, insert: c.text }, ...extra], scrollIntoView: true, userEvent: "input.refactor" });
       view.focus();
     },
   }));

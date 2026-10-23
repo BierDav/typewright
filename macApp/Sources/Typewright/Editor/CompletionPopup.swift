@@ -266,12 +266,25 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
         isEditing = true
         // ⌘Z takes back the completion, leaving what was typed.
         tv.breakUndoCoalescing()
-        if tv.shouldChangeText(in: range, replacementString: text) {
+        tv.undoManager?.beginUndoGrouping()
+        func replace(_ range: NSRange, with text: String) -> Bool {
+            guard NSMaxRange(range) <= (tv.string as NSString).length, tv.shouldChangeText(in: range, replacementString: text) else { return false }
             tv.replaceCharacters(in: range, with: text)
             tv.didChangeText()
-            // A placeholder like `alignment` is selected, so typing replaces it.
-            tv.setSelectedRange(NSRange(location: start + caret.location, length: caret.length))
+            return true
         }
+        // Edits that come with it (an import): those after it first, then those before it, which move it.
+        let extra = item.additionalEdits.sorted { $0.range.location > $1.range.location }
+        for edit in extra where edit.range.location >= NSMaxRange(range) { _ = replace(edit.range, with: edit.newText) }
+        if replace(range, with: text) {
+            var shift = 0
+            for edit in extra where NSMaxRange(edit.range) <= range.location {
+                if replace(edit.range, with: edit.newText) { shift += (edit.newText as NSString).length - edit.range.length }
+            }
+            // A placeholder like `alignment` is selected, so typing replaces it.
+            tv.setSelectedRange(NSRange(location: start + shift + caret.location, length: caret.length))
+        }
+        tv.undoManager?.endUndoGrouping()
         isEditing = false
         // Functions land inside their parentheses; offer their arguments right away.
         let after = tv.string as NSString

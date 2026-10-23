@@ -2222,11 +2222,9 @@ struct CodeEditor: NSViewRepresentable {
             let found = SolvengSupport.unitFixes(text, context: context, offset: index)
                 + SolvengSupport.conversions(text, context: context, offset: index)
             return found.map { conversion in
-                let edit = TextEdit(range: NSRange(location: conversion.start, length: conversion.end - conversion.start),
-                                    newText: conversion.text)
-                return QuickFix(id: "solveng.\(conversion.title)", title: conversion.title, icon: "arrow.left.arrow.right") { [weak self] in
+                QuickFix(id: "solveng.\(conversion.title)", title: conversion.title, icon: "arrow.left.arrow.right") { [weak self] in
                     guard let self, self.textView?.string == text else { return }
-                    self.apply([edit], actionName: conversion.title)
+                    self.apply(conversion.textEdits, actionName: conversion.title)
                 }
             }
         }
