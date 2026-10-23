@@ -949,6 +949,8 @@ impl Repo {
                     changed.push(key);
                 }
                 (Some(_), None) => {
+                    // No trash: LFS files have no history, so they wait in the stash for Recently Deleted.
+                    self.stash_merged_away(&key, &disk, lfs_removed.len())?;
                     removals.push(disk);
                     lfs_removed.push(key.clone());
                     changed.push(key);

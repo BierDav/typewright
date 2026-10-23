@@ -79,6 +79,21 @@ fn now_millis(time: Option<Timestamp>) -> i64 { time.unwrap_or_else(Timestamp::n
 impl Repo {
     fn stash_dir(&self) -> PathBuf { self.root().join(".jj/typewright/deleted") }
 
+    /// An LFS file a sync merge removes goes to the stash, so it shows in Recently Deleted like a local deletion.
+    pub(crate) fn stash_merged_away(&self, key: &str, disk: &Path, index: usize) -> Result<()> {
+        if fs::symlink_metadata(disk).is_err() {
+            return Ok(());
+        }
+        let time = now_millis(self.clock);
+        let dir = self.stash_dir().join(format!("{time}-sync-{index}"));
+        let to = dir.join("files/file");
+        fs::create_dir_all(to.parent().unwrap())?;
+        fs::rename(disk, &to).or_else(|_| fs::copy(disk, &to).map(|_| ()))?;
+        let stash = Stash { path: key.to_owned(), folder: false, time, files: vec![String::new()] };
+        fs::write(dir.join("entry.json"), serde_json::to_vec(&stash)?)?;
+        Ok(())
+    }
+
     fn stashes(&self) -> Vec<(String, Stash)> {
         let Ok(entries) = fs::read_dir(self.stash_dir()) else { return Vec::new() };
         entries

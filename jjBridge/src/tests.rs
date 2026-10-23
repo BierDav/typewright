@@ -661,3 +661,26 @@ fn recently_deleted_survives_squashing() {
     let last = deleted[0]["lastCommit"].as_str().unwrap();
     assert_eq!(repo.file_at(last, "S/gone.typ").unwrap()["text"], "bye\n");
 }
+
+#[test]
+fn deletions_from_sync_show_in_recently_deleted() {
+    let (_da, mut a, _db, mut b) = synced_pair("main\n");
+    write(&a, "S/photo.jpg", "jpeg bytes");
+    a.commit("Add photo").unwrap();
+    send(&mut a, "S", &mut b, "Joined", "A");
+    assert_eq!(read(&b, "Joined/photo.jpg"), "jpeg bytes");
+    // A deletes a text file and an LFS file; B's merge removes both without a trash.
+    a.delete(&["S/other.typ".into(), "S/photo.jpg".into()], "Delete").unwrap();
+    let (_, merged) = send(&mut a, "S", &mut b, "Joined", "A");
+    assert!(merged["node"].is_string(), "{merged}");
+    assert!(!b.root().join("Joined/other.typ").exists() && !b.root().join("Joined/photo.jpg").exists());
+    let deleted = b.deleted("Joined", 10).unwrap();
+    let mut listed = paths(&deleted);
+    listed.sort();
+    assert_eq!(listed, [("Joined/other.typ".into(), "file".into()), ("Joined/photo.jpg".into(), "file".into())]);
+    for entry in deleted.as_array().unwrap() {
+        b.restore_deleted(&entry.to_string(), entry["path"].as_str().unwrap()).unwrap();
+    }
+    assert_eq!(read(&b, "Joined/other.typ"), "other\n");
+    assert_eq!(read(&b, "Joined/photo.jpg"), "jpeg bytes");
+}
