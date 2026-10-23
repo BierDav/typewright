@@ -17,6 +17,7 @@ pub mod merge;
 pub mod packages;
 pub mod references;
 pub mod releases;
+pub mod shares;
 pub mod spaces;
 pub mod sync;
 pub mod text;

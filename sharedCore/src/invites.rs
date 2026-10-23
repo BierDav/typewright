@@ -3,8 +3,9 @@
 use base64::Engine;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 
-/// Everything another account needs to sync a space: its replica's namespace secret (hex), the space's
-/// id and name, and endpoint ids (hex) of devices syncing it, to dial before the space's record resolves.
+/// Everything another account needs to sync a share (a space or any folder or file in one): its replica's namespace
+/// secret (hex), the share's id and name, whether it's a single file, and endpoint ids (hex) of devices syncing it, to
+/// dial before the share's record resolves.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
 #[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
@@ -13,6 +14,10 @@ pub struct SpaceInvite {
     pub name: String,
     pub secret: String,
     pub hints: Vec<String>,
+    /// A single file rather than a folder.
+    #[cfg_attr(not(target_arch = "wasm32"), uniffi(default = false))]
+    #[cfg_attr(target_arch = "wasm32", serde(default), tsify(optional))]
+    pub file: bool,
 }
 
 pub const SCHEME: &str = "typewright";
@@ -20,7 +25,10 @@ pub const SCHEME: &str = "typewright";
 pub const WEB_APP: &str = "https://bierdav.github.io/typewright/";
 const PREFIX: &str = "typewright://join/";
 const WEB_PATH: &str = "join#";
+/// Folder links keep the first layout, so older versions still read them; file links need the flags byte.
 const VERSION: u8 = 1;
+const VERSION_FLAGS: u8 = 2;
+const FLAG_FILE: u8 = 1;
 /// Keeps links short enough for chat apps.
 pub const MAX_HINTS: usize = 3;
 const MAX_NAME_BYTES: usize = 120;
@@ -34,7 +42,8 @@ pub fn invite_scheme() -> String {
     SCHEME.to_string()
 }
 
-/// Layout: version, 32-byte secret, id and name (each length-prefixed UTF-8), then 32-byte hints.
+/// Layout: version, 32-byte secret, (version 2: a flags byte,) id and name (each length-prefixed UTF-8), then 32-byte
+/// hints.
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
 pub fn invite_link(invite: SpaceInvite) -> Option<String> {
     let secret = from_hex(&invite.secret).filter(|s| s.len() == 32)?;
@@ -42,8 +51,11 @@ pub fn invite_link(invite: SpaceInvite) -> Option<String> {
         return None;
     }
     let name = truncate(folder_name(&invite.name), MAX_NAME_BYTES);
-    let mut bytes = vec![VERSION];
+    let mut bytes = vec![if invite.file { VERSION_FLAGS } else { VERSION }];
     bytes.extend(secret);
+    if invite.file {
+        bytes.push(FLAG_FILE);
+    }
     bytes.push(invite.id.len() as u8);
     bytes.extend(invite.id.as_bytes());
     bytes.push(name.len() as u8);
@@ -75,10 +87,15 @@ pub fn parse_invite(link: &str) -> Option<SpaceInvite> {
         return None;
     };
     let bytes = BASE64.decode(payload).ok()?;
-    if bytes.len() < 35 || bytes[0] != VERSION {
+    if bytes.len() < 35 || !(bytes[0] == VERSION || bytes[0] == VERSION_FLAGS) {
         return None;
     }
     let mut at = 33;
+    let mut file = false;
+    if bytes[0] == VERSION_FLAGS {
+        file = bytes[at] & FLAG_FILE != 0;
+        at += 1;
+    }
     let mut field = || {
         let length = *bytes.get(at)? as usize;
         let text = String::from_utf8_lossy(bytes.get(at + 1..at + 1 + length)?).into_owned();
@@ -86,12 +103,13 @@ pub fn parse_invite(link: &str) -> Option<SpaceInvite> {
         Some(text)
     };
     let id = field().filter(|id| is_valid_id(id))?;
-    let name = folder_name(&field()?);
+    let name = field()?;
+    let name = folder_name(&name);
     if (bytes.len() - at) % 32 != 0 {
         return None;
     }
     let hints = bytes[at..].chunks(32).map(hex).collect();
-    Some(SpaceInvite { id, name, secret: hex(&bytes[1..33]), hints })
+    Some(SpaceInvite { id, name, secret: hex(&bytes[1..33]), hints, file })
 }
 
 /// Ids name keys in replicas, so they stay plain.
@@ -99,7 +117,7 @@ pub fn is_valid_id(id: &str) -> bool {
     (1..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// The name works as a folder name: no separators, never empty or hidden.
+/// The name works as a file or folder name: no separators, never empty or hidden.
 pub fn folder_name(name: &str) -> String {
     let clean: String = name.chars().map(|c| if c == '/' || c == ':' || (c as u32) < 0x20 { '-' } else { c }).collect();
     let clean = clean.trim().trim_start_matches('.');
@@ -138,7 +156,7 @@ mod tests {
     }
 
     fn invite(id: &str, name: &str, secret: String, hints: Vec<String>) -> SpaceInvite {
-        SpaceInvite { id: id.into(), name: name.into(), secret, hints }
+        SpaceInvite { id: id.into(), name: name.into(), secret, hints, file: false }
     }
 
     #[test]
@@ -149,6 +167,19 @@ mod tests {
         assert!(!link["typewright://join/".len()..].contains(['+', '/', '=']));
         assert_eq!(Some(invite.clone()), parse_invite(&link));
         assert_eq!(Some(invite), parse_invite(&format!("  {link}/ ")));
+    }
+
+    #[test]
+    fn file_links_carry_their_kind_and_folder_links_stay_readable() {
+        let mut file = invite("note-1", "notes.typ", secret(), vec![device()]);
+        file.file = true;
+        let link = invite_link(file.clone()).unwrap();
+        assert_eq!(Some(file), parse_invite(&link));
+        // Folder links keep version 1, which apps before shares read too.
+        let folder = invite_link(invite("x", "Thesis", secret(), vec![])).unwrap();
+        let bytes = BASE64.decode(&folder["typewright://join/".len()..]).unwrap();
+        assert_eq!(bytes[0], VERSION);
+        assert!(!parse_invite(&folder).unwrap().file);
     }
 
     #[test]
