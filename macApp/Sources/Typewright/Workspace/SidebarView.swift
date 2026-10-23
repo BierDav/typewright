@@ -40,6 +40,7 @@ struct SidebarView: View {
             VStack(spacing: 0) {
                 SpaceHeader(name: workspace.name,
                             renaming: Binding(get: { workspace.renamingSpace }, set: { workspace.renamingSpace = $0 }),
+                            isExternal: !SpaceList.isInRepository(workspace.root),
                             isDropTarget: dropTarget?.path == workspace.root.path,
                             canReveal: workspace.selectedFile.map(isInTree) ?? false,
                             onReveal: { revealSelected(proxy) },
@@ -68,7 +69,8 @@ struct SidebarView: View {
                 }
                 HStack {
                     SpacesButton(active: false, action: onShowSpaces)
-                    Spacer()
+                    BackgroundStatusArea(workspace: workspace)
+                    Spacer(minLength: 0)
                     ZenMenuButton(systemName: "plus", size: 28, rotatesWhenOpen: true, idleFill: false) {
                         createItems(in: nil)
                     }
@@ -561,6 +563,7 @@ private struct MenuAnchor: NSViewRepresentable {
 private struct SpaceHeader: View {
     let name: String
     @Binding var renaming: Bool
+    let isExternal: Bool
     var isDropTarget = false
     let canReveal: Bool
     let onReveal: () -> Void
@@ -593,6 +596,7 @@ private struct SpaceHeader: View {
                     .pointerStyle(.horizontalText)
             }
             Spacer(minLength: 0)
+            if isExternal { ExternalSpaceBadge() }
             if hovered && canReveal && !renaming {
                 Button(action: onReveal) {
                     ZenIcon(systemName: "scope", size: 24, idleFill: false)

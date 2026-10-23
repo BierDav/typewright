@@ -112,7 +112,11 @@ enum Highlighter {
             return Conceal(range: NSRange(location: v(0), length: v(1)), replacement: unichar(clamping: v(2)),
                            equation: NSRange(location: v(3), length: v(4) - v(3)))
         }
-        return (folds + solveng.filter(isFold)).sorted { $0.range.location < $1.range.location }
+        let replacements = solveng.filter(isFold)
+        let remaining = folds.filter { fold in
+            !replacements.contains { NSIntersectionRange(fold.range, $0.range).length > 0 }
+        }
+        return (remaining + replacements).sorted { $0.range.location < $1.range.location }
     }
 
     /// Whether `location` is in math or a ```` ```solveng ```` block, where `""` glues names (`Delta""tau`).

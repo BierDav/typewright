@@ -4,6 +4,46 @@ import XCTest
 
 @MainActor
 final class SolvengContextTests: XCTestCase {
+    func testIdenticalEquationBeforeWorksheetKeepsOrdinaryMathHighlighting() throws {
+        let equation = "$y := x$"
+        let document = "#import \"@solveng/solveng:1.0.0\": *\n\n\(equation)\n\n#show: worksheet\n\(equation)"
+        let source = document as NSString
+        let first = source.range(of: equation)
+        let last = source.range(of: equation, options: .backwards)
+        let report: [String: Any] = ["blocks": 1, "elements": [[
+            "path": "main.typ", "start": last.location, "end": NSMaxRange(last), "text": equation,
+            "kind": "math", "active": true, "evaluate": true,
+        ]]]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: report), as: UTF8.self)
+        let context = SolvengSupport.context(files: [], report: json, path: "main.typ", main: true)
+        let highlight = try XCTUnwrap(SolvengSupport.highlight(document, context: context))
+        let tokens = stride(from: 0, to: highlight.tokens.count, by: 3).map {
+            NSRange(location: Int(highlight.tokens[$0]), length: Int(highlight.tokens[$0 + 1]))
+        }
+        XCTAssertFalse(tokens.contains { NSIntersectionRange($0, first).length > 0 })
+        XCTAssertTrue(tokens.contains { NSIntersectionRange($0, last).length > 0 })
+        let storage = NSTextStorage(string: document)
+        Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular), solvengContext: context)
+        XCTAssertEqual(storage.attribute(.foregroundColor, at: first.location + 1, effectiveRange: nil) as? NSColor, Highlighter.mathColor)
+        XCTAssertNotEqual(storage.attribute(.foregroundColor, at: last.location + 1, effectiveRange: nil) as? NSColor, Highlighter.mathColor)
+    }
+
+    func testFormattingComposesWithTypstyleEdits() {
+        let source = "😀\n#show: worksheet\n$x:=f( a :V,b )=1 .. 10$"
+        let context = SolvengSupport.context(files: [], report: "", path: "main.typ", main: true)
+        let preceding = [TextEdit(range: (source as NSString).range(of: "x:="), newText: "x := ")]
+        let edits = SolvengSupport.formattingEdits(source, context: context, preceding: preceding)
+        let result = TextEdit.apply(edits, to: source)
+        XCTAssertEqual(result, "😀\n#show: worksheet\n$x := f(a: V, b) = 1..10$")
+        XCTAssertTrue(SolvengSupport.formattingEdits(result, context: context).isEmpty)
+    }
+
+    func testFormattingWithoutLanguageServerRepairsInlineMath() {
+        let source = "#show: worksheet\n$ x:=a /b$"
+        let edits = SolvengSupport.formattingEdits(source, context: "")
+        XCTAssertEqual(TextEdit.apply(edits, to: source), "#show: worksheet\n$x := a / b$")
+    }
+
     func testWorksheetNamesWorkBeforeCompilation() throws {
         let document = """
         #import "@solveng/solveng:1.0.0": *

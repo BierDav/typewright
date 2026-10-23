@@ -11,6 +11,7 @@ final class ColumnSelectionTests: XCTestCase {
                           backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        tv.textContainer?.replaceLayoutManager(EditorLayoutManager())
         tv.allowsUndo = true
         window.contentView = tv
         window.makeFirstResponder(tv)
@@ -279,9 +280,26 @@ final class ColumnSelectionTests: XCTestCase {
         XCTAssertEqual(boxes.count, 3)
         XCTAssertLessThan(boxes[0].maxX, boxes[1].maxX)
         XCTAssertLessThan(boxes[1].maxX, tv.textContainer!.size.width / 2)
-        XCTAssertEqual(boxes[2].width, 2, accuracy: 0.01)
+        XCTAssertEqual(boxes[2].width, tv.columnWidth, accuracy: 0.01)
         let partial = tv.selectionBoxes(for: NSRange(location: 0, length: 3))
         XCTAssertEqual(boxes[0].maxX, partial[0].maxX, accuracy: 0.01)
+    }
+
+    func testInactiveSelectionDoesNotDrawAnAppKitBackground() throws {
+        let tv = editor("abc\n\nx")
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.backgroundColor = .white
+        tv.setSelectedRange(NSRange(location: 0, length: 6))
+        window.makeFirstResponder(nil)
+        let bitmap = try XCTUnwrap(tv.bitmapImageRepForCachingDisplay(in: tv.bounds))
+        tv.cacheDisplay(in: tv.bounds, to: bitmap)
+        let scale = CGFloat(bitmap.pixelsWide) / tv.bounds.width
+        for box in tv.selectionBoxes(for: tv.selectedRange()) {
+            let color = try XCTUnwrap(bitmap.colorAt(x: Int(300 * scale), y: Int(box.midY * scale))?.usingColorSpace(.deviceRGB))
+            XCTAssertEqual(color.redComponent, 1, accuracy: 0.01, "inactive selection must stop at the text")
+            XCTAssertEqual(color.greenComponent, 1, accuracy: 0.01)
+            XCTAssertEqual(color.blueComponent, 1, accuracy: 0.01)
+        }
     }
 
     func testColumnBackgroundRoundsOnlyItsOuterCorners() {

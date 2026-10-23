@@ -459,6 +459,11 @@ fn statement_binds(stmt: &LinkedNode, name: &str) -> Option<usize> {
     names.iter().find(|n| n.get().leaf_text() == name).map(|n| n.offset())
 }
 
+/// Local bindings override built-in math symbols.
+pub(crate) fn is_locally_bound(usage: &LinkedNode, name: &str) -> bool {
+    resolve(usage, name).is_some()
+}
+
 /// Where `name` is bound for a use: the scope node and the binding's offset; None for globals.
 fn resolve<'a>(usage: &LinkedNode<'a>, name: &str) -> Option<(LinkedNode<'a>, usize)> {
     let mut child = usage.clone();

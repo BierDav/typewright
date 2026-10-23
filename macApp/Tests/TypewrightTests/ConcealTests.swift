@@ -4,6 +4,123 @@ import XCTest
 
 @MainActor
 final class ConcealTests: XCTestCase {
+    func testConstructorDisplayStaysCollapsedWhileTypingWithAStaleReport() async throws {
+        let equation = "$y := op(\"tri\")(x) + 1unit(\"km\") $"
+        let prefix = "#show: worksheet\n"
+        let report: [String: Any] = ["blocks": 1, "elements": [[
+            "path": "main.typ", "start": prefix.utf16.count, "end": prefix.utf16.count + equation.utf16.count,
+            "text": equation, "kind": "math", "active": true, "evaluate": true,
+        ]]]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: report), as: UTF8.self)
+        var context = SolvengSupport.context(files: [], report: json, path: "main.typ", main: true)
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 800, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = prefix + equation
+        tv.solvengContext = { context }
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        func check() {
+            let expected = tv.string.replacingOccurrences(of: "op(\"tri\")", with: "tri")
+                .replacingOccurrences(of: "unit(\"km\")", with: "km")
+                .replacingOccurrences(of: "\n", with: "?")
+            XCTAssertEqual(shown(tv), expected)
+        }
+        check()
+        for addition in [" +", " 1", "(", ")"] {
+            let at = (tv.string as NSString).length - 1
+            tv.setSelectedRange(NSRange(location: at, length: 0))
+            tv.insertText(addition, replacementRange: tv.selectedRange())
+            check()
+            await Task.yield()
+            check()
+        }
+        let name = (tv.string as NSString).range(of: "$y")
+        tv.setSelectedRange(NSRange(location: name.location + 1, length: 1))
+        tv.insertText("longer", replacementRange: tv.selectedRange())
+        check()
+        await Task.yield()
+        check()
+        let boxes = tv.collapsedSegmentBoxes(in: tv.bounds).map(\.box)
+        context = SolvengSupport.context(files: [], report: "{\"blocks\":1,\"elements\":[]}", path: "main.typ", main: true)
+        tv.refreshConceals()
+        check()
+        XCTAssertEqual(tv.collapsedSegmentBoxes(in: tv.bounds).map(\.box), boxes)
+        let constructor = (tv.string as NSString).range(of: "op(\"tri\")")
+        tv.setSelectedRange(NSRange(location: constructor.location + 5, length: 0))
+        XCTAssertTrue(shown(tv).contains("op(\"tri\")"))
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        check()
+    }
+
+    func testUnsupportedReplacementHasNoCollapsedSourceMarker() throws {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.font = font
+        tv.string = "$ triangle + Omega + arrow.r.double + integral.cont $"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let unsupported = try XCTUnwrap(tv.conceals.first { conceal in
+            guard conceal.replacement != 0 else { return false }
+            var character = conceal.replacement
+            var glyph: CGGlyph = 0
+            return !CTFontGetGlyphsForCharacters(font, &character, &glyph, 1) || glyph == 0
+        })
+        let boxes = tv.collapsedSegmentBoxes(in: tv.bounds)
+        XCTAssertFalse(boxes.contains { NSIntersectionRange($0.range, unsupported.range).length > 0 })
+        let spelling = (tv.string as NSString).substring(with: unsupported.range)
+        XCTAssertTrue(shown(tv).contains(spelling))
+    }
+
+    func testSingleCharacterReplacementHasCollapsedSourceMarker() throws {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$ a - b $"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let minus = (tv.string as NSString).range(of: "-")
+        XCTAssertTrue(tv.collapsedSegmentBoxes(in: tv.bounds).contains { $0.range == minus })
+        tv.setSelectedRange(NSRange(location: minus.location, length: 0))
+        XCTAssertFalse(tv.collapsedSegmentBoxes(in: tv.bounds).contains { $0.range == minus })
+    }
+
+    func testUnchangedFunctionAliasHasNoCollapsedSourceMarker() throws {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = NSFont(name: "JetBrainsMono-Regular", size: 13) ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "#let triangle = math.op(\"tri\")\n$t := triangle(x) $"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let alias = (tv.string as NSString).range(of: "triangle(x)")
+        XCTAssertTrue(shown(tv).contains("triangle(x)"))
+        XCTAssertFalse(tv.collapsedSegmentBoxes(in: tv.bounds).contains { NSIntersectionRange($0.range, alias).length > 0 })
+        let box = try XCTUnwrap(tv.highlightBoxes(for: NSRange(location: alias.location, length: 8)).first)
+        XCTAssertNil(tv.collapsedSegment(at: NSPoint(x: box.midX, y: box.midY)))
+    }
+
+    func testCollapsedIndicatorsFollowVisiblePieces() throws {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$ Omega + \"km\" $"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let source = tv.string as NSString
+        let omega = source.range(of: "Omega")
+        let quoted = source.range(of: "\"km\"")
+        XCTAssertEqual(tv.collapsedSegments, [omega, quoted])
+        let boxes = tv.collapsedSegmentBoxes(in: tv.bounds)
+        XCTAssertEqual(boxes.map(\.range), [omega, quoted])
+        let box = try XCTUnwrap(boxes.first?.box)
+        let point = NSPoint(x: box.midX, y: box.midY)
+        XCTAssertEqual(tv.collapsedSegment(at: point), omega)
+        XCTAssertNil(tv.collapsedSegment(at: NSPoint(x: 500, y: point.y)))
+        XCTAssertTrue(tv.collapsedSourceTooltip(for: quoted).contains("\"km\""))
+        XCTAssertFalse(tv.collapsedSourceTooltip(for: quoted).contains("Option"))
+        tv.setSelectedRange(NSRange(location: omega.location + 1, length: 0))
+        XCTAssertEqual(tv.collapsedSegments, [quoted])
+        XCTAssertNil(tv.collapsedSegment(at: point))
+        tv.concealsMath = false
+        XCTAssertTrue(tv.collapsedSegmentBoxes(in: tv.bounds).isEmpty)
+    }
+
     /// The text as drawn: hidden glyphs left out, replaced ones as their character.
     private func shown(_ tv: TypstTextView) -> String {
         let lm = tv.layoutManager!
@@ -68,6 +185,26 @@ final class ConcealTests: XCTestCase {
         tv.setSelectedRange(NSRange(location: 18, length: 0))
         tv.updateRevealedEquation()
         XCTAssertEqual(shown(tv), "R = $12k?$ ok")
+    }
+
+    func testInlineConstructorsRevealAsAWhole() {
+        for constructor in ["unit(\"km\")", "unit(\"Omega\")", "op(\"tri\")"] {
+            let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+            tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            tv.string = "#show: worksheet\n$y := 1" + constructor + "$"
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            tv.concealsMath = true
+            let range = (tv.string as NSString).range(of: constructor)
+            let collapsed = shown(tv)
+            XCTAssertFalse(collapsed.contains("unit("))
+            XCTAssertFalse(collapsed.contains("op("))
+            for offset in range.location...NSMaxRange(range) {
+                tv.setSelectedRange(NSRange(location: offset, length: 0))
+                XCTAssertTrue(shown(tv).contains(constructor), "\(constructor) at \(offset)")
+            }
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            XCTAssertEqual(shown(tv), collapsed)
+        }
     }
 
     func testEmptyStringsGlueNeighboursAndRevealWithThem() {

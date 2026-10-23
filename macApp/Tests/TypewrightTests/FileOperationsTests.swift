@@ -18,6 +18,7 @@ final class FileOperationsTests: XCTestCase {
         try "One\n".write(to: space.appendingPathComponent("chapters/one.typ"), atomically: true, encoding: .utf8)
         await repository.commit("Add test space")
         ws = Workspace(url: space)
+        await ws.waitForIndex()
         undo = UndoManager()
         undo.groupsByEvent = false
         ws.fileOps.undoManager = undo
@@ -40,16 +41,19 @@ final class FileOperationsTests: XCTestCase {
         body()
         undo.endUndoGrouping()
         await ws.fileOps.settle()
+        await ws.waitForIndex()
     }
 
     private func undoStep() async {
         undo.undo()
         await ws.fileOps.settle()
+        await ws.waitForIndex()
     }
 
     private func redoStep() async {
         undo.redo()
         await ws.fileOps.settle()
+        await ws.waitForIndex()
     }
 
     func testRenameUndoesAndRedoes() async {

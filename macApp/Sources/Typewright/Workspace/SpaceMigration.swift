@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// The one-time question for spaces from before the repository: move them in, or leave them where they are.
+/// Imports external spaces when requested from the command palette.
 enum SpaceMigration {
     enum Choice: String, CaseIterable, Identifiable {
         case replaceWithLink, keepOriginal, deleteOriginal, leaveAsIs
@@ -27,34 +27,21 @@ enum SpaceMigration {
         }
     }
 
-    private static let key = "spaceMigrationAnswered"
-
     /// Git checkouts stay untracked inside the library anyway, so they default to staying where they are.
     static func defaultChoice(for url: URL) -> Choice {
         SpaceFolders.isGitRepository(url) ? .leaveAsIs : .replaceWithLink
     }
 
-    /// Spaces outside the repository that haven't been asked about.
-    static func pending(_ spaces: [URL], repository: URL, answered: Set<String>) -> [URL] {
+    static func externalSpaces(_ spaces: [URL], repository: URL) -> [URL] {
         let base = repository.resolvingSymlinksInPath().standardizedFileURL.path
         return spaces.filter { url in
             let path = url.resolvingSymlinksInPath().standardizedFileURL.path
-            return !path.hasPrefix(base + "/") && !answered.contains(path)
+            return path != base && !path.hasPrefix(base + "/")
         }
     }
 
-    static func answered(in defaults: UserDefaults = .standard) -> Set<String> {
-        Set(defaults.stringArray(forKey: key) ?? [])
-    }
-
-    static func markAnswered(_ url: URL, in defaults: UserDefaults = .standard) {
-        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
-        defaults.set(Array(answered(in: defaults).union([path])).sorted(), forKey: key)
-    }
-
-    /// Asks once, after the session is back, if any space still needs an answer.
-    @MainActor static func askIfNeeded() {
-        let spaces = pending(SpaceList.all, repository: SpaceList.repository, answered: answered())
+    @MainActor static func show() {
+        let spaces = externalSpaces(SpaceList.all, repository: SpaceList.repository)
         guard !spaces.isEmpty, SpaceRepository.shared.isOpen else { return }
         let window = NSWindow(contentViewController: NSHostingController(rootView: EmptyView()))
         window.styleMask = [.titled]
@@ -78,15 +65,13 @@ enum SpaceMigration {
         for url in order {
             guard let choice = choices[url] else { continue }
             if let mode = choice.mode {
-                if await Opener.shared.importSpace(url, mode: mode, warnAboutGit: false) != nil { markAnswered(url) }
-            } else {
-                markAnswered(url)
+                await Opener.shared.importSpace(url, mode: mode)
             }
         }
     }
 }
 
-/// Lists the old spaces with a choice each.
+/// Each external space can be imported or left where it is.
 private struct MigrationSheet: View {
     let spaces: [URL]
     let done: ([URL: SpaceMigration.Choice]?) -> Void
@@ -94,9 +79,9 @@ private struct MigrationSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Move Spaces Into Typewright?")
+            Text("Import External Spaces")
                 .font(.headline)
-            Text("Typewright now keeps spaces in its own folder, where every change is kept in a history. Importing can leave the original where it is, replace it with a link so you still find it there, or delete it. Originals that go are put in the Trash.")
+            Text("Import external spaces into the library to keep a history of their changes and enable device sync. You can keep the original, replace it with a link, or move it to the Trash.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Form {
@@ -123,7 +108,8 @@ private struct MigrationSheet: View {
             .formStyle(.grouped)
             .frame(minHeight: 120, maxHeight: 360)
             HStack {
-                Button("Ask Later") { done(nil) }
+                Button("Cancel") { done(nil) }
+                    .keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Continue") { done(spaces.reduce(into: [:]) { $0[$1] = choices[$1] ?? SpaceMigration.defaultChoice(for: $1) }) }
                     .keyboardShortcut(.defaultAction)

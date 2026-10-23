@@ -23,11 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SyncService.shared.restart()
         Opener.shared.restoreSession()
         LibraryWatcher.shared.start()
-        // Tests run inside the app; they must neither commit to nor ask about the user's spaces.
+        // Tests run inside the app and must not commit to the user's spaces.
         if !Self.isTesting {
             SpaceRepository.shared.setLFSLimit(megabytes: SyncService.shared.lfsThresholdMB)
             CommitScheduler.shared.start()
-            DispatchQueue.main.async { SpaceMigration.askIfNeeded() }
         }
         Opener.shared.installShortcuts()
         Opener.shared.installNavigationButtons()

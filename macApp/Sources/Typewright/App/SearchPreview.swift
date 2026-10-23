@@ -80,7 +80,9 @@ final class SearchPreviewDocument: EditorLanguage {
     }
 
     func formattingEdits() async -> [TextEdit] {
-        await client?.format(url, text: text as NSString) ?? []
+        let source = text
+        let edits = await client?.format(url, text: source as NSString) ?? []
+        return SolvengSupport.formattingEdits(source, context: "", preceding: edits)
     }
 
     func renameTarget(at offset: Int) async -> (range: NSRange, name: String)? {

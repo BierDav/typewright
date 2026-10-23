@@ -52,9 +52,8 @@ final class Opener {
             if let state { open(url, in: state) } else { open(url) }
             return
         }
-        Task {
-            guard let space = await importSpace(url) else { return }
-            if let state { open(space, in: state) } else { open(space) }
+        askToImport(url, in: state) { [weak self] space in
+            if let state { self?.open(space, in: state) } else { self?.open(space) }
         }
     }
 
@@ -260,7 +259,7 @@ final class Opener {
 
     /// Reopens the spaces from the last session, or an empty window.
     func restoreSession() {
-        guard controllers.isEmpty else { return }
+        guard !AppDelegate.isTesting, controllers.isEmpty else { return }
         let paths = UserDefaults.standard.stringArray(forKey: Self.sessionKey) ?? []
         let urls = paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
         if urls.isEmpty { newWindow() } else {
@@ -270,6 +269,7 @@ final class Opener {
     }
 
     func saveSession() {
+        guard !AppDelegate.isTesting else { return }
         let paths = controllers.compactMap { $0.state.space?.path }
         UserDefaults.standard.set(paths, forKey: Self.sessionKey)
     }
@@ -314,9 +314,8 @@ final class Opener {
             if let state { open(url, in: state) } else { open(url) }
             return
         }
-        Task {
-            guard let space = await importSpace(url) else { return }
-            if let state { open(space, in: state) } else { open(space) }
+        askToImport(url, in: state) { [weak self] space in
+            if let state { self?.open(space, in: state) } else { self?.open(space) }
         }
     }
 
@@ -346,48 +345,80 @@ final class Opener {
         }
     }
 
-    /// Copies a folder into the repository, asking what becomes of the original. Returns the new space.
-    /// `warnAboutGit` is off where the caller already told the user (the migration sheet).
-    @discardableResult
-    func importSpace(_ source: URL, mode: SpaceFolders.ImportMode? = nil, warnAboutGit: Bool = true) async -> URL? {
+    /// The window to ask in: `state`, the key one, any, or a new empty one.
+    private func promptState(_ state: WindowState?) -> WindowState {
+        if let state = state ?? keyState ?? controllers.first(where: { $0.window?.isMainWindow == true })?.state
+            ?? controllers.last?.state {
+            state.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+            return state
+        }
+        let controller = MainWindowController(space: nil)
+        show(controller)
+        return controller.state
+    }
+
+    /// Asks in the command palette how a folder from outside becomes a space: copied into the library (and what
+    /// becomes of the original) or listed where it is, as an external space. `done` gets the space.
+    /// `external` is off where the folder already is one, or only an import helps (sync).
+    func askToImport(_ source: URL, in state: WindowState? = nil, external offersExternal: Bool = true,
+                     done: @escaping (URL) -> Void = { _ in }) {
         let source = source.standardizedFileURL
-        if warnAboutGit, SpaceFolders.isGitRepository(source) {
-            let alert = NSAlert()
-            alert.messageText = "“\(source.lastPathComponent)” is a Git repository"
-            alert.informativeText = "Typewright keeps no history for Git repositories and won't sync them, since Git "
-                + "already tracks their changes. You can still edit and preview it in Typewright."
-            alert.addButton(withTitle: "Import Anyway")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let name = source.lastPathComponent
+        let git = SpaceFolders.isGitRepository(source)
+        func importing(_ id: String, _ title: String, _ subtitle: String, _ icon: String, _ mode: SpaceFolders.ImportMode) -> PaletteItem {
+            PaletteItem(id: "import.\(id)", title: title, subtitle: git ? SpaceFolders.gitRepositoryNote : subtitle, icon: icon,
+                        section: "Import “\(name)”", action: .run { [weak self] in
+                Task { if let space = await self?.importSpace(source, mode: mode) { done(space) } }
+            })
         }
-        var mode = mode
-        if mode == nil {
-            let alert = NSAlert()
-            alert.messageText = "Import “\(source.lastPathComponent)” into Typewright?"
-            alert.informativeText = "Typewright copies the folder into its spaces, where every change is kept in its history. "
-                + "A link to the copy can take the original's place, so you still find it where it was; the original goes to the Trash."
-            alert.addButton(withTitle: "Import and Replace With Link")
-            alert.addButton(withTitle: "Import and Keep Original")
-            alert.addButton(withTitle: "Import and Delete Original")
-            alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn: mode = .replaceWithLink
-            case .alertSecondButtonReturn: mode = .keepOriginal
-            case .alertThirdButtonReturn: mode = .deleteOriginal
-            default: return nil
-            }
+        let external = PaletteItem(id: "import.external", title: "Add as External Space",
+                                   subtitle: "Stays where it is: no history or device sync", icon: "arrow.up.forward.square",
+                                   section: "Import “\(name)”", keywords: ["link", "external", "open in place"],
+                                   action: .run { [weak self] in
+            guard let space = self?.addExternal(source) else { return }
+            done(space)
+        })
+        var items = [
+            importing("link", "Import and Replace With Link", "Copies it into the library; a link takes its place, the original goes to the Trash",
+                      "link", .replaceWithLink),
+            importing("keep", "Import and Keep Original", "Copies it into the library; the original stays", "doc.on.doc", .keepOriginal),
+            importing("delete", "Import and Delete Original", "Moves it into the library; the original goes to the Trash", "trash", .deleteOriginal),
+        ]
+        // Git keeps a checkout's history already, so leaving it where it is comes first.
+        if offersExternal { if git { items.insert(external, at: 0) } else { items.append(external) } }
+        promptState(state).ask(PalettePage(title: "Import “\(name)”", placeholder: "Choose how to add “\(name)”…",
+                                           kind: .list { items }))
+    }
+
+    /// Lists a folder outside the library as a space, where it is.
+    @discardableResult
+    func addExternal(_ source: URL) -> URL? {
+        let source = source.standardizedFileURL
+        let resolved = source.resolvingSymlinksInPath().path
+        let base = SpaceList.repository.resolvingSymlinksInPath().path
+        if resolved == base || base.hasPrefix(resolved + "/") {
+            NSAlert(error: SpaceFolders.ImportError.containsRepository).runModal()
+            return nil
         }
+        SpaceList.add(source)
+        return source
+    }
+
+    /// Copies a folder into the repository; `mode` says what becomes of the original. Returns the new space.
+    @discardableResult
+    func importSpace(_ source: URL, mode: SpaceFolders.ImportMode) async -> URL? {
+        let source = source.standardizedFileURL
         let windows = windows(showing: source.resolvingSymlinksInPath())
         windows.forEach { $0.state.workspace?.flushSaves() }
         let root = SpaceList.repository
-        let chosen = mode ?? .keepOriginal
-        let result = await Task.detached { Result(catching: { try SpaceFolders.importFolder(source, into: root, mode: chosen) }) }.value
+        let result = await Task.detached { Result(catching: { try SpaceFolders.importFolder(source, into: root, mode: mode) }) }.value
         switch result {
         case .failure(let error):
             NSAlert(error: error).runModal()
             return nil
         case .success(let target):
-            if chosen == .replaceWithLink { SpaceLinks.shared.record(source, to: target) }
+            if mode == .replaceWithLink { SpaceLinks.shared.record(source, to: target) }
             relocate(windows, from: source.resolvingSymlinksInPath(), to: target)
             // Keeps the space where it was in the list.
             SpaceList.replace(source, with: target)
@@ -395,21 +426,22 @@ final class Opener {
         }
     }
 
-    /// Deletes a repository space after asking; it stays in the history (Recently Deleted) and undo brings it back.
-    /// Links to it stay where they are and work again once it's back.
+    /// Deletes a repository space after asking in the command palette; it stays in the history (Recently Deleted) and
+    /// undo brings it back. Links to it stay where they are and work again once it's back.
     func deleteSpace(_ url: URL, in state: WindowState? = nil) {
         let url = url.standardizedFileURL
-        let alert = NSAlert()
-        alert.messageText = "Delete “\(url.lastPathComponent)”?"
-        alert.informativeText = "You can undo this, or get the space back later from File › Recently Deleted…."
-        if SyncService.shared.isSynced(url) { alert.informativeText += " This Mac stops syncing it; your other devices keep it." }
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let manager = (state ?? keyState)?.undoManager
-        FileOperations.spaces.perform(.deleteSpace(url), name: "Delete “\(url.lastPathComponent)”",
-                                      message: "Delete space \(url.lastPathComponent)", undoManager: manager)
+        let name = url.lastPathComponent
+        var detail = "Undo or File › Recently Deleted… bring it back"
+        if SyncService.shared.isSynced(url) { detail += "; this Mac stops syncing it, other devices keep it" }
+        let state = promptState(state)
+        state.ask(PalettePage(title: "Delete “\(name)”?", placeholder: "Delete “\(name)”?", kind: .list {[
+            PaletteItem(id: "delete.confirm", title: "Delete Space “\(name)”", subtitle: detail, icon: "trash",
+                        section: "Delete “\(name)”", action: .run { [weak state] in
+                FileOperations.spaces.perform(.deleteSpace(url), name: "Delete “\(name)”",
+                                              message: "Delete space \(name)", undoManager: state?.undoManager)
+            }),
+            PaletteItem(id: "delete.cancel", title: "Cancel", icon: "xmark", section: "Delete “\(name)”", action: .run {}),
+        ]}))
     }
 
     /// The deletion itself, for `FileOperations`: windows showing the space close it, and its sync stops.
@@ -529,6 +561,13 @@ final class Opener {
 enum SpaceList {
     // Named before projects became spaces; kept so the list survives.
     private static let key = "recentProjects"
+    private static let defaults: UserDefaults = {
+        guard SpaceRepository.isTestHost else { return .standard }
+        let name = "dev.bierdav.Typewright.tests.spaces"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return defaults
+    }()
 
     /// Where the spaces live; the same as `SpaceRepository.shared.root`, without opening the repository.
     static let repository = SpaceRepository.defaultRoot.standardizedFileURL
@@ -541,7 +580,9 @@ enum SpaceList {
     static func order(stored: [String], repository: [URL]) -> [URL] {
         var seen = Set<String>()
         let known = stored
-            .map { Workspace.root(of: URL(fileURLWithPath: $0)).resolvingSymlinksInPath() }
+            .map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+            .map { Workspace.root(of: $0).resolvingSymlinksInPath() }
             .filter { FileManager.default.fileExists(atPath: $0.path) && seen.insert($0.path).inserted }
         return known + repository.filter { seen.insert($0.resolvingSymlinksInPath().path).inserted }
     }
@@ -580,9 +621,9 @@ enum SpaceList {
     static let didChange = Notification.Name("SpaceListDidChange")
 
     private static var stored: [String] {
-        get { UserDefaults.standard.stringArray(forKey: key) ?? [] }
+        get { defaults.stringArray(forKey: key) ?? [] }
         set {
-            UserDefaults.standard.set(newValue, forKey: key)
+            defaults.set(newValue, forKey: key)
             NotificationCenter.default.post(name: didChange, object: nil)
         }
     }

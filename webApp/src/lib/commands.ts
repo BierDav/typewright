@@ -37,6 +37,16 @@ export function find(replace = false) {
   if (replace) requestAnimationFrame(() => v.dom.querySelector<HTMLInputElement>(".cm-search input[name=replace]")?.focus());
 }
 
+export async function formatDocument() {
+  const v = view();
+  const ws = workspace();
+  if (!v || !ws || !ws.state.selected?.endsWith(".typ") || v.state.readOnly) return;
+  const doc = v.state.doc;
+  const edits = await solveng.Solveng.format(doc.toString(), await ws.solvengContext());
+  if (v.state.doc !== doc || v.state.readOnly || !edits.length) return;
+  v.dispatch({ changes: edits.map((e) => ({ from: e.start, to: e.end, insert: e.text })), userEvent: "input.format" });
+}
+
 export function quickDocs() {
   const v = view();
   if (v) void showDocs(v, languageContext());

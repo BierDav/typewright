@@ -4,7 +4,7 @@ import PDFKit
 import TypewrightCore
 import UniformTypeIdentifiers
 
-struct FileNode: Identifiable, Hashable {
+struct FileNode: Identifiable, Hashable, Sendable {
     let url: URL
     let kind: FileKind
     let children: [FileNode]?
@@ -31,6 +31,14 @@ struct RevealRequest: Equatable {
 final class Workspace: EditorLanguage {
     let root: URL
     private(set) var tree: [FileNode] = []
+    private(set) var isIndexing = false
+    private(set) var indexProgress: SpaceIndex.Progress?
+    private(set) var isRebuildingIndex = false
+    @ObservationIgnored private var indexTask: Task<Void, Never>?
+    @ObservationIgnored private var indexPending = false
+    @ObservationIgnored private var indexNeedsRebuild = false
+    @ObservationIgnored private var selectAfterIndex = false
+    @ObservationIgnored private var previewAfterIndex = false
     private(set) var selectedFile: URL?
     private(set) var selectedKind: FileKind?
     private(set) var text = ""
@@ -150,7 +158,6 @@ final class Workspace: EditorLanguage {
         let state = saved ?? SpaceState()
         buffers = session?.buffers ?? [:]
         split = state.split
-        reloadTree()
         let base = root
         func resolve(_ path: String?) -> URL? {
             guard let path else { return nil }
@@ -162,6 +169,8 @@ final class Workspace: EditorLanguage {
         positions = Dictionary(state.positions.compactMap { k, v in resolve(k).map { ($0, v) } }) { a, _ in a }
         expanded = Set(state.expanded.compactMap(resolve))
         let initial = isDir ? resolve(state.selected) ?? defaultMain() : url
+        selectAfterIndex = initial == nil && isDir
+        previewAfterIndex = saved == nil
         if let initial { select(initial) }
         dirty = session?.dirty ?? []
         // New spaces start out previewing their main file; known ones keep their choice, even none.
@@ -237,6 +246,7 @@ final class Workspace: EditorLanguage {
                 self?.scheduleCompile(delay: 0)
             }
         }
+        reloadTree()
     }
 
     /// Whether the previewed file is Markdown, which renders without a compiler.
@@ -289,11 +299,69 @@ final class Workspace: EditorLanguage {
     // MARK: - Files
 
     func reloadTree() {
-        tree = Self.scan(root, depth: 0)
+        guard !isClosed else { return }
+        if indexTask != nil {
+            indexPending = true
+        } else {
+            startIndex()
+        }
         // New, removed or renamed files must reach the built-in compiler too.
         builtin.reset()
         // Fonts may have been added to the space's font folders.
         updateFonts()
+    }
+
+    func rebuildIndex() {
+        guard !isClosed else { return }
+        indexNeedsRebuild = true
+        if indexTask == nil { startIndex() }
+    }
+
+    private func startIndex() {
+        isIndexing = true
+        indexProgress = SpaceIndex.Progress(phase: .loading)
+        let root = root
+        let useCache = tree.isEmpty
+        indexTask = Task { [weak self] in
+            var useCache = useCache
+            repeat {
+                self?.indexPending = false
+                let rebuild = self?.indexNeedsRebuild == true
+                self?.indexNeedsRebuild = false
+                self?.isRebuildingIndex = rebuild
+                for await update in SpaceIndex.updates(for: root, useCache: useCache, rebuild: rebuild) {
+                    guard !Task.isCancelled, let self, !self.isClosed else { return }
+                    switch update {
+                    case .progress(let progress):
+                        self.indexProgress = progress
+                        continue
+                    case .snapshot(let snapshot):
+                        self.applyIndex(snapshot)
+                    }
+                }
+                useCache = false
+            } while !Task.isCancelled && (self?.indexPending == true || self?.indexNeedsRebuild == true)
+            guard !Task.isCancelled, let self, !self.isClosed else { return }
+            self.isIndexing = false
+            self.indexProgress = nil
+            self.isRebuildingIndex = false
+            self.indexTask = nil
+        }
+    }
+
+    private func applyIndex(_ snapshot: SpaceIndex.Snapshot) {
+        tree = snapshot.tree
+        if snapshot.validated, selectAfterIndex {
+            selectAfterIndex = false
+            if let initial = defaultMain() {
+                if previewAfterIndex { previewMode = .following }
+                select(initial)
+            }
+        }
+    }
+
+    func waitForIndex() async {
+        while let task = indexTask { await task.value }
     }
 
     /// Font folders are looked up from the previewed file's folder up, so a chapter's own fonts count too.
@@ -320,6 +388,7 @@ final class Workspace: EditorLanguage {
         guard url != selectedFile else { return }
         let kind = FileKind(url: url)
         guard kind.isOpenable else { return }
+        selectAfterIndex = false
         recordJump()
         justSelected = true
         DispatchQueue.main.async { [weak self] in self?.justSelected = false }
@@ -1539,8 +1608,11 @@ final class Workspace: EditorLanguage {
     }
 
     func formattingEdits() async -> [TextEdit] {
-        guard let file = selectedFile, selectedKind == .typst, let client = languageClient() else { return [] }
-        return await client.format(file, text: text as NSString)
+        guard let file = selectedFile, selectedKind == .typst else { return [] }
+        let source = text
+        let context = solvengContext()
+        let edits = await languageClient()?.format(file, text: source as NSString) ?? []
+        return SolvengSupport.formattingEdits(source, context: context, preceding: edits)
     }
 
     func renameTarget(at offset: Int) async -> (range: NSRange, name: String)? {
@@ -1862,6 +1934,11 @@ final class Workspace: EditorLanguage {
     func close() {
         guard !isClosed else { return }
         isClosed = true
+        indexTask?.cancel()
+        indexTask = nil
+        isIndexing = false
+        indexProgress = nil
+        isRebuildingIndex = false
         Self.open.removeAll { $0.value == nil || $0.value === self }
         LibraryWatcher.shared.stopObserving(root)
         flushSaves()
@@ -1892,7 +1969,7 @@ final class Workspace: EditorLanguage {
 
     private func defaultMain() -> URL? {
         let main = root.appendingPathComponent("main.typ")
-        if FileManager.default.fileExists(atPath: main.path) { return main }
+        if FileManager.default.fileExists(atPath: main.path), FileKind(url: main) == .typst { return main }
         return Self.flatten(tree).first { $0.isTypst }?.url
     }
 
@@ -1911,25 +1988,5 @@ final class Workspace: EditorLanguage {
 
     static func flatten(_ nodes: [FileNode]) -> [FileNode] {
         nodes.flatMap { [$0] + flatten($0.children ?? []) }
-    }
-
-    private static func scan(_ dir: URL, depth: Int) -> [FileNode] {
-        guard depth < 8 else { return [] }
-        let keys: [URLResourceKey] = [.isDirectoryKey]
-        let items = (try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
-        )) ?? []
-        return items
-            .map { url -> FileNode in
-                let isDir = (try? url.resourceValues(forKeys: Set(keys)).isDirectory) ?? false
-                let url = url.standardizedFileURL
-                return isDir
-                    ? FileNode(url: url, kind: .folder, children: scan(url, depth: depth + 1))
-                    : FileNode(url: url, kind: FileKind(url: url), children: nil)
-            }
-            .sorted { a, b in
-                if (a.children == nil) != (b.children == nil) { return a.children != nil }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
-            }
     }
 }

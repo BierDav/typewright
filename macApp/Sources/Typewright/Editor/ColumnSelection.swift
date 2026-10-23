@@ -1,6 +1,16 @@
 import AppKit
 import TypewrightCore
 
+final class EditorLayoutManager: NSLayoutManager {
+    override func fillBackgroundRectArray(_ rectArray: UnsafePointer<NSRect>, count rectCount: Int,
+                                          forCharacterRange charRange: NSRange, color: NSColor) {
+        // AppKit ignores selectedTextAttributes for inactive selections.
+        guard color != .unemphasizedSelectedTextBackgroundColor,
+              color != .unemphasizedSelectedContentBackgroundColor else { return }
+        super.fillBackgroundRectArray(rectArray, count: rectCount, forCharacterRange: charRange, color: color)
+    }
+}
+
 /// Several carets or selections edited at once: ⌥-drag selects a column, ⌥⇧-click toggles a caret, ⌃⇧↑ and ⌃⇧↓ add
 /// one on the line above or below, like Xcode. In column selection mode (⇧⌘8, like IntelliJ) a plain drag selects a
 /// column and ⇧↑ and ⇧↓ add lines to it. A column started past the end of its line puts carets at the end of shorter lines.
@@ -394,8 +404,8 @@ extension TypstTextView {
             let selected = NSIntersectionRange(glyphs, lineGlyphs)
             lm.enumerateEnclosingRects(forGlyphRange: selected, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
                                        in: container) { box, _ in
-                // Newlines otherwise fill the space to the wrap guide; empty lines keep a small mark.
-                let end = max(used.maxX - container.lineFragmentPadding, box.minX + 2)
+                // Newlines stop at the text; empty lines keep one character selected.
+                let end = max(used.maxX - container.lineFragmentPadding, box.minX + self.columnWidth)
                 let clipped = NSRect(x: box.minX, y: box.minY, width: min(box.maxX, end) - box.minX, height: box.height)
                 boxes.append(clipped.offsetBy(dx: origin.x, dy: origin.y))
             }

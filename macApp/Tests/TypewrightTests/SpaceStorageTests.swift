@@ -238,19 +238,31 @@ final class SpaceStorageTests: XCTestCase {
         _ = a
     }
 
+    func testMissingSpaceIsNotReplacedByItsExistingParent() throws {
+        let missing = dir.appendingPathComponent("Removed Space")
+        let missingFile = dir.appendingPathComponent("removed.typ")
+        XCTAssertEqual(SpaceList.order(stored: [missing.path, missingFile.path], repository: []), [])
+    }
+
+    func testExistingFileAndLinkStillResolveToTheirSpace() throws {
+        let space = try folder("Essay", files: ["main.typ": "= Essay"])
+        let link = dir.appendingPathComponent("Link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: space)
+        let order = SpaceList.order(stored: [space.appendingPathComponent("main.typ").path, link.path], repository: [])
+        XCTAssertEqual(order, [space])
+    }
+
     // MARK: - Migration
 
-    func testMigrationAsksOnlyAboutSpacesOutsideTheRepository() throws {
+    func testImportGuideExcludesLibrarySpacesAndLinks() throws {
         let root = dir.appendingPathComponent("Spaces")
         let inside = try SpaceFolders.create(named: "Inside", in: root)
         let old = try folder("Old", files: [:])
         let other = try folder("Other", files: [:])
-        let defaults = defaults()
-        XCTAssertEqual(SpaceMigration.pending([inside, old, other], repository: root, answered: SpaceMigration.answered(in: defaults)),
+        let link = dir.appendingPathComponent("Link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: inside)
+        XCTAssertEqual(SpaceMigration.externalSpaces([root, inside, link, old, other], repository: root),
                        [old, other])
-        SpaceMigration.markAnswered(old, in: defaults)
-        XCTAssertEqual(SpaceMigration.pending([inside, old, other], repository: root, answered: SpaceMigration.answered(in: defaults)),
-                       [other])
     }
 
     func testGitCheckoutsDefaultToStayingWhereTheyAre() throws {

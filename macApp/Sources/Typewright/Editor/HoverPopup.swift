@@ -180,6 +180,12 @@ final class HoverController {
         if let range = errors.first?.range, let rect = Self.rect(of: range, in: tv) {
             present(errors: errors.map(\.diagnostic), markdown: nil, below: rect, at: index)
         }
+        let editor = tv as? TypstTextView
+        let collapsed = editor?.collapsedSegment(at: point)
+        let source = collapsed.flatMap { editor?.collapsedSourceTooltip(for: $0) }
+        if let collapsed, let source, let rect = editor?.highlightBoxes(for: collapsed).first(where: { $0.contains(point) }) {
+            present(errors: errors.map(\.diagnostic), markdown: source, below: rect, at: index)
+        }
         guard let symbol = Self.character(at: point, in: tv) else { return }
         let docs = await provider?(symbol)
         // Something may have opened on top while the server answered.
@@ -188,12 +194,13 @@ final class HoverController {
         if let range = docs?.range, !NSLocationInRange(symbol, range) { return }
 
         let currentErrors = diagnostics.filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index }
-        let range = docs?.range ?? currentErrors.first?.range ?? NSRange(location: index, length: 1)
+        let range = collapsed ?? docs?.range ?? currentErrors.first?.range ?? NSRange(location: index, length: 1)
         guard var rect = Self.rect(of: range, in: tv) else { return }
         // Long ranges wrap; only the hovered line matters for placement.
         if !rect.insetBy(dx: -3, dy: -3).contains(point) { rect = NSRect(x: point.x - 20, y: point.y - 9, width: 40, height: 18) }
         let pinned = isPinned
-        present(errors: currentErrors.map(\.diagnostic), markdown: docs?.markdown, below: rect, at: index)
+        let markdown = [source, docs?.markdown].compactMap { $0 }.joined(separator: "\n\n---\n\n")
+        present(errors: currentErrors.map(\.diagnostic), markdown: markdown, below: rect, at: index)
         isPinned = pinned && panel != nil
         // The errors cover their line, so moving along it keeps them open.
         if panel != nil, let line = currentErrors.first.flatMap({ Self.rect(of: $0.range, in: tv) }) { anchor = anchor.union(line) }

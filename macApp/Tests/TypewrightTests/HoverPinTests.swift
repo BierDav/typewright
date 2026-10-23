@@ -5,6 +5,30 @@ import XCTest
 
 @MainActor
 final class HoverPinTests: XCTestCase {
+    func testCollapsedSourceHoverIncludesSourceAndLanguageDocumentation() async throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        let tv = TypstTextView(frame: window.contentView!.bounds)
+        window.contentView!.addSubview(tv)
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "$ Omega $"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let box = try XCTUnwrap(tv.collapsedSegmentBoxes(in: tv.bounds).first?.box)
+        let point = NSPoint(x: box.midX, y: box.midY)
+        let hover = HoverController(textView: tv)
+        for withDocs in [false, true] {
+            hover.provider = withDocs ? { _ in ("Symbol documentation", NSRange(location: 2, length: 5)) } : nil
+            hover.pointerMoved(to: point)
+            await shown(hover)
+            let content = try XCTUnwrap(window.childWindows?.last?.contentView as? PopupHostingView<HoverContent>)
+            let markdown = try XCTUnwrap(content.rootView.markdown)
+            XCTAssertTrue(markdown.contains("Omega"))
+            XCTAssertFalse(markdown.contains("Hold ⌥ Option"))
+            XCTAssertEqual(markdown.contains("Symbol documentation"), withDocs)
+            hover.hide()
+        }
+    }
+
     private func shown(_ hover: HoverController) async {
         for _ in 0..<100 where !hover.isShown { try? await Task.sleep(for: .milliseconds(10)) }
     }

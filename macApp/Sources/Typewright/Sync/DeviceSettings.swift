@@ -84,7 +84,7 @@ struct DeviceSettings: View {
                     ForEach(sync.unmigrated.sorted { $0.value.path < $1.value.path }, id: \.key) { id, url in
                         LabeledContent {
                             HStack {
-                                Button("Import…") { Task { await Opener.shared.importSpace(url) } }
+                                Button("Import…") { Opener.shared.askToImport(url, external: false) }
                                 Button("Stop Syncing") { sync.forgetUnmigrated(id) }
                             }
                         } label: {

@@ -33,6 +33,8 @@ export const Solveng = {
     compiler.solveng<{ from: number; to?: number; items: SolvengItem[]; exclusive: boolean } | null>("complete", document, context, offset),
   conversions: (document: string, context: string, offset: number) =>
     compiler.solveng<{ title: string; start: number; end: number; text: string }[]>("conversions", document, context, offset),
+  format: (document: string, context: string) =>
+    compiler.solveng<{ start: number; end: number; text: string }[]>("format", document, context),
   fixes: (document: string, context: string, offset: number) =>
     compiler.solveng<{ title: string; start: number; end: number; text: string }[]>("fixes", document, context, offset),
   hover: (document: string, context: string, offset: number) =>

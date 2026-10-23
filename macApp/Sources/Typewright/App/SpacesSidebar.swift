@@ -63,7 +63,7 @@ struct SpacesOverlay: View {
                         .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 1) }
                         .offset(x: offset)
                 }
-                SpacesPane(state: state, current: workspace?.root.path, canClose: workspace != nil,
+                SpacesPane(state: state, workspace: workspace, current: workspace?.root.path, canClose: workspace != nil,
                            active: progress == 1, spaces: spaces) {
                     spaces = SpaceList.all
                 }
@@ -187,6 +187,7 @@ private struct SplitViewFinder: NSViewRepresentable {
 /// The spaces as Zen-style rows in the user's order, and the way to open another folder as a space.
 private struct SpacesPane: View {
     let state: WindowState
+    let workspace: Workspace?
     let current: String?
     let canClose: Bool
     /// Fully open, so the arrow keys move through the list.
@@ -204,9 +205,8 @@ private struct SpacesPane: View {
     /// The space whose name is being edited in place.
     @State private var renaming: URL?
     /// Shows each row's ⌘ number while ⌘ is held.
-    @State private var commandDown = false
+    @State private var shortcutHints = SpaceShortcutHints()
     @State private var scrolled = false
-    @State private var flagsMonitor: Any?
     private let sync = SyncService.shared
 
     private static let rowHeight: CGFloat = 42
@@ -237,26 +237,29 @@ private struct SpacesPane: View {
         }
         .onChange(of: active, initial: true) { _, active in
             active ? takeFocus() : giveBackFocus()
+            updateShortcutHints()
         }
         // The palette and search take focus while they're over the selector.
         .onChange(of: state.overlay == nil) { _, closed in
             if closed && active { takeFocus() }
+            updateShortcutHints()
         }
+        .onChange(of: renaming) { updateShortcutHints() }
         .onChange(of: spaces) {
             if let highlighted, !spaces.contains(highlighted) { self.highlighted = nil }
         }
         .onAppear {
-            flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-                let down = event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command
-                if down != commandDown { withAnimation(.easeOut(duration: 0.12)) { commandDown = down } }
-                return event
-            }
+            shortcutHints.start(in: state.window)
+            updateShortcutHints()
         }
         .onDisappear {
-            if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
-            flagsMonitor = nil
-            commandDown = false
+            shortcutHints.stop()
         }
+        .animation(.easeOut(duration: 0.12), value: shortcutHints.visible)
+    }
+
+    private func updateShortcutHints() {
+        shortcutHints.enabled = active && state.overlay == nil && renaming == nil
     }
 
     private var list: some View {
@@ -273,7 +276,8 @@ private struct SpacesPane: View {
             scrollList
             HStack {
                 if canClose { SpacesButton(active: true) { state.setSpacesOpen(false) } }
-                Spacer()
+                BackgroundStatusArea(workspace: workspace)
+                Spacer(minLength: 0)
             }
             .frame(height: 28)
             .padding(10)
@@ -288,7 +292,7 @@ private struct SpacesPane: View {
                 ForEach(Array(spaces.enumerated()), id: \.element) { index, url in
                     SpaceRow(url: url, isCurrent: url.path == current, isHighlighted: focused && highlighted == url,
                              isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url), status: sync.status(for: url),
-                             isRenaming: renaming == url, shortcut: commandDown && index < 9 ? index + 1 : nil) {
+                             isRenaming: renaming == url, shortcut: shortcutHints.visible && index < 9 ? index + 1 : nil) {
                         open(url)
                     } onStartRename: {
                         renaming = url
@@ -418,18 +422,14 @@ private struct SpacesPane: View {
     private func addDropped(_ urls: [URL], at location: CGPoint) {
         externalDrop = nil
         var index = index(at: location)
+        var outside: [(url: URL, at: Int)] = []
         for url in urls {
             var isDir: ObjCBool = false
             let known = SpaceList.all.contains { $0.path == url.resolvingSymlinksInPath().path }
             if !known, !SpaceList.isInRepository(url), FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
                isDir.boolValue {
-                // Outside folders become spaces by importing them, at the drop position.
-                let at = index
-                Task {
-                    guard let space = await Opener.shared.importSpace(url) else { return }
-                    SpaceList.move(space, to: at)
-                    withAnimation(.smooth(duration: 0.25)) { onChange() }
-                }
+                // Outside folders become spaces as the palette asks, at the drop position.
+                outside.append((url, index))
                 index += 1
                 continue
             }
@@ -441,6 +441,17 @@ private struct SpacesPane: View {
             index += 1
         }
         withAnimation(.smooth(duration: 0.25)) { onChange() }
+        askToImport(outside[...])
+    }
+
+    /// One question at a time; cancelling one skips the rest.
+    private func askToImport(_ folders: ArraySlice<(url: URL, at: Int)>) {
+        guard let (url, at) = folders.first else { return }
+        Opener.shared.askToImport(url, in: state) { space in
+            SpaceList.move(space, to: at)
+            withAnimation(.smooth(duration: 0.25)) { onChange() }
+            askToImport(folders.dropFirst())
+        }
     }
 
     /// The dragged row follows the pointer; the rows it passes make room for it.
@@ -476,14 +487,8 @@ private struct SpacesPane: View {
         } else if !sync.isRunning {
             SettingsWindowController.shared.show(tab: 4)
         } else if !SpaceList.isInRepository(url) {
-            let alert = NSAlert()
-            alert.messageText = "Import “\(url.lastPathComponent)” to sync it?"
-            alert.informativeText = "Spaces sync from Typewright's library. Importing copies the folder there and leaves a link where it was."
-            alert.addButton(withTitle: "Import and Sync")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            Task {
-                guard let imported = await Opener.shared.importSpace(url, mode: .replaceWithLink) else { return }
+            // Spaces sync from the library only.
+            Opener.shared.askToImport(url, in: state, external: false) { imported in
                 sync.share(imported)
                 onChange()
             }
@@ -579,6 +584,7 @@ private struct SpaceRow: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 0)
+            if !inRepository { ExternalSpaceBadge() }
             if let shortcut {
                 Text("⌘\(shortcut)")
                     .font(.system(size: 11, weight: .medium).monospacedDigit())
@@ -652,9 +658,7 @@ private struct SpaceRow: View {
                 Divider()
                 Button("Delete Space…", action: onForget)
             } else {
-                Button("Import Into Typewright…") {
-                    Task { await Opener.shared.importSpace(url) }
-                }
+                Button("Import Into Typewright…") { Opener.shared.askToImport(url, external: false) }
                 Divider()
                 Button("Forget Space", action: onForget)
             }

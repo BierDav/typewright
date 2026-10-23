@@ -174,6 +174,7 @@ async function refactorItems(ws: Workspace): Promise<Item[]> {
   const view = editorView();
   if (!view || ws.state.selectedKind !== "typst") return [];
   const items: Item[] = [
+    { id: "code.format", title: "Format Document", section: "Code", shortcut: shortcut("⌥⌘L"), keywords: ["format", "solveng", "spacing"], action: { run: () => void commands.formatDocument() } },
     { id: "code.docs", title: "Show Documentation", section: "Code", shortcut: "F1", keywords: ["quick documentation", "help", "hover"], action: { run: commands.quickDocs } },
     { id: "code.definition", title: "Go to Definition", section: "Code", shortcut: "F12", keywords: ["jump", "declaration"], action: { run: commands.definition } },
   ];

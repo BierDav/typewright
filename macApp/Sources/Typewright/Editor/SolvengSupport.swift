@@ -1,5 +1,6 @@
 import Foundation
 import TypstBridge
+import TypewrightCore
 
 /// solveng's editor support (`solveng-ide` from the solveng repository, through the typst bridge): highlighting,
 /// completions, concealing, conversions and hovers for its calculations. Offsets are UTF-16.
@@ -155,6 +156,19 @@ enum SolvengSupport {
 
     static func conversions(_ document: String, context: String, offset: Int) -> [Conversion] {
         decode(call("conversions", document, context: context, offset: offset)) ?? []
+    }
+
+    static func formattingEdits(_ document: String, context: String, preceding: [TextEdit] = []) -> [TextEdit] {
+        let source = TextEdit.apply(preceding, to: document)
+        let edits: [Edit] = decode(call("format", source, context: context)) ?? []
+        let local = edits.map { TextEdit(range: NSRange(location: $0.start, length: $0.end - $0.start), newText: $0.text) }
+        guard !local.isEmpty else { return preceding }
+        guard !preceding.isEmpty else { return local }
+        let formatted = TextEdit.apply(local, to: source)
+        guard formatted != document else { return [] }
+        let difference = textDifference(old: document, new: formatted)
+        return [TextEdit(range: NSRange(location: Int(difference.range.location), length: Int(difference.range.length)),
+                         newText: difference.newText)]
     }
 
     static func unitFixes(_ document: String, context: String, offset: Int) -> [Conversion] {

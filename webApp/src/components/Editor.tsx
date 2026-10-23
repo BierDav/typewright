@@ -127,6 +127,7 @@ export default function Editor(props: { workspace: Workspace }) {
       search({ top: true }),
       lintGutter(),
       keymap.of([
+        { key: "Mod-Alt-l", run: () => (void commands.formatDocument(), true) },
         { key: "Shift-F6", run: () => (commands.rename(), true) },
         { key: "F2", run: () => (commands.rename(), true) },
         { key: "Mod-Alt-v", run: () => (void commands.extractVariable(), true) },

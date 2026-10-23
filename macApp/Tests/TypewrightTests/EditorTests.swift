@@ -499,7 +499,7 @@ final class EditorTests: XCTestCase {
         let source = "#show: worksheet.with(units: (s: none, to: \"10km\"))\n#let to = unit(\"m\")\n$x := 2s$ $y := 2ms$ $z := 23to$"
         let storage = NSTextStorage(string: source)
         Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
-        for (needle, color) in [("s$", Highlighter.paramColor), ("ms$", Highlighter.unitColor), ("to$", Highlighter.paramColor)] {
+        for (needle, color) in [("s$", Highlighter.paramColor), ("ms$", Highlighter.unitColor), ("to$", Highlighter.unitColor)] {
             let at = (source as NSString).range(of: needle).location
             XCTAssertEqual(storage.attribute(.foregroundColor, at: at, effectiveRange: nil) as? NSColor, color)
         }
@@ -516,7 +516,7 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(storage.attribute(.foregroundColor, at: hash, effectiveRange: nil) as? NSColor, Highlighter.commentColor)
         let completion = try XCTUnwrap(SolvengSupport.complete(source, context: "", offset: hash + 2))
         XCTAssertEqual(completion.from, hash)
-        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "\"s\"")
+        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "#s")
         let bare = source.replacingOccurrences(of: "34#s", with: "34s")
         let offset = (bare as NSString).range(of: "s$").location
         let fix = try XCTUnwrap(SolvengSupport.unitFixes(bare, context: "", offset: offset).first { $0.text == "#" })

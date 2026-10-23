@@ -106,10 +106,14 @@ struct WorkspaceSession {
 /// Keeps every space's UI state in Application Support so it survives relaunches.
 @MainActor
 enum SpaceStore {
-    private static let file = URL.applicationSupportDirectory
-        .appending(path: "Typewright", directoryHint: .isDirectory)
+    private static let file: URL = {
+        if SpaceRepository.isTestHost {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("TypewrightTests/projects.json")
+        }
         // Named before projects became spaces; kept so saved state survives.
-        .appending(path: "projects.json")
+        return URL.applicationSupportDirectory.appending(path: "Typewright", directoryHint: .isDirectory)
+            .appending(path: "projects.json")
+    }()
 
     private static var states: [String: SpaceState] = {
         guard let data = try? Data(contentsOf: file) else { return [:] }

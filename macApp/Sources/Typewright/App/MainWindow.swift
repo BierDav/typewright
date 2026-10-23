@@ -22,6 +22,15 @@ final class WindowState {
     var overlay: WindowOverlay? {
         didSet { if overlay != nil { Popups.dismiss(in: window) } }
     }
+    /// A question shown as a palette page instead of an alert; `overlay` names it by `id`.
+    @ObservationIgnored var prompt: (id: String, page: PalettePage)?
+
+    /// Asks `page` in the command palette; closing the palette is the answer "Cancel".
+    func ask(_ page: PalettePage) {
+        let id = "prompt.\(UUID().uuidString)"
+        prompt = (id, page)
+        overlay = .palette(page: id)
+    }
     /// The window showing this state, whose popups close when something covers its content.
     @ObservationIgnored weak var window: NSWindow?
     /// A file and line to show once the window switched to its space.

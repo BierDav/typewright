@@ -75,7 +75,7 @@ fn context(raw: &str) -> Context {
 /// `documentTokens`, `conceals` (flat UTF-16 triples and
 /// quintuples), `highlight` (`{tokens, plain}`, plain as start/end pairs), `complete`, `hover`, `definition`
 /// (an object or null), `conversions`, `diagnostics`, `usages`, `references` (arrays), `renameTarget` (an object or
-/// null), `rename:<new name>` (edits), `function` (a package function's docs by name, or null) and `version`.
+/// null), `rename:<new name>` and `format` (edits), `function` (a package function's docs by name, or null) and `version`.
 pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> String {
     let value = match op {
         "tokens" => json!(solveng_ide::tokens(document).iter().flat_map(|t| [t.start, t.length, t.kind as u32]).collect::<Vec<_>>()),
@@ -120,6 +120,7 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
                 "hover" => json!(solveng_ide::hover(document, &c, offset)),
                 "conversions" => json!(solveng_ide::conversions(document, &c, offset)),
                 "fixes" => json!(solveng_ide::unit_fixes(document, &c, offset)),
+                "format" => json!(solveng_ide::format(document, &c)),
                 "diagnostics" => json!(solveng_ide::diagnostics(document, &c)),
                 "definition" => json!(solveng_ide::definition(document, &c, offset)),
                 "usages" => json!(solveng_ide::usages(document, &c, offset)),

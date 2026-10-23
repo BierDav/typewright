@@ -19,7 +19,8 @@ struct WindowOverlayView: View {
                 Group {
                     switch overlay {
                     case .palette(let page):
-                        CommandPalette(state: state, workspace: workspace, startPage: page, onClose: close)
+                        // A new prompt starts a fresh palette, even over an open one.
+                        CommandPalette(state: state, workspace: workspace, startPage: page, onClose: close).id(page)
                     case .search(let allSpaces):
                         SpaceSearchView(state: state, workspace: workspace,
                                         allSpaces: allSpaces ?? (workspace == nil || state.spacesProgress > 0.5), onClose: close)
@@ -158,6 +159,8 @@ struct CommandPalette: View {
     @State private var query = ""
     @State private var selection = 0
     @State private var pages: [PalettePage] = []
+    /// Opened by `WindowState.ask`: Esc on its page closes instead of going back to the commands.
+    @State private var prompted = false
     /// Where the pointer last moved over the list.
     @State private var pointer = NSEvent.mouseLocation
     @FocusState private var focused: Bool
@@ -185,7 +188,7 @@ struct CommandPalette: View {
                     .onKeyPress(.upArrow) { move(-1); return .handled }
                     .onKeyPress(.escape) { back(); return .handled }
                     .onKeyPress(.delete) {
-                        guard query.isEmpty, !pages.isEmpty else { return .ignored }
+                        guard query.isEmpty, !pages.isEmpty, !(prompted && pages.count == 1) else { return .ignored }
                         back()
                         return .handled
                     }
@@ -205,11 +208,16 @@ struct CommandPalette: View {
         .onEscapeWhenUnfocused(back)
         // Swiping to the space overview or another space changes what the palette offers.
         .onChange(of: context) {
+            if prompted { return onClose() }
             pages = []
             selection = 0
         }
         .task {
-            if let startPage, case .page(let next)? = rootItems.first(where: { $0.id == startPage })?.action {
+            if let prompt = state.prompt, prompt.id == startPage {
+                state.prompt = nil
+                prompted = true
+                pages = [prompt.page]
+            } else if let startPage, case .page(let next)? = rootItems.first(where: { $0.id == startPage })?.action {
                 pages = [next]
             }
             // The editor holds on to first responder until it's released; then the field can take focus.
@@ -320,7 +328,7 @@ struct CommandPalette: View {
         HStack(spacing: 14) {
             hint("↑↓", "Navigate")
             hint("↩", page.map { if case .input = $0.kind { "Create" } else { "Select" } } ?? "Run")
-            hint("esc", pages.isEmpty ? "Close" : "Back")
+            hint("esc", pages.isEmpty || prompted && pages.count == 1 ? "Close" : "Back")
             Spacer()
             if let workspace { Text(workspace.name).foregroundStyle(.tertiary) }
         }
@@ -348,7 +356,7 @@ struct CommandPalette: View {
     }
 
     private func back() {
-        if pages.isEmpty { return onClose() }
+        if pages.isEmpty || prompted && pages.count == 1 { return onClose() }
         pages.removeLast()
         query = ""
         selection = 0
@@ -396,8 +404,18 @@ struct CommandPalette: View {
             } else {
                 items += spaceItems(ws)
             }
+            items.append(PaletteItem(id: "space.rebuildIndex", title: "Rebuild Index", subtitle: ws.name,
+                                     icon: "arrow.triangle.2.circlepath", section: "Space",
+                                     keywords: ["reindex", "rescan", "refresh files", "cache"],
+                                     action: .run { ws.rebuildIndex() }))
         }
         let all = SpaceList.all
+        if !SpaceMigration.externalSpaces(all, repository: SpaceList.repository).isEmpty {
+            items.append(PaletteItem(id: "spaces.importExternal", title: "Import External Spaces…",
+                                     subtitle: "Move spaces into the library for history and device sync", icon: "square.and.arrow.down", section: "Spaces",
+                                     keywords: ["migrate", "migration", "external folders", "library", "history"],
+                                     action: .run { DispatchQueue.main.async { SpaceMigration.show() } }))
+        }
         let spaces = all.filter { $0.path != workspace?.root.path }
         items += spaces.map { url in
             let index = all.firstIndex(of: url) ?? 9

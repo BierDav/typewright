@@ -383,6 +383,26 @@ fn is_param(node: &LinkedNode) -> bool {
     }
 }
 
+/// The dots of a range (`i := 0..N`), of a rest parameter (`f(x, ..)`), and the ellipsis writing one: operators, like
+/// the arithmetic ones, rather than math text that would take the math colour.
+fn is_range_operator(leaf: &LinkedNode) -> bool {
+    if leaf.kind() != SyntaxKind::MathText {
+        return false;
+    }
+    let text = leaf.get().leaf_text().as_str();
+    if text == "…" {
+        return true;
+    }
+    if text != "." {
+        return false;
+    }
+    // The other dot, with only spaces between them.
+    let dot = |node: Option<LinkedNode>| {
+        node.is_some_and(|n| n.kind() == SyntaxKind::MathText && n.get().leaf_text().as_str() == ".")
+    };
+    dot(leaf.prev_sibling()) || dot(leaf.next_sibling())
+}
+
 /// The innermost tag around a leaf, with bold, italic and math inherited from its ancestors.
 fn classify(leaf: &LinkedNode) -> (HlTag, u32) {
     let mut tag = None;
@@ -401,7 +421,7 @@ fn classify(leaf: &LinkedNode) -> (HlTag, u32) {
         }
         node = n.parent().cloned();
     }
-    let tag = if flags & HL_MATH != 0 && matches!(leaf.get().leaf_text().as_str(), "+" | "-" | "*" | "/" | "−" | "×" | "÷" | "∗" | "⋅" | "(" | ")" | "[" | "]" | "{" | "}" | ",") {
+    let tag = if flags & HL_MATH != 0 && (is_range_operator(leaf) || matches!(leaf.get().leaf_text().as_str(), "+" | "-" | "*" | "/" | "−" | "×" | "÷" | "∗" | "⋅" | "(" | ")" | "[" | "]" | "{" | "}" | ",")) {
         HlTag::Operator
     } else { tag.unwrap_or(HlTag::Plain) };
     (tag, flags)
@@ -507,7 +527,7 @@ fn conceal_math(node: &LinkedNode, src: &str, equation: (u32, u32), utf16: &[u32
             }
         }
         SyntaxKind::MathIdent => {
-            if let Some(c) = math_symbol(text, &[]) {
+            if let Some(c) = math_symbol(text, &[]) && !refactor::is_locally_bound(node, text) {
                 push(range.start, range.end, c);
             }
         }
@@ -532,7 +552,7 @@ fn conceal_math(node: &LinkedNode, src: &str, equation: (u32, u32), utf16: &[u32
             let simple = node.children().all(|c| {
                 matches!(c.kind(), SyntaxKind::MathIdent | SyntaxKind::Dot | SyntaxKind::MathFieldAccess)
             });
-            if simple && let Some(c) = math_symbol(base, &modifiers) {
+            if simple && let Some(c) = math_symbol(base, &modifiers) && !refactor::is_locally_bound(node, base) {
                 push(range.start, range.end, c);
             }
         }
@@ -602,8 +622,69 @@ pub(crate) fn refactor_json(request: &str) -> String {
 }
 
 #[cfg(test)]
+mod highlight_tests {
+    use super::{HlTag, highlight_runs};
+
+    /// The tag of the run covering the first `needle`.
+    fn tag_at(text: &str, needle: &str) -> u8 {
+        let start = text[..text.find(needle).unwrap()].encode_utf16().count() as u32;
+        let runs = highlight_runs(text, false);
+        let run = runs.chunks(3).find(|r| r[0] <= start && start < r[0] + r[1]).unwrap();
+        (run[2] & 0xff) as u8
+    }
+
+    #[test]
+    fn range_dots_are_arithmetic_operators() {
+        let operator = HlTag::Operator as u8;
+        assert_eq!(tag_at("$i := 0..N$", ".."), operator);
+        assert_eq!(tag_at("$i := 0 .. N$", "."), operator);
+        assert_eq!(tag_at("$P(..) := U^2/R$", ".."), operator);
+        assert_eq!(tag_at("$i := 0…N$", "…"), operator);
+    }
+
+    #[test]
+    fn decimal_points_dotted_names_and_sentence_periods_stay_math_text() {
+        let operator = HlTag::Operator as u8;
+        assert_ne!(tag_at("$1.5$", "1.5"), operator);
+        assert_ne!(tag_at("$x.y$", "."), operator);
+        assert_ne!(tag_at("$f(x).$", "."), operator);
+    }
+}
+
+#[cfg(test)]
 mod conceal_tests {
     use super::conceal_runs;
+
+    #[test]
+    fn local_bindings_keep_their_spelling_in_math() {
+        for source in [
+            "#let triangle = math.op(\"tri\")\n$triangle(x)$",
+            "#let alpha = 3\n$alpha$",
+            "#let f(triangle) = [$triangle$]",
+            "#let (triangle, alpha) = (1, 2)\n$triangle + alpha$",
+            "#import \"ops.typ\": triangle\n$triangle(x)$",
+            "#let arrow = (r: 1)\n$arrow.r$",
+        ] {
+            assert_eq!(shown(source), source, "{source}");
+        }
+    }
+
+    #[test]
+    fn bindings_only_protect_uses_in_their_lexical_scope() {
+        for source in [
+            "$triangle$\n#let triangle = math.op(\"tri\")\n$triangle$",
+            "#[#let triangle = math.op(\"tri\"); $triangle$]\n$triangle$",
+            "#let f(triangle) = [$triangle$]\n$triangle$",
+        ] {
+            let runs = conceal_runs(source);
+            let uses: Vec<_> = source.match_indices("$triangle$").map(|(start, _)| start + 1).collect();
+            let concealed: Vec<_> = uses.iter().map(|&at| {
+                let at = source[..at].encode_utf16().count() as u32;
+                runs.chunks(5).any(|run| run[0] == at)
+            }).collect();
+            assert_eq!(concealed, if source.starts_with("$triangle$") { vec![true, false] } else { vec![false, true] }, "{source}");
+        }
+    }
 
     fn shown(text: &str) -> String {
         let runs = conceal_runs(text);

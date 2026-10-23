@@ -316,6 +316,16 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         var i = 0
         while i < conceals.count {
             let c = conceals[i]
+            // Constructor wrappers and their contents reveal together.
+            if c.replacement == 0, c.range.location == c.equation.location, c.range.length > 1,
+               let end = conceals[i...].firstIndex(where: {
+                   $0.replacement == 0 && $0.equation == c.equation && NSMaxRange($0.range) == NSMaxRange(c.equation)
+               }), end > i {
+                let box = NSRange(location: NSMaxRange(c.range), length: conceals[end].range.location - NSMaxRange(c.range))
+                singles.append((c.equation, box.length > 0 ? box : nil, conceals[i...end]))
+                i = end + 1
+                continue
+            }
             // Hidden quotes come in pairs.
             if c.replacement == 0, i + 1 < conceals.count, conceals[i + 1].replacement == 0, conceals[i + 1].equation == c.equation {
                 let close = conceals[i + 1].range
@@ -397,6 +407,11 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// The pieces shown as typed: the one the caret is in or next to, or all a selection or column touches.
     private var revealedPieces: [NSRange] = []
+
+    var collapsedSegments: [NSRange] {
+        let revealed = Set(revealedPieces)
+        return pieces.map(\.range).filter { !revealed.contains($0) }
+    }
 
     func updateRevealedEquation() {
         updateOperatorLigatures()
@@ -626,7 +641,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         didSet { updateWrapWidth() }
     }
 
-    private var columnWidth: CGFloat {
+    var columnWidth: CGFloat {
         let font = font ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
         return ("M" as NSString).size(withAttributes: [.font: font]).width
     }
@@ -1047,6 +1062,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawCollapsedSegmentUnderlines(in: dirtyRect)
         drawRemoteCursors(in: dirtyRect)
         for literal in swatches {
             guard let rect = swatchRect(for: literal), rect.intersects(dirtyRect) else { continue }
@@ -1702,7 +1718,7 @@ struct CodeEditor: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let storage = NSTextStorage()
-        let layout = NSLayoutManager()
+        let layout = EditorLayoutManager()
         storage.addLayoutManager(layout)
         let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         container.widthTracksTextView = true
