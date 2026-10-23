@@ -21,6 +21,8 @@ enum SolvengSupport {
         let documentation: String?
         /// What typing matches when it differs from `insert`: `Delta_R` for `Δ_R`.
         let filter: String?
+        /// Edits elsewhere that come with it, like the `#import units: km` a shorthand needs.
+        let edits: [Edit]?
     }
 
     /// `items` replace `from..<(to ?? offset)`; `exclusive` ones replace the language server's.
@@ -36,6 +38,14 @@ enum SolvengSupport {
         let start: Int
         let end: Int
         let text: String
+        /// Edits elsewhere that come with it, like an import.
+        let edits: [Edit]?
+
+        /// The replacement and the edits that come with it.
+        var textEdits: [TextEdit] {
+            [TextEdit(range: NSRange(location: start, length: end - start), newText: text)]
+                + (edits ?? []).filter { $0.path == nil }.map(\.textEdit)
+        }
     }
 
     /// One of the package's functions, read from its doc comments.
@@ -76,6 +86,8 @@ enum SolvengSupport {
         let start: Int
         let end: Int
         let text: String
+
+        var textEdit: TextEdit { TextEdit(range: NSRange(location: start, length: end - start), newText: text) }
     }
 
     /// A name that can be renamed, as written at `start..<end`.

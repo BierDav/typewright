@@ -508,6 +508,18 @@ final class EditorTests: XCTestCase {
         XCTAssertNil(SolvengSupport.renameTarget(source, context: "", offset: offset))
     }
 
+    func testShorthandCompletionImportsAlong() throws {
+        let source = "#import \"@preview/solveng:1.0.0\": *\n#show: worksheet\n$x := 1 $"
+        let offset = (source as NSString).length - 1
+        let completion = try XCTUnwrap(SolvengSupport.complete(source, context: "", offset: offset))
+        let item = try XCTUnwrap(completion.items.first { $0.label == "mA" })
+        XCTAssertEqual(item.insert, "mA")
+        let edits = (item.edits ?? []).map(\.textEdit)
+        XCTAssertEqual(TextEdit.apply(edits, to: source), "#import \"@preview/solveng:1.0.0\": *\n#import units: mA\n#show: worksheet\n$x := 1 $")
+        // single letters stay quoted
+        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "\"s\"")
+    }
+
     func testExplicitUnitBindingHashAndCompletion() throws {
         let source = "#show: worksheet.with(builtin-units: false, units: (s: auto))\n#let s = unit(\"s\")\n$x := 34#s$"
         let storage = NSTextStorage(string: source)
@@ -517,7 +529,8 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(storage.attribute(.foregroundColor, at: hash, effectiveRange: nil) as? NSColor, Highlighter.commentColor)
         let completion = try XCTUnwrap(SolvengSupport.complete(source, context: "", offset: hash + 2))
         XCTAssertEqual(completion.from, hash)
-        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "#s")
+        // single letters complete quoted, replacing the hash
+        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "\"s\"")
         let bare = source.replacingOccurrences(of: "34#s", with: "34s")
         let offset = (bare as NSString).range(of: "s$").location
         let fix = try XCTUnwrap(SolvengSupport.unitFixes(bare, context: "", offset: offset).first { $0.text == "#" })

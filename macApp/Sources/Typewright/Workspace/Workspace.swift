@@ -1259,10 +1259,12 @@ final class Workspace: EditorLanguage {
             default: .variable
             }
             let snippet = item.insert.contains("$0")
-            return CompletionItem(label: item.label, detail: item.detail, kind: kind,
-                                  filterText: item.filter ?? item.insert.replacingOccurrences(of: "$0", with: ""),
-                                  sortText: String(format: "%05d", index), newText: item.insert, isSnippet: snippet,
-                                  range: range, documentation: item.documentation ?? "`\(item.label)` \(item.detail)")
+            var completion = CompletionItem(label: item.label, detail: item.detail, kind: kind,
+                                            filterText: item.filter ?? item.insert.replacingOccurrences(of: "$0", with: ""),
+                                            sortText: String(format: "%05d", index), newText: item.insert, isSnippet: snippet,
+                                            range: range, documentation: item.documentation ?? "`\(item.label)` \(item.detail)")
+            completion.additionalEdits = (item.edits ?? []).filter { $0.path == nil }.map(\.textEdit)
+            return completion
         }, result.exclusive)
     }
 
@@ -1543,7 +1545,10 @@ final class Workspace: EditorLanguage {
         return SolvengSupport.unitFixes(text, context: solvengContext(), offset: offset).map { fix in
             QuickFix(id: "solveng.unit.\(fix.start)", title: fix.title, icon: "number") {
                 guard tv.string == source as String else { return }
-                tv.insertText(fix.text, replacementRange: NSRange(location: fix.start, length: fix.end - fix.start))
+                // later edits first, so the earlier ranges stay valid
+                for edit in fix.textEdits.sorted(by: { $0.range.location > $1.range.location }) {
+                    tv.insertText(edit.newText, replacementRange: edit.range)
+                }
             }
         }
     }

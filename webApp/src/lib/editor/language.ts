@@ -4,7 +4,7 @@ import { autocompletion, type Completion, type CompletionContext, type Completio
 import { StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, showTooltip, type Tooltip, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { compiler, type Completion as TypstCompletion } from "../compiler";
-import { Solveng } from "./solveng";
+import { Solveng, type SolvengEdit } from "./solveng";
 import { settings } from "../settings";
 import { fenceClosing } from "./solveng";
 
@@ -48,6 +48,26 @@ function toCompletion(item: TypstCompletion): Completion {
   };
 }
 
+type Apply = string | ((view: EditorView, completion: Completion, from: number, to: number) => void);
+
+/** A completion's insert with the edits elsewhere that come with it (an import): those go in first, the insert after. */
+function withEdits(apply: Apply, edits: SolvengEdit[] | undefined): Apply {
+  const extra = (edits ?? []).filter((e) => !e.path);
+  if (!extra.length) return apply;
+  return (view, completion, from, to) => {
+    const others = extra.map((e) => ({ from: e.start, to: e.end, insert: e.text }));
+    if (typeof apply === "string") {
+      // one step: the insert and its edits, the caret after the insert
+      const changes = view.state.changes([{ from, to, insert: apply }, ...others]);
+      view.dispatch({ changes, selection: { anchor: changes.mapPos(to, 1) }, userEvent: "input.complete" });
+      return;
+    }
+    const changes = view.state.changes(others);
+    view.dispatch({ changes, userEvent: "input.complete" });
+    apply(view, completion, changes.mapPos(from, 1), changes.mapPos(to, 1));
+  };
+}
+
 /** Inside solveng code, math and its calls the names, units and option values of the calculation; null elsewhere. */
 async function solvengCompletions(ctx: CompletionContext, around: string): Promise<(CompletionResult & { exclusive: boolean }) | null> {
   const result = await Solveng.complete(ctx.state.doc.toString(), around, ctx.pos).catch(() => null);
@@ -63,7 +83,7 @@ async function solvengCompletions(ctx: CompletionContext, around: string): Promi
     info: item.documentation,
     boost: -i / result.items.length,
     // Units like kΩ are found by typing kOmega.
-    apply: item.insert.includes("$0") ? snippet(item.insert.replace("$0", "${}")) : item.insert,
+    apply: withEdits(item.insert.includes("$0") ? snippet(item.insert.replace("$0", "${}")) : item.insert, item.edits),
   }));
   return { from: result.from, to: result.to, options, exclusive: result.exclusive };
 }

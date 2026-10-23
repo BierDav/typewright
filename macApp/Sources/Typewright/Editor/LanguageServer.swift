@@ -167,6 +167,8 @@ struct CompletionItem: Equatable {
     var raw: Data? = nil
     /// Whether `detail` is a signature to show above the docs, rather than a label like "Downloaded".
     var showsDetailAsSignature = true
+    /// Edits elsewhere in the document applied with it, like an import the name needs.
+    var additionalEdits: [TextEdit] = []
 }
 
 /// A stdio JSON-RPC client for one tinymist process serving one space.
