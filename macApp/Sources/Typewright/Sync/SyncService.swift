@@ -35,6 +35,8 @@ struct ParkedShare: Codable, Hashable {
     var secret: String?
     /// Whether this device left it in the account, so resuming has to list it again.
     var left: Bool
+    /// Where its root went when it was moved out of the library (undoing an import), so moving it back resumes it.
+    var outside: String?
 }
 
 /// What `liveSync` reports about a file being edited on several devices.
@@ -371,6 +373,13 @@ final class SyncService {
         persist()
     }
 
+    /// Drops a share stopped by a deletion, so restoring the item no longer resumes it.
+    func forgetParked(_ id: String) {
+        parked[id] = nil
+        rejoining[id] = nil
+        persist()
+    }
+
     /// Stops syncing a share on every device; each keeps its files.
     func removeEverywhere(_ id: String) {
         guard let node else { return }
@@ -388,7 +397,11 @@ final class SyncService {
             NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
             return
         }
-        guard let from = repository.relativePath(of: old), let to = repository.relativePath(of: new) else { return }
+        let from = repository.relativePath(of: old), to = repository.relativePath(of: new)
+        // Leaving the library stops its shares like a deletion; coming back resumes them.
+        if let from, to == nil { return deleted([from], movedTo: new) }
+        if let to, from == nil { return movedIn(from: old, to: to) }
+        guard let from, let to else { return }
         var moved = false
         for (id, share) in shares {
             if share.path == from {
@@ -504,7 +517,7 @@ final class SyncService {
     // MARK: - Deleting and restoring
 
     /// Shares whose root went with a deletion stop here (others keep syncing them); ones inside a deleted folder too.
-    private func deleted(_ paths: [String]) {
+    private func deleted(_ paths: [String], movedTo outside: URL? = nil) {
         var changed = false
         for (id, share) in shares where paths.contains(where: { share.path == $0 || share.path.hasPrefix($0 + "/") }) {
             let listed = accountShares.first { $0.id == id }
@@ -516,7 +529,8 @@ final class SyncService {
                 secret = String(cString: raw)
                 tws_string_free(raw)
             }
-            parked[id] = ParkedShare(share: share, name: name, shared: shared, secret: secret, left: node != nil)
+            let moved = outside.map { $0.standardizedFileURL.path + share.path.dropFirst(paths[0].count) }
+            parked[id] = ParkedShare(share: share, name: name, shared: shared, secret: secret, left: node != nil, outside: moved)
             if let node { tws_close_share(node, id) }
             forget(id)
             changed = true
@@ -526,10 +540,27 @@ final class SyncService {
 
     /// A deleted item came back at `to`: shares parked at or inside it sync again from there.
     private func restored(from: String, to: String) {
+        resume(parked.compactMap { id, entry in
+            guard entry.outside == nil, entry.share.path == from || entry.share.path.hasPrefix(from + "/") else { return nil }
+            return (id, to + entry.share.path.dropFirst(from.count))
+        })
+    }
+
+    /// Something moved into the library at `to`: shares that left with it (by undoing an import) sync again.
+    private func movedIn(from old: URL, to: String) {
+        let from = old.standardizedFileURL.path
+        resume(parked.compactMap { id, entry in
+            guard let outside = entry.outside, outside == from || outside.hasPrefix(from + "/") else { return nil }
+            return (id, to + outside.dropFirst(from.count))
+        })
+    }
+
+    private func resume(_ places: [(id: String, path: String)]) {
         var resumed: [String] = []
-        for (id, entry) in parked where entry.share.path == from || entry.share.path.hasPrefix(from + "/") {
+        for (id, path) in places {
+            guard let entry = parked[id] else { continue }
             var share = entry.share
-            share.path = to + share.path.dropFirst(from.count)
+            share.path = path
             shares[id] = share
             parked[id] = nil
             if entry.left { rejoining[id] = entry }

@@ -92,7 +92,17 @@ struct DeviceSettings: View {
                             Text("Not syncing until it's in Typewright's library · " + url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
                         }
                     }
-                    if sync.shares.isEmpty && sync.unmigrated.isEmpty {
+                    ForEach(sync.parked.sorted { $0.value.share.path.localizedStandardCompare($1.value.share.path) == .orderedAscending }, id: \.key) { id, entry in
+                        LabeledContent {
+                            Button("Forget") { sync.forgetParked(id) }
+                        } label: {
+                            Text(entry.name)
+                            Text(entry.outside != nil
+                                ? "Stopped since it left the library · Move it back to sync it again"
+                                : "Stopped since it was deleted · Restore it from Recently Deleted to sync it again")
+                        }
+                    }
+                    if sync.shares.isEmpty && sync.unmigrated.isEmpty && sync.parked.isEmpty {
                         Text("Share a space, folder or file from its context menu to sync it.")
                             .font(.caption)
                             .foregroundStyle(.secondary)

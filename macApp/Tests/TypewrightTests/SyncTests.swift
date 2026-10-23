@@ -102,6 +102,39 @@ final class SyncTests: XCTestCase {
         XCTAssertEqual(sync.shares.count, 3)
     }
 
+    func testSharesLeavingTheLibraryStopAndComeBackWithIt() throws {
+        let repository = SpaceRepository(root: dir.appendingPathComponent("Library"))
+        let store = defaults()
+        let paper = repository.url(of: "Paper")
+        try FileManager.default.createDirectory(at: paper.appendingPathComponent("notes"), withIntermediateDirectories: true)
+        store.set(["p": paper.path, "n": paper.appendingPathComponent("notes").path], forKey: "syncedSpaces")
+        let sync = SyncService(defaults: store, repository: repository, deviceName: "Test")
+
+        // Undoing an import moves the folder back out; its shares stop instead of reporting it missing.
+        let outside = dir.appendingPathComponent("Desktop/Paper", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: paper, to: outside)
+        repository.noteMoved(from: paper, to: outside)
+        XCTAssertTrue(sync.shares.isEmpty)
+        XCTAssertEqual(sync.parked["n"]?.outside, outside.appendingPathComponent("notes").standardizedFileURL.path)
+        XCTAssertTrue(sync.problems.isEmpty)
+
+        // Redoing the import picks them back up.
+        let back = repository.url(of: "Paper")
+        try FileManager.default.moveItem(at: outside, to: back)
+        repository.noteMoved(from: outside, to: back)
+        XCTAssertEqual(sync.shares["p"], LocalShare(path: "Paper", kind: .space))
+        XCTAssertEqual(sync.shares["n"], LocalShare(path: "Paper/notes", kind: .folder))
+        XCTAssertTrue(sync.parked.isEmpty)
+
+        // Parked shares can be forgotten from Devices settings.
+        try FileManager.default.moveItem(at: back, to: outside)
+        repository.noteMoved(from: back, to: outside)
+        sync.forgetParked("p")
+        sync.forgetParked("n")
+        XCTAssertTrue(SyncService(defaults: store, repository: repository, deviceName: "Test").parked.isEmpty)
+    }
+
     func testFindsTheShareOfAFile() {
         let shares = [SharePath(id: "s", path: "Thesis", file: false), SharePath(id: "f", path: "Thesis/notes.typ", file: true)]
         XCTAssertEqual(sharePlace(shares: shares, path: "Thesis/main.typ"), SharePlace(id: "s", inside: "main.typ"))
@@ -425,6 +458,7 @@ final class SyncNetworkTests: XCTestCase {
         try await eventually("listed on b") { b.elsewhere.count == 1 }
         a.stopSyncing(rootA)
         try await eventually("gone on b") { b.elsewhere.isEmpty }
-        XCTAssertTrue(a.elsewhere.isEmpty)
+        // a hears of b leaving through the account replica, maybe after b does.
+        try await eventually("gone on a") { a.elsewhere.isEmpty }
     }
 }

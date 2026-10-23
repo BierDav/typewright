@@ -1,4 +1,4 @@
-import { createMemo, createResource, createSignal, For, type JSX, Match, onMount, Show, Switch } from "solid-js";
+import { createMemo, createResource, createSignal, For, type JSX, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { confirm, openSpace, overlay, prompt, setOverlay, type SettingsTab, showRecentlyDeleted, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
@@ -527,6 +527,19 @@ function Devices() {
               </div>
             )}
           </For>
+          <For each={Object.entries(sync.parked).filter(([, p]) => p)}>
+            {([id, entry]) => (
+              <div class="form-row">
+                <span class="form-label">
+                  {entry.name}
+                  <span class="secondary"> · Stopped since it was deleted. Restore it from Recently Deleted to sync it again.</span>
+                </span>
+                <button class="button small" onClick={() => syncService.forgetParked(id)}>
+                  Forget
+                </button>
+              </div>
+            )}
+          </For>
           <div class="form-row">
             <span />
             <button class="button small" onClick={async () => { const folder = await commands.joinFromLink(); if (folder) { openSpace(folder); setOverlay(null); } }}>
@@ -546,9 +559,26 @@ export default function SettingsWindow() {
   };
   const select = (id: SettingsTab) => setOverlay({ type: "settings", tab: id });
   const close = () => setOverlay(null);
+  let dialog!: HTMLDivElement;
+  // Also when focus fell back to the page, as it does when a clicked button goes away.
+  const onKey = (e: KeyboardEvent) => {
+    const active = document.activeElement;
+    if (e.key === "Escape" && (!active || active === document.body || dialog.contains(active))) close();
+  };
+  window.addEventListener("keydown", onKey);
+  onCleanup(() => window.removeEventListener("keydown", onKey));
   return (
-    <div class="overlay-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()} onKeyDown={(e) => e.key === "Escape" && close()}>
-      <div class="settings glass" role="dialog" aria-label="Settings" tabIndex={-1} ref={(el) => requestAnimationFrame(() => el.focus())}>
+    <div class="overlay-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
+      <div
+        class="settings glass"
+        role="dialog"
+        aria-label="Settings"
+        tabIndex={-1}
+        ref={(el) => {
+          dialog = el;
+          requestAnimationFrame(() => el.focus());
+        }}
+      >
         <header class="settings-toolbar">
           <For each={TABS}>
             {(t) => (
