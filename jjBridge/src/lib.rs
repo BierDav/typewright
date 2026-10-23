@@ -10,6 +10,7 @@ mod lfs;
 mod nodes;
 mod normalize;
 mod repo;
+pub mod retention;
 mod squash;
 #[cfg(test)]
 mod cli_tests;

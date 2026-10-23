@@ -38,11 +38,16 @@ void twj_set_lfs_limit(TWJRepo *_Nonnull repo, uint64_t bytes);
 /// past it; they're listed in `.jj/typewright/state.json`, not in the user's folders.
 char *_Nonnull twj_commit(TWJRepo *_Nonnull repo, const char *_Nonnull message);
 
-/// Squashes commits older than `days` (author time) into one commit per calendar day (local time). `{"squashed": n}`.
+/// Thins out @'s first-parent history like a backup prune. `policy` is JSON
+/// `{"last": 100, "hourly": 48, "daily": 14, "weekly": 8, "monthly": 12, "yearly": -1}` (missing keys take these
+/// defaults, `null` or negative = unlimited, 0 = rule off): the newest `last` commits stay, then the newest commit of
+/// each of the most recent N hours/days/ISO weeks/months/years that have commits and whose newest isn't kept yet
+/// (local time of each commit). Every other commit is squashed into the next newer kept one, which stays an exact
+/// snapshot. `{"squashed": n, "kept": n}`; running it again right after squashes nothing.
 /// Only Typewright's own linear autosaves along @'s first parents: never commits with the user's description,
-/// bookmarks or tags, merges, conflicts, divergent changes or ancestors of tags and remote bookmarks. Trees and
-/// timestamps don't change; descendants and bookmarks follow.
-char *_Nonnull twj_squash(TWJRepo *_Nonnull repo, uint32_t days);
+/// bookmarks or tags, merges, conflicts, divergent changes or ancestors of tags and remote bookmarks, and nothing is
+/// squashed across them. Trees and timestamps don't change; descendants and bookmarks follow.
+char *_Nonnull twj_squash(TWJRepo *_Nonnull repo, const char *_Nonnull policy);
 
 /// Versions of a file along the app workspace's @ (first parents, whichever workspace made them), newest first, at most `limit`:
 /// `[{"commit", "time" (unix seconds), "description", "kind": "added"|"modified"|"deleted"|"renamed", "from"?: old path,

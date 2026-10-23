@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::repo::{Repo, millis};
+use crate::retention::Policy;
 use crate::tests::setup;
 
 const DAY: i64 = 86_400_000;
@@ -73,7 +74,7 @@ fn cli_reads_managed_config_and_ignores_lfs() {
     assert_eq!(jj_ok(root, &["config", "get", "ui.conflict-marker-style"]).trim(), "git");
     let path = jj_ok(root, &["config", "path", "--repo"]);
     let text = fs::read_to_string(path.trim()).unwrap();
-    assert_eq!(crate::config::version(&text), Some("1"));
+    assert_eq!(crate::config::version(&text), Some("2"));
     assert!(jj_ok(root, &["tw-help"]).contains("For people and AI agents"));
     jj_ok(root, &["tw-log"]);
     jj_ok(root, &["log", "-r", "tw_autosaves()"]);
@@ -240,9 +241,10 @@ fn squash_respects_user_state_and_other_workspaces() {
 
     repo.clock = Some(millis(day1 + 30 * DAY));
     // Everything up to the tag is immutable, and c5 alone has nothing to squash with.
-    assert_eq!(repo.squash(7).unwrap(), 0);
+    let daily = Policy { last: 0, hourly: 0, daily: -1, weekly: 0, monthly: 0, yearly: 0 };
+    assert_eq!(repo.squash(&daily).unwrap().0, 0);
     jj_ok(root, &["tag", "delete", "v1"]);
-    let squashed = repo.squash(7).unwrap();
+    let (squashed, _) = repo.squash(&daily).unwrap();
     let log = jj_ok(root, &["log", "--no-graph", "-r", "::@-", "-T", "description.first_line() ++ \"\\n\""]);
     let lines: Vec<&str> = log.lines().filter(|l| !l.is_empty()).collect();
     // c0 alone (c1 has a bookmark), c1 kept, c2 alone (c3 is the user's), mine, c4+c5 squashed.

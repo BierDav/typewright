@@ -4,6 +4,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::repo::{Repo, millis};
+use crate::retention::Policy;
 
 const DAY: i64 = 86_400_000;
 
@@ -110,7 +111,33 @@ fn history_rename_file_at_restore() {
 }
 
 #[test]
-fn squash_groups_by_day() {
+fn default_policy_thins_out_and_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut repo = open(dir.path());
+    let start = 20_000 * DAY;
+    // 300 autosaves over 30 days.
+    for i in 0..300 {
+        repo.clock = Some(millis(start + i * (DAY / 10)));
+        write(&repo, "S/f.typ", format!("v{i}\n"));
+        repo.commit("Autosave").unwrap();
+    }
+    let policy = Policy::default();
+    let (squashed, kept) = repo.squash(&policy).unwrap();
+    // 100 last, then 48 hours reaching back ~5 days (one commit each), then a few remaining days, weeks, the month.
+    assert_eq!(squashed + kept, 300);
+    assert!((100 + 48..200).contains(&kept), "{kept}");
+    assert_eq!(repo.squash(&policy).unwrap(), (0, kept));
+    let history = repo.file_history("S/f.typ", 1000).unwrap();
+    assert_eq!(history.as_array().unwrap().len(), kept);
+    // The newest version is untouched and each kept commit is still an exact snapshot.
+    assert_eq!(repo.file_at(history[0]["commit"].as_str().unwrap(), "S/f.typ").unwrap()["text"], "v299\n");
+    assert_eq!(repo.file_at(history[99]["commit"].as_str().unwrap(), "S/f.typ").unwrap()["text"], "v200\n");
+    assert_eq!(history[150]["description"], "Autosave");
+    assert_eq!(read(&repo, "S/f.typ"), "v299\n");
+}
+
+#[test]
+fn squash_by_policy() {
     let dir = tempfile::tempdir().unwrap();
     let mut repo = open(dir.path());
     let day1 = 20_000 * DAY;
@@ -122,7 +149,8 @@ fn squash_groups_by_day() {
         repo.commit(&format!("c{i}")).unwrap();
     }
     repo.clock = Some(millis(day1 + 10 * DAY));
-    assert_eq!(repo.squash(3).unwrap(), 3);
+    let daily = Policy { last: 1, hourly: 0, daily: -1, weekly: 0, monthly: 0, yearly: 0 };
+    assert_eq!(repo.squash(&daily).unwrap(), (3, 3));
     let history = repo.file_history("S/f.typ", 100).unwrap();
     let descriptions: Vec<&str> = history.as_array().unwrap().iter().map(|v| v["description"].as_str().unwrap()).collect();
     assert_eq!(descriptions, ["c5", "c3\nc4", "c0\nc1\nc2"]);
@@ -131,7 +159,7 @@ fn squash_groups_by_day() {
     assert_eq!(repo.file_at(day, "S/f.typ").unwrap()["text"], "v2\n");
     assert_eq!(repo.file_at(day, "S/1.typ").unwrap()["text"], "x");
     assert_eq!(read(&repo, "S/f.typ"), "v5\n");
-    assert_eq!(repo.squash(3).unwrap(), 0);
+    assert_eq!(repo.squash(&daily).unwrap(), (0, 3));
     // The working copy still works after the rewrite.
     write(&repo, "S/f.typ", "v6\n");
     assert!(repo.commit("after").unwrap().commit.is_some());

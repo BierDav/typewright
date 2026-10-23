@@ -87,8 +87,12 @@ pub unsafe extern "C" fn twj_commit(repo: *mut TWJRepo, message: *const c_char) 
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn twj_squash(repo: *mut TWJRepo, days: u32) -> *mut c_char {
-    guard_repo(repo, |r| Ok(json!({"squashed": r.squash(days)?})))
+pub unsafe extern "C" fn twj_squash(repo: *mut TWJRepo, policy: *const c_char) -> *mut c_char {
+    guard_repo(repo, |r| {
+        let policy = crate::retention::Policy::parse(unsafe { text(policy) }?)?;
+        let (squashed, kept) = r.squash(&policy)?;
+        Ok(json!({"squashed": squashed, "kept": kept}))
+    })
 }
 
 #[unsafe(no_mangle)]
