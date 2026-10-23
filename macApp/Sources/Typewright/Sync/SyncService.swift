@@ -26,6 +26,17 @@ struct LocalShare: Codable, Hashable {
     var kind: ShareKind
 }
 
+/// A share stopped because its folder or file was deleted; restoring it (undo, Recently Deleted) syncs it again.
+struct ParkedShare: Codable, Hashable {
+    var share: LocalShare
+    var name: String
+    var shared: Bool
+    /// The namespace secret of a shared share, so it can be joined again once nobody else syncs it.
+    var secret: String?
+    /// Whether this device left it in the account, so resuming has to list it again.
+    var left: Bool
+}
+
 /// What `liveSync` reports about a file being edited on several devices.
 struct LiveResult: Decodable {
     struct Edit: Decodable {
@@ -87,6 +98,10 @@ final class SyncService {
     /// Why a share isn't syncing, like its folder having moved away.
     private(set) var problems: [String: String] = [:]
     private(set) var lastError: String?
+    /// Shares whose root was deleted here, by id.
+    private(set) var parked: [String: ParkedShare] = [:]
+    /// Resumed shares this device has to list in the account again once the node runs.
+    @ObservationIgnored private var rejoining: [String: ParkedShare] = [:]
 
     /// Files above this size, in megabytes, are LFS files: never in jj's history, synced whole.
     var lfsThresholdMB: Double {
@@ -134,6 +149,8 @@ final class SyncService {
     }
 
     private static let sharesKey = "syncedShares"
+    private static let parkedKey = "syncParkedShares"
+    private static let rejoiningKey = "syncRejoiningShares"
     /// Spaces synced path by path before shares; what's left are folders outside the library.
     private static let spacesKey = "syncedSpaces"
     private static let thresholdKey = "syncLFSThresholdMB"
@@ -151,6 +168,14 @@ final class SyncService {
            let stored = try? JSONDecoder().decode([String: LocalShare].self, from: data) {
             shares = stored
         }
+        if let data = defaults.data(forKey: Self.parkedKey),
+           let stored = try? JSONDecoder().decode([String: ParkedShare].self, from: data) {
+            parked = stored
+        }
+        if let data = defaults.data(forKey: Self.rejoiningKey),
+           let stored = try? JSONDecoder().decode([String: ParkedShare].self, from: data) {
+            rejoining = stored
+        }
         let spaces = defaults.dictionary(forKey: Self.spacesKey) as? [String: String] ?? [:]
         for (id, path) in spaces where shares[id] == nil {
             migrate(id, from: URL(fileURLWithPath: path))
@@ -163,6 +188,18 @@ final class SyncService {
             },
             NotificationCenter.default.addObserver(forName: SpaceRepository.conflictsDidChange, object: repository, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.updateStatuses() }
+            },
+            NotificationCenter.default.addObserver(forName: SpaceRepository.didMove, object: repository, queue: .main) { [weak self] note in
+                guard let from = note.userInfo?["from"] as? URL, let to = note.userInfo?["to"] as? URL else { return }
+                MainActor.assumeIsolated { self?.moved(from: from, to: to) }
+            },
+            NotificationCenter.default.addObserver(forName: SpaceRepository.didDelete, object: repository, queue: .main) { [weak self] note in
+                let paths = note.userInfo?["paths"] as? [String] ?? []
+                MainActor.assumeIsolated { self?.deleted(paths) }
+            },
+            NotificationCenter.default.addObserver(forName: SpaceRepository.didRestore, object: repository, queue: .main) { [weak self] note in
+                guard let from = note.userInfo?["from"] as? String, let to = note.userInfo?["to"] as? String else { return }
+                MainActor.assumeIsolated { self?.restored(from: from, to: to) }
             },
         ]
     }
@@ -179,6 +216,8 @@ final class SyncService {
 
     private func persist() {
         if let data = try? JSONEncoder().encode(shares) { defaults.set(data, forKey: Self.sharesKey) }
+        if let data = try? JSONEncoder().encode(parked) { defaults.set(data, forKey: Self.parkedKey) }
+        if let data = try? JSONEncoder().encode(rejoining) { defaults.set(data, forKey: Self.rejoiningKey) }
         defaults.set(unmigrated.mapValues(\.path), forKey: Self.spacesKey)
     }
 
@@ -388,6 +427,7 @@ final class SyncService {
     func join(_ share: AccountShare, at destination: URL) -> URL? {
         guard let node, let path = destinationPath(destination, file: share.kind == .file) else { return nil }
         shares[share.id] = LocalShare(path: path, kind: share.kind == .file ? .file : path.contains("/") ? .folder : .space)
+        parked[share.id] = nil
         persist()
         tws_open_share(node, share.id, deviceName)
         NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
@@ -413,6 +453,7 @@ final class SyncService {
         guard let path = destinationPath(destination, file: invite.file) else { return nil }
         let kind: ShareKind = invite.file ? .file : path.contains("/") ? .folder : .space
         shares[invite.id] = LocalShare(path: path, kind: kind)
+        parked[invite.id] = nil
         persist()
         tws_join_share(node, invite.id, invite.name, kind.rawValue, invite.secret, invite.hints.joined(separator: ","), deviceName)
         NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
@@ -445,8 +486,59 @@ final class SyncService {
 
     private func open(_ id: String) {
         guard let node else { return }
-        tws_open_share(node, id, deviceName)
+        if let parked = rejoining.removeValue(forKey: id) {
+            // It left the account when its folder was deleted; list it again under the same id.
+            let kind = parked.share.kind.rawValue
+            if parked.shared, let secret = parked.secret {
+                tws_join_share(node, id, parked.name, kind, secret, "", deviceName)
+            } else {
+                tws_add_share(node, id, parked.name, kind, deviceName)
+            }
+            persist()
+        } else {
+            tws_open_share(node, id, deviceName)
+        }
         schedulePublish(id, delay: 0)
+    }
+
+    // MARK: - Deleting and restoring
+
+    /// Shares whose root went with a deletion stop here (others keep syncing them); ones inside a deleted folder too.
+    private func deleted(_ paths: [String]) {
+        var changed = false
+        for (id, share) in shares where paths.contains(where: { share.path == $0 || share.path.hasPrefix($0 + "/") }) {
+            let listed = accountShares.first { $0.id == id }
+            let name = listed?.name ?? (share.path as NSString).lastPathComponent
+            let shared = listed?.shared ?? false
+            var secret: String?
+            if let node, shared {
+                let raw = tws_share_invite(node, id, name, share.kind.rawValue)
+                secret = String(cString: raw)
+                tws_string_free(raw)
+            }
+            parked[id] = ParkedShare(share: share, name: name, shared: shared, secret: secret, left: node != nil)
+            if let node { tws_close_share(node, id) }
+            forget(id)
+            changed = true
+        }
+        if changed { persist() }
+    }
+
+    /// A deleted item came back at `to`: shares parked at or inside it sync again from there.
+    private func restored(from: String, to: String) {
+        var resumed: [String] = []
+        for (id, entry) in parked where entry.share.path == from || entry.share.path.hasPrefix(from + "/") {
+            var share = entry.share
+            share.path = to + share.path.dropFirst(from.count)
+            shares[id] = share
+            parked[id] = nil
+            if entry.left { rejoining[id] = entry }
+            resumed.append(id)
+        }
+        guard !resumed.isEmpty else { return }
+        persist()
+        resumed.forEach(open)
+        NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
     }
 
     // MARK: - Events
@@ -493,6 +585,11 @@ final class SyncService {
             for id in event.removed ?? [] where shares[id] != nil {
                 if let node { tws_close_share(node, id) }
                 forget(id)
+            }
+            for id in event.removed ?? [] where parked[id] != nil || rejoining[id] != nil {
+                parked[id] = nil
+                rejoining[id] = nil
+                persist()
             }
             updateStatuses()
         case "head":

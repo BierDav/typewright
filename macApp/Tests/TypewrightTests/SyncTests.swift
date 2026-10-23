@@ -64,6 +64,44 @@ final class SyncTests: XCTestCase {
         XCTAssertEqual(sync.shares["c"]?.path, "Dissertation/chapters")
     }
 
+    func testSharesFollowMovesAndComeBackWithRestoredFolders() async throws {
+        let repository = SpaceRepository(root: dir.appendingPathComponent("Library"))
+        let store = defaults()
+        let thesis = repository.url(of: "Thesis")
+        let chapters = thesis.appendingPathComponent("chapters")
+        try FileManager.default.createDirectory(at: chapters, withIntermediateDirectories: true)
+        try "= One".write(to: chapters.appendingPathComponent("one.typ"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: repository.url(of: "Other"), withIntermediateDirectories: true)
+        try "x".write(to: repository.url(of: "Other/main.typ"), atomically: true, encoding: .utf8)
+        await repository.commit()
+        store.set(["s": thesis.path, "c": chapters.path, "o": repository.url(of: "Other").path], forKey: "syncedSpaces")
+        let sync = SyncService(defaults: store, repository: repository, deviceName: "Test")
+
+        // A move in the file tree (or its undo) takes the nested share along.
+        let parts = thesis.appendingPathComponent("parts")
+        try FileManager.default.moveItem(at: chapters, to: parts)
+        repository.noteMoved(from: chapters, to: parts)
+        XCTAssertEqual(sync.shares["c"]?.path, "Thesis/parts")
+
+        // Deleting the space parks both of its shares; the other one keeps syncing.
+        let deletedSpace = await repository.delete([thesis], message: "Delete space Thesis")
+        let items = try XCTUnwrap(deletedSpace)
+        XCTAssertEqual(Set(sync.shares.keys), ["o"])
+        XCTAssertEqual(Set(sync.parked.keys), ["s", "c"])
+        XCTAssertEqual(SyncService(defaults: store, repository: repository, deviceName: "Test").parked.count, 2, "survives a relaunch")
+
+        // Undo (or Recently Deleted) brings them back where the space comes back.
+        let outcome = await repository.restore(items[0], to: thesis)
+        XCTAssertEqual(outcome, .restored)
+        XCTAssertEqual(sync.shares["s"]?.path, "Thesis")
+        XCTAssertEqual(sync.shares["c"]?.path, "Thesis/parts")
+        XCTAssertTrue(sync.parked.isEmpty)
+
+        // Deleting a file inside a share parks nothing.
+        _ = await repository.delete([parts.appendingPathComponent("one.typ")], message: "Delete")
+        XCTAssertEqual(sync.shares.count, 3)
+    }
+
     func testFindsTheShareOfAFile() {
         let shares = [SharePath(id: "s", path: "Thesis", file: false), SharePath(id: "f", path: "Thesis/notes.typ", file: true)]
         XCTAssertEqual(sharePlace(shares: shares, path: "Thesis/main.typ"), SharePlace(id: "s", inside: "main.typ"))
@@ -330,6 +368,54 @@ final class SyncNetworkTests: XCTestCase {
         }
         XCTAssertEqual(read(rootB.appendingPathComponent("main.typ")), "Oh, hello world! A\n")
         XCTAssertEqual(editorA.text, editorB.text)
+    }
+
+    func testKeepsSyncingAFolderRenamedDeletedAndRestored() async throws {
+        let account = account()
+        let a = try await device("a", account: account)
+        let b = try await device("b", account: account)
+        let chaptersA = a.repository.url(of: "Thesis/chapters")
+        try write("one\n", to: chaptersA.appendingPathComponent("one.typ"))
+        try write("two\n", to: chaptersA.appendingPathComponent("two.typ"))
+        await commit(a)
+        XCTAssertNotNil(a.share(chaptersA))
+        try await eventually("folder listed on b") { !b.elsewhere.isEmpty }
+        let share = b.elsewhere[0]
+        XCTAssertEqual(share.kind, .folder)
+        let rootB = try XCTUnwrap(b.join(share, at: b.repository.url(of: "Chapters")))
+        try await eventually("files on b") { read(rootB.appendingPathComponent("one.typ")) == "one\n" }
+
+        // A renames the shared folder, as the file tree does, and keeps editing: b keeps getting the edits.
+        let partsA = a.repository.url(of: "Thesis/parts")
+        try FileManager.default.moveItem(at: chaptersA, to: partsA)
+        a.repository.noteMoved(from: chaptersA, to: partsA)
+        await a.repository.commit("Rename Thesis/chapters to Thesis/parts")
+        XCTAssertEqual(a.shares.values.first?.path, "Thesis/parts")
+        try write("one, renamed\n", to: partsA.appendingPathComponent("one.typ"))
+        await commit(a)
+        try await eventually("edit after the rename on b") { read(rootB.appendingPathComponent("one.typ")) == "one, renamed\n" }
+        XCTAssertNil(a.problems.values.first, "the share didn't lose its folder")
+
+        // Undoing a file deletion (a restore) publishes like any commit.
+        let deletedFile = await a.repository.delete([partsA.appendingPathComponent("two.typ")], message: "Delete Thesis/parts/two.typ")
+        let deleted = try XCTUnwrap(deletedFile)
+        try await eventually("deletion on b") { !FileManager.default.fileExists(atPath: rootB.appendingPathComponent("two.typ").path) }
+        let restoredFile = await a.repository.restore(deleted[0], to: partsA.appendingPathComponent("two.typ"))
+        XCTAssertEqual(restoredFile, .restored)
+        try await eventually("undone deletion on b") { read(rootB.appendingPathComponent("two.typ")) == "two\n" }
+
+        // Deleting the shared folder stops it on a only; b keeps it, and restoring it on a syncs again.
+        let deletedFolder = await a.repository.delete([partsA], message: "Delete Thesis/parts")
+        let folder = try XCTUnwrap(deletedFolder)
+        XCTAssertTrue(a.shares.isEmpty)
+        XCTAssertEqual(a.parked.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: rootB.appendingPathComponent("one.typ").path), "b keeps its files")
+        let restoredFolder = await a.repository.restore(folder[0], to: partsA)
+        XCTAssertEqual(restoredFolder, .restored)
+        XCTAssertEqual(a.shares.values.first?.path, "Thesis/parts")
+        try write("one, from b\n", to: rootB.appendingPathComponent("one.typ"))
+        await commit(b)
+        try await eventually("b's edit on a after the restore") { read(partsA.appendingPathComponent("one.typ")) == "one, from b\n" }
     }
 
     func testSharesNobodySyncsLeaveTheAccount() async throws {

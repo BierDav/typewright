@@ -125,6 +125,7 @@ final class FileOperations {
                 do {
                     try FileManager.default.createDirectory(at: move.to.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try FileManager.default.moveItem(at: move.from, to: move.to)
+                    repository.noteMoved(from: move.from, to: move.to)
                     done.append(move)
                 } catch {
                     NSAlert(error: error).runModal()

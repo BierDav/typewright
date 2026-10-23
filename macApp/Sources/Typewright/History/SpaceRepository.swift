@@ -123,6 +123,12 @@ final class SpaceRepository {
     static let didCommit = Notification.Name("SpaceRepositoryDidCommit")
     /// Posted when the set of conflicted files changed.
     static let conflictsDidChange = Notification.Name("SpaceRepositoryConflictsDidChange")
+    /// Posted after a file, folder or space moved on disk, with `from` and `to` URLs in `userInfo`; shares follow.
+    static let didMove = Notification.Name("SpaceRepositoryDidMove")
+    /// Posted with the deleted repository `paths` in `userInfo`, before the commit's `didCommit`.
+    static let didDelete = Notification.Name("SpaceRepositoryDidDelete")
+    /// Posted with `from` (the deleted path) and `to` (where it came back) in `userInfo`.
+    static let didRestore = Notification.Name("SpaceRepositoryDidRestore")
 
     /// `~/Library/Application Support/Typewright/Spaces` in the real home, so links to it work for other apps.
     let root: URL
@@ -182,6 +188,11 @@ final class SpaceRepository {
         let base = root.resolvingSymlinksInPath().path
         guard path.hasPrefix(base + "/") else { return nil }
         return String(path.dropFirst(base.count + 1))
+    }
+
+    /// Tells observers (the sync of shares) that `from` moved to `to` on disk; call right after moving.
+    func noteMoved(from: URL, to: URL) {
+        NotificationCenter.default.post(name: Self.didMove, object: self, userInfo: ["from": from, "to": to])
     }
 
     func url(of relativePath: String) -> URL { root.appendingPathComponent(relativePath) }
@@ -265,6 +276,7 @@ final class SpaceRepository {
         guard paths.count == urls.count, let data = try? JSONEncoder().encode(paths) else { return nil }
         let json = String(decoding: data, as: UTF8.self)
         guard let result: Result = await call({ twj_delete($0, json, message) }) else { return nil }
+        NotificationCenter.default.post(name: Self.didDelete, object: self, userInfo: ["paths": paths])
         postDidCommit(paths, wrote: false)
         return result.deleted
     }
@@ -292,6 +304,7 @@ final class SpaceRepository {
         guard let data = await json({ twj_restore_deleted($0, entry, dest) }) else { return .failed }
         if (try? JSONDecoder().decode(Exists.self, from: data))?.exists == true { return .exists }
         guard case .ok = decode(data) as Reply<Result> else { return .failed }
+        NotificationCenter.default.post(name: Self.didRestore, object: self, userInfo: ["from": item.path, "to": dest])
         postDidCommit([dest], wrote: true)
         return .restored
     }

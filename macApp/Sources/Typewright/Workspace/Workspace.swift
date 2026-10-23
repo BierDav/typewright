@@ -813,6 +813,8 @@ final class Workspace: EditorLanguage {
             NSAlert(error: error).runModal()
             return false
         }
+        // Shares at or inside the moved item follow it instead of losing their folder.
+        SpaceRepository.shared.noteMoved(from: url, to: target)
         func moved(_ u: URL) -> URL {
             if u == url { return target }
             guard u.path.hasPrefix(url.path + "/") else { return u }

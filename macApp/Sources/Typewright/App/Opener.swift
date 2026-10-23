@@ -407,7 +407,7 @@ final class Opener {
     func deleteSpaceNow(_ url: URL, message: String) async -> DeletedItem? {
         let windows = windows(showing: url)
         windows.forEach { $0.state.workspace?.flushSaves() }
-        SyncService.shared.stopSyncing(url)
+        // Its shares, nested ones too, stop through `SpaceRepository.didDelete`; undo brings them back.
         guard let item = await SpaceRepository.shared.delete([url], message: message)?.first else {
             let alert = NSAlert()
             alert.messageText = "Couldn't delete “\(url.lastPathComponent)”"
@@ -490,7 +490,7 @@ final class Opener {
         // Persist under the old key first so the saved state moves along.
         windows.forEach { $0.state.workspace?.close() }
         SpaceStore.move(from: old, to: target)
-        SyncService.shared.moved(from: old, to: target)
+        SpaceRepository.shared.noteMoved(from: old, to: target)
         for window in windows {
             // A window opened on a file inside the space keeps that file.
             let space = window.state.space?.standardizedFileURL
