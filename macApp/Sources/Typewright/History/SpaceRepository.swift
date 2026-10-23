@@ -148,9 +148,10 @@ final class SpaceRepository {
 
     /// Whether the squash ran (false when it failed or the CLI held the repository).
     @discardableResult
-    func squash(olderThan days: Int) async -> Bool {
+    func squash(policy: RetentionPolicy) async -> Bool {
         struct Result: Decodable { let squashed: Int }
-        let result: Result? = await call { twj_squash($0, UInt32(clamping: days)) }
+        let json = policy.json
+        let result: Result? = await call { twj_squash($0, json) }
         return result != nil
     }
 

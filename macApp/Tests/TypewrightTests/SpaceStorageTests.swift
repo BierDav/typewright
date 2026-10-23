@@ -75,19 +75,37 @@ final class SpaceStorageTests: XCTestCase {
         XCTAssertFalse(CommitTiming.counts("/elsewhere/file", root: root))
     }
 
-    func testSquashesOnceADay() {
+    func testSquashesAtMostHourly() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         XCTAssertTrue(HistorySettings.squashIsDue(last: nil, now: now))
-        XCTAssertFalse(HistorySettings.squashIsDue(last: now.addingTimeInterval(-3600), now: now))
-        XCTAssertTrue(HistorySettings.squashIsDue(last: now.addingTimeInterval(-86_400), now: now))
+        XCTAssertFalse(HistorySettings.squashIsDue(last: now.addingTimeInterval(-600), now: now))
+        XCTAssertTrue(HistorySettings.squashIsDue(last: now.addingTimeInterval(-3600), now: now))
         XCTAssertTrue(HistorySettings.squashIsDue(last: now.addingTimeInterval(3600), now: now), "a clock set back")
+    }
 
+    func testRetentionPolicySettings() throws {
         let defaults = defaults()
-        XCTAssertEqual(HistorySettings.squashDays(defaults), 30)
-        defaults.set(7, forKey: HistorySettings.squashDaysKey)
-        XCTAssertEqual(HistorySettings.squashDays(defaults), 7)
+        XCTAssertEqual(HistorySettings.policy(defaults), .standard)
+        XCTAssertEqual(RetentionPolicy.standard, RetentionPolicy(last: 100, hourly: 48, daily: 14, weekly: 8, monthly: 12, yearly: -1))
+        defaults.set(7, forKey: HistorySettings.keys.daily)
+        defaults.set(5, forKey: HistorySettings.keys.yearly)
+        defaults.set(-3, forKey: HistorySettings.keys.last)
+        let policy = try XCTUnwrap(HistorySettings.policy(defaults))
+        XCTAssertEqual(policy.daily, 7)
+        XCTAssertEqual(policy.yearly, 5)
+        XCTAssertEqual(policy.last, 0, "only yearly can be unlimited")
         defaults.set(false, forKey: HistorySettings.squashKey)
-        XCTAssertNil(HistorySettings.squashDays(defaults))
+        XCTAssertNil(HistorySettings.policy(defaults))
+
+        // The old days setting gives way to the new defaults.
+        let old = self.defaults()
+        old.set(30, forKey: HistorySettings.legacyDaysKey)
+        HistorySettings.migrate(old)
+        XCTAssertNil(old.object(forKey: HistorySettings.legacyDaysKey))
+        XCTAssertEqual(HistorySettings.policy(old), .standard)
+
+        let json = try JSONSerialization.jsonObject(with: Data(RetentionPolicy.standard.json.utf8)) as? [String: Int]
+        XCTAssertEqual(json, ["last": 100, "hourly": 48, "daily": 14, "weekly": 8, "monthly": 12, "yearly": -1])
     }
 
     // MARK: - Space folders

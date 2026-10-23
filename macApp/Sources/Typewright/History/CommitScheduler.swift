@@ -73,21 +73,24 @@ final class CommitScheduler {
             guard paths.contains(where: { CommitTiming.counts($0, root: root) }) else { return }
             self?.noteChange()
         }
+        HistorySettings.migrate()
         noteChange()
         squashIfDue()
-        squashTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+        // Checked every few minutes, so a squash skipped while commits were pending runs soon after.
+        squashTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.squashIfDue() }
         }
     }
 
-    /// Once a day: history older than the setting collapses to one commit per day.
+    /// At most once an hour and only between commits: old history thins out by the retention policy.
     private func squashIfDue(defaults: UserDefaults = .standard) {
+        guard !committing, timing.deadline == nil else { return }
         let last = defaults.object(forKey: HistorySettings.lastSquashKey) as? Date
         guard HistorySettings.squashIsDue(last: last, now: now()) else { return }
-        guard let days = HistorySettings.squashDays(defaults) else { return }
-        // Marked done only once it ran, so a busy repository gets the next hourly try.
+        guard let policy = HistorySettings.policy(defaults) else { return }
+        // Marked done only once it ran, so a busy repository gets the next try.
         Task {
-            if await repository().squash(olderThan: days) { defaults.set(now(), forKey: HistorySettings.lastSquashKey) }
+            if await repository().squash(policy: policy) { defaults.set(now(), forKey: HistorySettings.lastSquashKey) }
         }
     }
 
