@@ -417,6 +417,8 @@ struct InlineText: View {
     var body: some View {
         if text.runs.contains(where: { $0.link != nil }) {
             LinkText(text: text)
+                // AppKit views have no text baseline of their own; without one, list bullets sit a line above.
+                .alignmentGuide(.firstTextBaseline) { $0[.top] + NSFont.preferredFont(forTextStyle: .callout).ascender }
         } else {
             Text(text).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }
