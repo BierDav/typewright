@@ -8,8 +8,6 @@ use serde::Deserialize;
 use serde_json::json;
 use solveng_ide::{Context, ContextFile, Report};
 
-mod hover;
-
 /// The editor's context: the files around the document (paths relative to the root), the last compile's report,
 /// the document's path and whether it's the compiled file.
 #[derive(Deserialize, Default)]
@@ -119,7 +117,7 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
                         .collect::<Vec<_>>()
                 ),
                 "complete" => json!(solveng_ide::complete(document, &c, offset)),
-                "hover" => json!(hover::hover(document, &c, offset)),
+                "hover" => json!(solveng_ide::hover(document, &c, offset)),
                 "conversions" => json!(solveng_ide::conversions(document, &c, offset)),
                 "diagnostics" => json!(solveng_ide::diagnostics(document, &c)),
                 "definition" => json!(solveng_ide::definition(document, &c, offset)),
@@ -169,6 +167,41 @@ mod tests {
     }
 
     #[test]
+    fn value_supports_editor_features_in_strings_and_math() {
+        for expression in [r#""U_2 / 2 = mV""#, "$U_2 / 2 = mV$"] {
+            let doc = format!("#show: worksheet\n$U_2 := 5 V$\nVoltage: #value({expression}).");
+            let context = serde_json::json!({"path": "main.typ", "main": true}).to_string();
+            let at = doc[..doc.rfind("U_2").unwrap()].encode_utf16().count() as u32;
+            let json = |op, offset| serde_json::from_str::<Value>(&call(op, &doc, &context, offset)).unwrap();
+            assert_eq!(json("definition", at)["start"], doc.find("U_2").unwrap());
+            assert_eq!(json("usages", at).as_array().unwrap().len(), 2);
+            assert_eq!(json("rename:U_3", at).as_array().unwrap().len(), 2);
+            assert!(json("hover", at)["markdown"].as_str().unwrap().contains("5 V"));
+            let items = json("complete", at + 1);
+            assert!(items["items"].as_array().unwrap().iter().any(|i| i["insert"] == "U_2"), "{items}");
+            let tokens = json("documentTokens", 0);
+            let unit = doc[..doc.rfind("mV").unwrap()].encode_utf16().count() as u32;
+            assert!(tokens.as_array().unwrap().chunks_exact(3).any(|t| t[0] == unit && t[2] == solveng_ide::TokenKind::UNIT));
+        }
+        let function: Value = serde_json::from_str(&call("function", "value", "", 0)).unwrap();
+        assert_eq!(function["positional"][0]["name"], "expr");
+        assert!(function["doc"].as_str().unwrap().contains("expression"));
+    }
+
+    #[test]
+    fn completes_and_documents_new_calculation_builtins() {
+        for name in ["sum", "laplace", "det", "tr", "integrate"] {
+            let doc = format!("#value(\"{name}\")");
+            let at = doc.find(name).unwrap() as u32;
+            let result: Value = serde_json::from_str(&call("complete", &doc, "", at + name.len() as u32)).unwrap();
+            let item = result["items"].as_array().unwrap().iter().find(|i| i["label"] == name).unwrap();
+            assert!(item["documentation"].as_str().unwrap().contains("### Parameters"), "{item}");
+            let hover: Value = serde_json::from_str(&call("hover", &doc, "", at + 1)).unwrap();
+            assert!(hover["markdown"].as_str().unwrap().contains("### Parameters"), "{hover}");
+        }
+    }
+
+    #[test]
     fn bundles_solveng_one() {
         assert_eq!(call("version", "", "", 0), "\"1.0.0\"");
     }
@@ -182,7 +215,7 @@ mod tests {
         assert_eq!(hover["end"], at + 4);
         let markdown = hover["markdown"].as_str().unwrap();
         assert!(markdown.contains("Σr = 1 + x + y^2"), "{markdown}");
-        assert!(markdown.contains("### Depends on\n\n- `x` (undefined)\n- `y` (undefined)"), "{markdown}");
+        assert!(markdown.contains("### Depends on\n\n```solveng\nx // undefined\ny // undefined\n```"), "{markdown}");
         for offset in at + 1..at + 4 {
             let other: Value = serde_json::from_str(&call("hover", doc, "", offset)).unwrap();
             assert_eq!(other, hover);
@@ -196,7 +229,7 @@ mod tests {
         let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
         let markdown = hover["markdown"].as_str().unwrap();
         let dependencies = markdown.split("### Depends on\n\n").nth(1).unwrap();
-        assert_eq!(dependencies, "- `b`\n- `a`");
+        assert_eq!(dependencies, "```solveng\nb = a + 3 A\na: A = 2 A\n```");
     }
 
     #[test]
@@ -208,7 +241,7 @@ mod tests {
             let at = doc.rfind("f(").unwrap() as u32;
             let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
             let markdown = hover["markdown"].as_str().unwrap();
-            assert!(markdown.ends_with("### Depends on\n\n- `b`\n- `a`"), "{markdown}");
+            assert!(markdown.ends_with("### Depends on\n\n```solveng\nb = a + a\na = 2\n```"), "{markdown}");
         }
     }
 
@@ -218,7 +251,7 @@ mod tests {
         let at = doc.find("a =").unwrap() as u32;
         let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
         let markdown = hover["markdown"].as_str().unwrap();
-        assert!(markdown.ends_with("### Depends on\n\n- `x`"), "{markdown}");
+        assert!(markdown.ends_with("### Depends on\n\n```solveng\nx = 1\n```"), "{markdown}");
     }
 
     #[test]
@@ -241,7 +274,7 @@ mod tests {
         let at = main.rfind("b =").unwrap() as u32;
         let hover: Value = serde_json::from_str(&call("hover", main, &context, at)).unwrap();
         let markdown = hover["markdown"].as_str().unwrap();
-        assert!(markdown.ends_with("### Depends on\n\n- `a`"), "{markdown}");
+        assert!(markdown.ends_with("### Depends on\n\n```solveng\na = 2\n```"), "{markdown}");
     }
 
     #[test]

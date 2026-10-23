@@ -8,7 +8,30 @@ final class HoverController {
     var provider: ((Int) async -> (markdown: String, range: NSRange?)?)?
     var fixesProvider: ((Diagnostic) -> [QuickFix])?
     /// Diagnostics with the text they cover.
-    var diagnostics: [(range: NSRange, diagnostic: Diagnostic)] = []
+    var diagnostics: [(range: NSRange, diagnostic: Diagnostic)] = [] {
+        didSet { refreshDiagnostics() }
+    }
+    private var hoveredIndex: Int?
+    private var documentationOnly = false
+
+    private func refreshDiagnostics() {
+        guard !documentationOnly, let index = hoveredIndex else { return }
+        let errors = diagnostics.filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index }.map(\.diagnostic)
+        if let host = panel?.contentView as? PopupHostingView<HoverContent> {
+            var content = host.rootView
+            content.errors = errors
+            if content.errors.isEmpty && content.markdown == nil { hide(); return }
+            host.rootView = content
+            if let tv = textView, let line = diagnostics.first(where: { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index })
+                .flatMap({ Self.rect(of: $0.range, in: tv) }) { anchor = anchor.union(line) }
+        } else if !errors.isEmpty, let tv = textView,
+                  let range = diagnostics.first(where: { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index })?.range,
+                  let rect = Self.rect(of: range, in: tv) {
+            let pinned = isPinned
+            present(errors: errors, markdown: nil, below: rect, at: index)
+            isPinned = pinned && panel != nil
+        }
+    }
 
     private var task: Task<Void, Never>?
     private var panel: NSPanel?
@@ -46,6 +69,7 @@ final class HoverController {
             return
         }
         task?.cancel()
+        hoveredIndex = nil
         task = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(450))
             guard !Task.isCancelled else { return }
@@ -56,7 +80,7 @@ final class HoverController {
     /// The pointer left the text, possibly onto the panel, which is its own window.
     func pointerExited() {
         if isPinned { return }
-        if panel != nil { scheduleHide() } else { task?.cancel() }
+        if panel != nil { scheduleHide() } else { task?.cancel(); hoveredIndex = nil }
     }
 
     private var hideTask: Task<Void, Never>?
@@ -74,7 +98,8 @@ final class HoverController {
 
     private func isTopmost(at point: NSPoint) -> Bool {
         guard let tv = textView, let content = tv.window?.contentView else { return false }
-        let hit = content.hitTest(content.convert(point, from: tv))
+        // hitTest takes the superview's coordinates; the flipped hosting view's own ones would mirror the point.
+        let hit = content.hitTest(content.superview?.convert(point, from: tv) ?? tv.convert(point, to: nil))
         return hit.map { $0 === tv || $0.isDescendant(of: tv) } ?? false
     }
 
@@ -130,6 +155,8 @@ final class HoverController {
         pointerInPanel = false
         isPinned = false
         anchor = .null
+        hoveredIndex = nil
+        documentationOnly = false
         trail = nil
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
@@ -144,49 +171,65 @@ final class HoverController {
     }
 
     private func show(at point: NSPoint) async {
-        guard let tv = textView, isTopmost(at: point), let index = Self.character(at: point, in: tv) else { return }
+        guard let tv = textView, isTopmost(at: point), let index = Self.character(at: point, in: tv, onGlyph: false) else { return }
+        hoveredIndex = index
+        documentationOnly = false
         let errors = diagnostics.filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index }
-        let docs = await provider?(index)
+        if let range = errors.first?.range, let rect = Self.rect(of: range, in: tv) {
+            present(errors: errors.map(\.diagnostic), markdown: nil, below: rect, at: index)
+        }
+        guard let symbol = Self.character(at: point, in: tv) else { return }
+        let docs = await provider?(symbol)
         // Something may have opened on top while the server answered.
-        guard !Task.isCancelled, errors.count + (docs == nil ? 0 : 1) > 0, isTopmost(at: point) else { return }
+        guard !Task.isCancelled, docs != nil, isTopmost(at: point) else { return }
 
-        let range = docs?.range ?? errors.first?.range ?? NSRange(location: index, length: 1)
+        let currentErrors = diagnostics.filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index }
+        let range = docs?.range ?? currentErrors.first?.range ?? NSRange(location: index, length: 1)
         guard var rect = Self.rect(of: range, in: tv) else { return }
         // Long ranges wrap; only the hovered line matters for placement.
         if !rect.insetBy(dx: -3, dy: -3).contains(point) { rect = NSRect(x: point.x - 20, y: point.y - 9, width: 40, height: 18) }
-        present(errors: errors.map(\.diagnostic), markdown: docs?.markdown, below: rect)
+        let pinned = isPinned
+        present(errors: currentErrors.map(\.diagnostic), markdown: docs?.markdown, below: rect, at: index)
+        isPinned = pinned && panel != nil
+        // The errors cover their line, so moving along it keeps them open.
+        if panel != nil, let line = currentErrors.first.flatMap({ Self.rect(of: $0.range, in: tv) }) { anchor = anchor.union(line) }
     }
 
     /// F1: hides shown or loading docs, or shows and pins the docs at the caret.
     /// Pinned docs only ignore the pointer; keys, clicks and scrolling still close them.
     func toggleAtCaret() {
-        if isPinned || panel != nil { hide(); return }
+        let hasDocs = (panel?.contentView as? PopupHostingView<HoverContent>)?.rootView.markdown != nil
+        if documentationOnly || hasDocs { hide(); return }
+        if panel != nil { hide() }
         showAtCaret()
     }
 
-    /// Docs and problems of the symbol at the caret.
+    /// Documentation of the symbol at the caret.
     private func showAtCaret() {
         guard let tv = textView else { return }
         let index = tv.selectedRange().location
         task?.cancel()
         // Pinned already, so pointer moves while the server answers neither cancel it nor show their own.
         isPinned = true
+        documentationOnly = true
+        hoveredIndex = index
         task = Task { [weak self] in
-            let errors = self?.diagnostics.filter { NSLocationInRange(index, $0.range) || NSMaxRange($0.range) == index } ?? []
             // The caret may sit just after the symbol.
             var docs = await self?.provider?(index)
             if docs == nil, index > 0 { docs = await self?.provider?(index - 1) }
             guard let self, !Task.isCancelled else { return }
             guard let tv = self.textView, tv.selectedRange().location == index else { return self.isPinned = false }
-            guard errors.count + (docs == nil ? 0 : 1) > 0 else {
+            guard let docs else {
                 self.isPinned = false
+                self.documentationOnly = false
+                self.hoveredIndex = nil
                 return NSSound.beep()
             }
-            let range = docs?.range ?? errors.first?.range ?? NSRange(location: index, length: 0)
+            let range = docs.range ?? NSRange(location: index, length: 0)
             let caret = (tv as? TypstTextView)?.caretAnchor() ?? .zero
             var rect = Self.rect(of: range, in: tv) ?? caret
             if !rect.insetBy(dx: -3, dy: -3).intersects(caret) { rect = caret }
-            self.present(errors: errors.map(\.diagnostic), markdown: docs?.markdown, below: rect)
+            self.present(errors: [], markdown: docs.markdown, below: rect, at: index)
             self.isPinned = self.panel != nil
         }
     }
@@ -202,7 +245,7 @@ final class HoverController {
         return rect.offsetBy(dx: tv.textContainerOrigin.x, dy: tv.textContainerOrigin.y)
     }
 
-    private func present(errors: [Diagnostic], markdown: String?, below rect: NSRect) {
+    private func present(errors: [Diagnostic], markdown: String?, below rect: NSRect, at index: Int) {
         guard let tv = textView, !Popups.isCovered(tv.window) else { hide(); return }
         anchor = rect
 
@@ -255,10 +298,17 @@ final class HoverController {
         origin.x = min(max(origin.x, screen.minX), screen.maxX - host.frame.width)
         panel.setFrameOrigin(origin)
         placedPanel = panel
+        // Replacing the panel must keep its pending documentation request alive.
+        let request = task
+        let documentationOnly = self.documentationOnly
+        task = nil
         hide()
+        task = request
+        self.documentationOnly = documentationOnly
         anchor = rect
         self.trail = trail
         self.panel = panel
+        hoveredIndex = index
         window.addChildWindow(panel, ordered: .above)
         panel.orderFront(nil)
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
@@ -268,15 +318,19 @@ final class HoverController {
         }
     }
 
-    /// The character under the pointer, or nil past a line's end.
-    private static func character(at point: NSPoint, in tv: NSTextView) -> Int? {
+    /// Diagnostics cover their line; documentation requires a glyph under the pointer.
+    private static func character(at point: NSPoint, in tv: NSTextView, onGlyph: Bool = true) -> Int? {
         guard let lm = tv.layoutManager, let container = tv.textContainer, lm.numberOfGlyphs > 0 else { return nil }
         let p = NSPoint(x: point.x - tv.textContainerOrigin.x, y: point.y - tv.textContainerOrigin.y)
         let glyph = lm.glyphIndex(for: p, in: container)
-        let rect = lm.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+        let rect = onGlyph ? lm.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+            : lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
         guard rect.insetBy(dx: -1, dy: 0).contains(p) else { return nil }
         let index = lm.characterIndexForGlyph(at: glyph)
-        return index < (tv.string as NSString).length ? index : nil
+        let source = tv.string as NSString
+        guard index < source.length else { return nil }
+        if onGlyph, let scalar = UnicodeScalar(source.character(at: index)), CharacterSet.whitespacesAndNewlines.contains(scalar) { return nil }
+        return index
     }
 }
 
@@ -319,7 +373,7 @@ final class HoverPanel: NSPanel {
 }
 
 struct HoverContent: View {
-    let errors: [Diagnostic]
+    var errors: [Diagnostic]
     let markdown: String?
     let width: CGFloat
     let fixes: (Diagnostic) -> [QuickFix]
@@ -362,8 +416,7 @@ struct HoverContent: View {
                                         } label: {
                                             Label(fix.title, systemImage: fix.icon)
                                         }
-                                        .buttonStyle(.link)
-                                        .pointerStyle(.link)
+                                        .buttonStyle(FixButtonStyle())
                                     } else {
                                         Label(fix.title, systemImage: fix.icon).foregroundStyle(.secondary)
                                     }
@@ -620,5 +673,57 @@ struct MarkdownView: View {
             result += shown
         }
         return result
+    }
+}
+
+/// The link look, with hover and the hand cursor working while the popup isn't key.
+private struct FixButtonStyle: ButtonStyle {
+    @State private var hovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(Color(nsColor: .linkColor))
+            .opacity(configuration.isPressed ? 0.5 : hovered ? 0.75 : 1)
+            .contentShape(Rectangle())
+            .background(PointerTracker(hovered: $hovered))
+    }
+}
+
+/// SwiftUI's hover and AppKit's cursor rects only apply in the key window; tracking areas always do.
+private struct PointerTracker: NSViewRepresentable {
+    @Binding var hovered: Bool
+
+    func makeNSView(context: Context) -> TrackingView {
+        let view = TrackingView()
+        view.onChange = { hovered = $0 }
+        return view
+    }
+
+    func updateNSView(_ view: TrackingView, context: Context) { view.onChange = { hovered = $0 } }
+
+    final class TrackingView: NSView {
+        var onChange: ((Bool) -> Void)?
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                           owner: self))
+        }
+
+        // Clicks go to the button above.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func mouseEntered(with event: NSEvent) {
+            onChange?(true)
+            NSCursor.pointingHand.set()
+        }
+
+        override func mouseMoved(with event: NSEvent) { NSCursor.pointingHand.set() }
+
+        override func mouseExited(with event: NSEvent) {
+            onChange?(false)
+            NSCursor.arrow.set()
+        }
     }
 }

@@ -26,7 +26,7 @@ use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 use wasm_bindgen::prelude::*;
 
-use crate::{LIBRARY, Slot, decode, diagnostic, display_path, highlight_runs, markdown, refactor_json, solveng_report, svg_pages};
+use crate::{LIBRARY, Slot, decode, display_path, highlight_runs, markdown, refactor_json, solveng_report, svg_pages};
 
 static EMBEDDED: LazyLock<Vec<(Font, typst::text::FontInfo)>> = LazyLock::new(|| typst_kit::fonts::embedded().collect());
 
@@ -315,7 +315,7 @@ impl Compiler {
             self.export(format)
         };
         typst::comemo::evict(10);
-        let json: Vec<_> = diags.iter().map(|d| diagnostic(&self.world, d)).collect();
+        let json = crate::diagnostics::collect(&self.world, diags, data.is_none() && self.world.main.is_some());
         let missing = self.world.missing.get_mut().iter().map(|spec| spec.to_string()).collect();
         let solveng = self.world.solveng.clone();
         CompileResult { data, diagnostics: serde_json::to_string(&json).unwrap_or_else(|_| "[]".into()), missing, solveng }

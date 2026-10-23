@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
+mod diagnostics;
 mod markdown;
 mod refactor;
 mod solveng;
@@ -100,6 +101,7 @@ struct SolvengReport {
     /// Everything the blocks defined, the later definition of a name winning.
     defined: Vec<SolvengValue>,
     units: Vec<SolvengValue>,
+    errors: Vec<solveng_ide::ReportError>,
 }
 
 #[derive(Serialize)]
@@ -159,21 +161,30 @@ pub(crate) fn solveng_report(world: &dyn World, introspector: &dyn typst::intros
             }
             continue;
         }
-        let Ok(location) = d.get("element").cloned().and_then(|v| v.cast::<Location>().map_err(|e| e.message().clone()))
-        else {
+        let origin = (|| {
+            let location = d.get("element").ok()?.clone().cast::<Location>().ok()?;
+            let element = introspector.query_first(&Selector::Location(location))?;
+            let span = element.span();
+            let id = span.id()?;
+            let range = world.range(span)?;
+            let source = world.source(id).ok()?;
+            let code = source.text().get(range.clone())?;
+            let start = source.text()[..range.start].encode_utf16().count();
+            Some((display_path(id), start, start + code.encode_utf16().count(), code.to_string()))
+        })();
+        if kind == "error" {
+            let (path, start, end, code) = origin.unwrap_or_default();
+            report.errors.push(solveng_ide::ReportError {
+                path, start, end, text: code, source: text(d, "source"), message: text(d, "message"),
+            });
             continue;
-        };
-        let Some(element) = introspector.query_first(&Selector::Location(location)) else { continue };
-        let span = element.span();
-        let (Some(id), Some(range)) = (span.id(), world.range(span)) else { continue };
-        let Ok(source) = world.source(id) else { continue };
-        let Some(code) = source.text().get(range.clone()) else { continue };
-        let start = source.text()[..range.start].encode_utf16().count();
+        }
+        let Some((path, start, end, code)) = origin else { continue };
         report.elements.push(SolvengElement {
-            path: display_path(id),
+            path,
             start,
-            end: start + code.encode_utf16().count(),
-            text: code.to_string(),
+            end,
+            text: code,
             kind,
             active: matches!(d.get("active"), Ok(Value::Bool(true))),
             integration: match d.get("evaluate") {
@@ -255,19 +266,24 @@ pub(crate) struct DiagnosticJSON {
     path: String,
     line: usize,
     column: usize,
+    length: Option<usize>,
     severity: &'static str,
     message: String,
 }
 
 pub(crate) fn diagnostic(world: &dyn World, diag: &SourceDiagnostic) -> DiagnosticJSON {
+    diagnostic_in(world, world, diag)
+}
+
+fn diagnostic_in(ranges: &dyn World, world: &dyn World, diag: &SourceDiagnostic) -> DiagnosticJSON {
     let severity = match diag.severity {
         Severity::Error => "error",
         Severity::Warning => "warning",
     };
-    let mut out = DiagnosticJSON { path: String::new(), line: 1, column: 1, severity, message: diag.message.to_string() };
+    let mut out = DiagnosticJSON { path: String::new(), line: 1, column: 1, length: None, severity, message: diag.message.to_string() };
     let Some(id) = diag.span.id() else { return out };
     out.path = display_path(id);
-    if let (Some(range), Some(lines)) = (world.range(diag.span), lines(world, id))
+    if let (Some(range), Some(lines)) = (ranges.range(diag.span), lines(world, id))
         && let Some(line) = lines.byte_to_line(range.start)
         && let Some(start) = lines.line_to_byte(line)
         && let Some(head) = lines.text().get(start..range.start)
@@ -275,6 +291,7 @@ pub(crate) fn diagnostic(world: &dyn World, diag: &SourceDiagnostic) -> Diagnost
         // Columns count UTF-16 units to match NSString offsets.
         out.line = line + 1;
         out.column = head.encode_utf16().count() + 1;
+        out.length = lines.text().get(range).map(|text| text.encode_utf16().count());
     }
     out
 }

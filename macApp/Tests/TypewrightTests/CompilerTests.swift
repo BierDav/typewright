@@ -54,7 +54,43 @@ final class CompilerTests: XCTestCase {
         XCTAssertEqual(error?.path, "main.typ")
         XCTAssertEqual(error?.line, 2)
         XCTAssertEqual(error?.column, 5)
+        XCTAssertEqual(error?.length, 4)
         XCTAssertEqual(error?.severity, .error)
+    }
+
+    func testIndependentErrorsInMathAndCodeAreReported() async throws {
+        for text in ["$few$\n#few()", "#few()\n$few$", "#let known = 2\n$few$\n#known()"] {
+            let result = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: ["main.typ": text], format: .pdf)
+            XCTAssertNil(result.output)
+            XCTAssertEqual(result.diagnostics.count, 2, result.diagnostics.map(\.message).joined(separator: "\n"))
+            XCTAssertEqual(result.diagnostics.last?.line, text.components(separatedBy: "\n").count)
+        }
+        let text = "$few$ 😀 #other()"
+        let result = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: ["main.typ": text], format: .pdf)
+        let second = try XCTUnwrap(result.diagnostics.last)
+        XCTAssertEqual(second.column, (text as NSString).range(of: "other").location + 1)
+        XCTAssertEqual(second.length, 5)
+    }
+
+    func testErrorsInIncludedFilesDoNotHideLaterErrors() async {
+        let result = await BuiltinCompiler(root: root).compile(main: "main.typ",
+            buffers: ["main.typ": "#include \"lib.typ\"\n#few()", "lib.typ": "$few$"], format: .pdf)
+        XCTAssertEqual(result.diagnostics.map(\.path), ["lib.typ", "main.typ"])
+        XCTAssertEqual(result.diagnostics.map(\.line), [1, 2])
+    }
+
+    func testFailedDefinitionsDoNotProduceCascadingRecoveryErrors() async {
+        let result = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: ["main.typ": "#let known = nope\n#known()"], format: .pdf)
+        XCTAssertEqual(result.diagnostics.count, 1)
+        XCTAssertEqual(result.diagnostics.first?.message, "unknown variable: nope")
+    }
+
+    func testMathDiagnosticStopsBeforeTheClosingDelimiter() async throws {
+        let text = "😀 $1 + nope$"
+        let result = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: ["main.typ": text], format: .pdf)
+        let error = try XCTUnwrap(result.diagnostics.first)
+        let length = try XCTUnwrap(error.length)
+        XCTAssertEqual((text as NSString).substring(with: NSRange(location: error.column - 1, length: length)), "nope")
     }
 
     func testHTMLKeepsFontFamiliesAndUserLines() async {

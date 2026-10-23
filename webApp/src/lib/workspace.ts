@@ -590,10 +590,8 @@ export class Workspace {
   private async checkSolveng() {
     const file = this.state.selected;
     if (!file || this.state.selectedKind !== "typst" || file === this.state.preview || this.closed) return;
-    const text = this.state.text;
-    // A file that never mentions solveng has nothing to report.
     // A failed compile reports nothing and keeps the last report.
-    const report = text.includes("solve") ? (await compiler.compile(file, Format.check).catch(() => null))?.solveng || null : "";
+    const report = (await compiler.compile(file, Format.check).catch(() => null))?.solveng || null;
     if (report == null || file !== this.state.selected || this.closed) return;
     const last = this.state.solvengFileReport;
     if (last?.path === file && last.report === report) return;

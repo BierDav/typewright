@@ -130,7 +130,7 @@ final class BuiltinCompiler: @unchecked Sendable {
             output: output,
             diagnostics: located.map {
                 Diagnostic(path: $0.path, line: $0.line, column: $0.column,
-                           severity: Diagnostic.Severity(rawValue: $0.severity) ?? .error, message: $0.message)
+                           severity: Diagnostic.Severity(rawValue: $0.severity) ?? .error, message: $0.message, length: $0.length)
             },
             log: log,
             duration: Date().timeIntervalSince(start),
@@ -166,6 +166,7 @@ final class BuiltinCompiler: @unchecked Sendable {
         let path: String
         let line: Int
         let column: Int
+        let length: Int?
         let severity: String
         let message: String
     }

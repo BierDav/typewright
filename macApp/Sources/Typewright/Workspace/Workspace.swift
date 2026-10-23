@@ -1260,8 +1260,7 @@ final class Workspace: EditorLanguage {
             changed = true
         }
         if file != previewFile, let path = relative(file) {
-            // A file that never mentions solveng has nothing to report.
-            let report = text.contains("solve") ? await builtin.check(main: path, buffers: relativeBuffers()) : ""
+            let report = await builtin.check(main: path, buffers: relativeBuffers())
             if let report, !Task.isCancelled, file == selectedFile, solvengFileReport?.file != file || solvengFileReport?.report != report {
                 solvengFileReport = (file, report)
                 changed = true
@@ -1288,7 +1287,7 @@ final class Workspace: EditorLanguage {
                               severity: p.severity == "error" ? .error : .warning, message: p.message, length: p.end - p.start)
         }
         let same = found.count == solvengDiagnostics.count && zip(found, solvengDiagnostics).allSatisfy {
-            $0.line == $1.line && $0.column == $1.column && $0.message == $1.message && $0.length == $1.length
+            $0.line == $1.line && $0.column == $1.column && $0.message == $1.message && $0.length == $1.length && $0.severity == $1.severity
         }
         if !same { solvengDiagnostics = found }
     }

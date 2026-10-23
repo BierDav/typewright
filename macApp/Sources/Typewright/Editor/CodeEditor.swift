@@ -927,13 +927,18 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let exitArea { removeTrackingArea(exitArea) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        if let pointerArea { removeTrackingArea(pointerArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
         addTrackingArea(area)
-        exitArea = area
+        pointerArea = area
     }
 
-    private var exitArea: NSTrackingArea?
+    private var pointerArea: NSTrackingArea?
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        onPointerMoved?(convert(event.locationInWindow, from: nil))
+    }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)

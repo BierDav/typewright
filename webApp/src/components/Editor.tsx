@@ -85,12 +85,12 @@ function images(data: DataTransfer | null): File[] {
 }
 
 /** A diagnostic's line and column (from 1, UTF-16) as a range over the token there. */
-function diagnosticRange(state: EditorState, line: number, column: number): { from: number; to: number } {
+function diagnosticRange(state: EditorState, line: number, column: number, length?: number | null): { from: number; to: number } {
   const l = state.doc.line(Math.min(Math.max(line, 1), state.doc.lines));
   const from = Math.min(l.from + Math.max(column - 1, 0), l.to);
   const rest = state.sliceDoc(from, l.to);
   const word = /^[\p{L}\p{N}_-]+/u.exec(rest)?.[0].length ?? 1;
-  return { from, to: Math.min(from + word, l.to) };
+  return { from, to: Math.min(from + Math.max(length ?? word, 0), l.to) };
 }
 
 export default function Editor(props: { workspace: Workspace }) {
@@ -279,7 +279,7 @@ export default function Editor(props: { workspace: Workspace }) {
     if (!view) return;
     const state = view.state;
     const items: LintDiagnostic[] = diagnostics.map((d) => {
-      const { from, to } = diagnosticRange(state, d.line, d.column);
+      const { from, to } = diagnosticRange(state, d.line, d.column, d.length);
       const font = /^unknown font family: (.+)$/.exec(d.message)?.[1]?.trim();
       const actions: NonNullable<LintDiagnostic["actions"]>[number][] = [];
       if (font) {

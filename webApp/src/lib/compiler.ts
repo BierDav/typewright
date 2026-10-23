@@ -2,7 +2,7 @@
 // module trapped (typst panicked) is replaced without the page noticing.
 import TypstWorker from "~/workers/typst.worker.ts?worker";
 
-export type DiagnosticJSON = { path: string; line: number; column: number; severity: "error" | "warning"; message: string };
+export type DiagnosticJSON = { path: string; line: number; column: number; length?: number | null; severity: "error" | "warning"; message: string };
 
 export type CompileOutput = {
   data: Uint8Array | null;

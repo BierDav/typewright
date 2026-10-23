@@ -23,7 +23,7 @@ use typst_kit::packages::SystemPackages;
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 
-use crate::{LIBRARY, Slot, decode, diagnostic, highlight_runs, markdown, refactor_json, solveng_report, svg_pages, typst_version};
+use crate::{LIBRARY, Slot, decode, highlight_runs, markdown, refactor_json, solveng_report, svg_pages, typst_version};
 
 /// Typst's deep recursion overflows the small stacks of GCD threads.
 const STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -398,7 +398,12 @@ pub unsafe extern "C" fn tw_world_reset(world: *mut TWWorld) {
 pub unsafe extern "C" fn tw_world_compile(world: *mut TWWorld, format: TWFormat) -> TWResult {
     let world = unsafe { &mut *world };
     let (output, diags) = world.compile(format);
-    let json: Vec<_> = diags.iter().map(|d| diagnostic(world, d)).collect();
+    let fallback = diags.iter().map(|d| crate::diagnostic(world, d)).collect();
+    let json = std::thread::scope(|scope| {
+        std::thread::Builder::new().stack_size(STACK_SIZE)
+            .spawn_scoped(scope, || crate::diagnostics::collect(world, diags, output.is_none() && world.main.is_some()))
+            .expect("spawn diagnostics thread").join().unwrap_or(fallback)
+    });
     let diagnostics = CString::new(serde_json::to_string(&json).unwrap_or_else(|_| "[]".into()))
         .unwrap_or_default()
         .into_raw();
@@ -638,6 +643,68 @@ mod solveng_tests {
             tw_world_free(world);
             json
         }
+    }
+
+    #[test]
+    fn compiles_current_solveng_when_available() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if !root.join("solveng/lib.typ").exists() { return; }
+        let main = r#"#import "solveng/lib.typ": *
+#show: worksheet
+$U := 5 V$
+$U + 2 s =$
+```solveng
+x := U + 3 s =
+```
+Voltage: #value("U = mV").
+Bad: #value("q + 1"), #value($r + 2$).
+"#;
+        let root = CString::new(root.to_str().unwrap()).unwrap();
+        let path = CString::new("main.typ").unwrap();
+        unsafe {
+            let world = tw_world_new(root.as_ptr());
+            tw_world_set_main(world, path.as_ptr());
+            tw_world_set_overlay(world, path.as_ptr(), main.as_ptr(), main.len());
+            let result = tw_world_compile(world, TWFormat::Check);
+            assert!(!result.data.is_null(), "{}", CStr::from_ptr(result.diagnostics).to_string_lossy());
+            tw_result_free(result);
+            let report = tw_world_solveng(world);
+            let raw = CStr::from_ptr(report).to_str().unwrap();
+            let context = serde_json::json!({"path": "main.typ", "main": true, "report": raw}).to_string();
+            let problems: serde_json::Value = serde_json::from_str(&crate::solveng::call("diagnostics", main, &context, 0)).unwrap();
+            assert_eq!(problems.as_array().unwrap().iter().filter(|p| p["severity"] == "error").count(), 4, "{raw}\n{problems}");
+            let source: Vec<u16> = main.encode_utf16().collect();
+            for problem in problems.as_array().unwrap() {
+                let range = problem["start"].as_u64().unwrap() as usize..problem["end"].as_u64().unwrap() as usize;
+                assert!(!String::from_utf16(&source[range]).unwrap().contains('$'));
+            }
+            tw_string_free(report);
+            tw_world_free(world);
+        }
+    }
+
+    #[test]
+    fn reports_solveng_errors_in_elements_and_call_strings() {
+        let main = r#"#show math.equation: it => it + context [#metadata((kind: "error", element: it.location(), message: "incompatible units", source: "")) <solveng>]
+#metadata((kind: "error", element: none, message: "undefined q", source: "q + 1")) <solveng>
+#let value(expr) = []
+😀 $1 V + 2 s =$ #value("q + 1")"#;
+        let report = unsafe { compile_report(main) };
+        assert_eq!(report["elements"].as_array().unwrap().len(), 0);
+        let errors = report["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 2);
+        let placed = errors.iter().find(|e| e["message"] == "incompatible units").unwrap();
+        assert_eq!(placed["path"], "main.typ");
+        assert_eq!(placed["text"], "$1 V + 2 s =$");
+        assert_eq!(placed["start"], main[..main.rfind("$1 V").unwrap()].encode_utf16().count());
+        let context = serde_json::json!({"path": "main.typ", "main": true, "report": report.to_string()}).to_string();
+        let problems: serde_json::Value = serde_json::from_str(&crate::solveng::call("diagnostics", main, &context, 0)).unwrap();
+        let problems = problems.as_array().unwrap();
+        assert_eq!(problems.len(), 2);
+        assert!(problems.iter().all(|p| p["severity"] == "error"));
+        let edited = main.replace("$1 V + 2 s =$", "$1 V + 2 V =$");
+        let problems: serde_json::Value = serde_json::from_str(&crate::solveng::call("diagnostics", &edited, &context, 0)).unwrap();
+        assert_eq!(problems.as_array().unwrap().len(), 1);
     }
 
     #[test]
