@@ -456,26 +456,12 @@ final class EditorTests: XCTestCase {
         func color(_ storage: NSTextStorage, _ needle: String) -> NSColor? {
             storage.attribute(.foregroundColor, at: (storage.string as NSString).range(of: needle).location, effectiveRange: nil) as? NSColor
         }
-        let tagged = NSTextStorage(string: "```solveng\nI := 30 mA // load\n```\nPlain `U = 5 V`\n")
-        Highlighter.apply(to: tagged, font: font)
-        XCTAssertEqual(color(tagged, "30"), Highlighter.numberColor)
-        XCTAssertEqual(color(tagged, "mA"), Highlighter.unitColor)
-        XCTAssertEqual(color(tagged, "// load"), Highlighter.commentColor)
-        // Inline code is never solveng.
-        XCTAssertEqual(color(tagged, "5 V"), Highlighter.stringColor)
-
         // By default math in a worksheet is coloured like solveng code.
         let math = NSTextStorage(string: "#import units: mA\n#show: worksheet\n$I := 30 mA$\n")
         Highlighter.apply(to: math, font: font)
         XCTAssertEqual(color(math, "30"), Highlighter.numberColor)
         XCTAssertEqual(color(math, "mA$"), Highlighter.unitColor)
         XCTAssertEqual(color(math, "I :="), Highlighter.paramColor)
-
-        // The strings of solveng's calls are calculations too.
-        let call = NSTextStorage(string: "#worksheet(\"t := Q0 / I = [h]\")\n")
-        Highlighter.apply(to: call, font: font)
-        XCTAssertEqual(color(call, "Q0"), Highlighter.paramColor)
-        XCTAssertEqual(color(call, "h]"), Highlighter.unitColor)
     }
 
     func testArithmeticOperatorsUseTextColor() {
@@ -493,10 +479,9 @@ final class EditorTests: XCTestCase {
 
     func testSolvengFunctionStyles() {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        for body in ["$f(x) := sin(x) + cos(x)$ $y := f(tri(1)) + rect(2)$",
-                     "```solveng\nf(x) := sin(x) + cos(x)\ny := f(tri(1)) + rect(2)\n```"] {
+        for body in ["$f(x) := sin(x) + cos(x)$ $y := f(tri(1)) + rect(2)$"] {
             // solveng's own operations are Typst names in math only where imported
-            let storage = NSTextStorage(string: "#import functions: tri, rect\n#show: worksheet\n" + body)
+            let storage = NSTextStorage(string: "#import operations: tri, rect\n#show: worksheet\n" + body)
             Highlighter.apply(to: storage, font: font)
             let source = storage.string as NSString
             for (needle, color) in [("f(x) :=", Highlighter.functionColor), ("f(tri", NSColor.textColor),
@@ -517,18 +502,6 @@ final class EditorTests: XCTestCase {
         }
     }
 
-    func testUnitVisibilityAndTypstBindings() {
-        let source = "#show: worksheet.with(units: (s: none, to: \"10km\"))\n#let to = unit(\"m\")\n$x := 2s$ $y := 2\"ms\"$ $z := 23to$"
-        let storage = NSTextStorage(string: source)
-        Highlighter.apply(to: storage, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
-        for (needle, color) in [("s$", Highlighter.paramColor), ("ms\"$", Highlighter.unitColor), ("to$", Highlighter.unitColor)] {
-            let at = (source as NSString).range(of: needle).location
-            XCTAssertEqual(storage.attribute(.foregroundColor, at: at, effectiveRange: nil) as? NSColor, color)
-        }
-        let offset = (source as NSString).range(of: "to$").location
-        XCTAssertNil(SolvengSupport.renameTarget(source, context: "", offset: offset))
-    }
-
     func testShorthandCompletionImportsAlong() throws {
         let source = "#import \"@preview/solveng:1.0.0\": *\n#show: worksheet\n$x := 1 $"
         let offset = (source as NSString).length - 1
@@ -537,21 +510,21 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(item.insert, "mA")
         let edits = (item.edits ?? []).map(\.textEdit)
         XCTAssertEqual(TextEdit.apply(edits, to: source), "#import \"@preview/solveng:1.0.0\": *\n#import units: mA\n#show: worksheet\n$x := 1 $")
-        // single letters stay quoted
-        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "\"s\"")
+        // single letters complete as shortcuts
+        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "#s")
     }
 
     func testExplicitUnitBindingHashAndCompletion() throws {
-        let source = "#show: worksheet.with(builtin-units: false, units: (s: auto))\n#let s = unit(\"s\")\n$x := 34#s$"
+        let source = "#let s = base-unit(\"time\")\n#show: worksheet\n$x := 34#s$"
         let storage = NSTextStorage(string: source)
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         Highlighter.apply(to: storage, font: font)
         let hash = (source as NSString).range(of: "#s$").location
         XCTAssertEqual(storage.attribute(.foregroundColor, at: hash, effectiveRange: nil) as? NSColor, Highlighter.commentColor)
         let completion = try XCTUnwrap(SolvengSupport.complete(source, context: "", offset: hash + 2))
-        XCTAssertEqual(completion.from, hash)
-        // single letters complete quoted, replacing the hash
-        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "\"s\"")
+        // after a # the hash stays
+        XCTAssertEqual(completion.from, hash + 1)
+        XCTAssertEqual(completion.items.first { $0.label == "s" }?.insert, "s")
         let bare = source.replacingOccurrences(of: "34#s", with: "34s")
         let offset = (bare as NSString).range(of: "s$").location
         let fix = try XCTUnwrap(SolvengSupport.unitFixes(bare, context: "", offset: offset).first { $0.text == "#" })
@@ -560,19 +533,10 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(fix.text, "#")
     }
 
-    func testGreekUnitConcealsInNamesAndConstructorStrings() {
-        let source = "#show: worksheet.with(units: (alpha: \"m\"))\n#let α = unit(\"alpha\")\n$x := 34\"alpha\"$"
-        let conceals = Highlighter.conceals(in: source)
-        for needle in ["alpha\")", "alpha\"$"] {
-            let at = (source as NSString).range(of: needle).location
-            XCTAssertTrue(conceals.contains { $0.range == NSRange(location: at, length: 5) && $0.replacement == 0x03B1 })
-        }
-    }
-
     func testSolvengResultsAreBold() {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         // The = and -> that show a result stand out as in Mathcad; = in a definition or a step doesn't.
-        let storage = NSTextStorage(string: "#import modifiers: solve\n#show: worksheet\n$t := Q_0/I = 1 \"h\"$ $V := 2 \"A\" = 2000 \"mA\"$ $x^2 = 4 -> solve(x)$\n")
+        let storage = NSTextStorage(string: "#import units: h, A, mA\n#import modifiers: solve\n#show: worksheet\n$t := Q_0/I = 1 #h$ $V := 2 #A = 2000 mA$ $x^2 = 4 -> solve(x)$\n")
         Highlighter.apply(to: storage, font: font)
         let s = storage.string as NSString
         func isBold(_ needle: String, from: String) -> Bool {
@@ -580,9 +544,9 @@ final class EditorTests: XCTestCase {
             let font = storage.attribute(.font, at: at, effectiveRange: nil) as? NSFont
             return font?.fontDescriptor.symbolicTraits.contains(.bold) == true
         }
-        XCTAssertTrue(isBold("= 1 \"h\"", from: "= 1 \"h\"$"))
+        XCTAssertTrue(isBold("= 1 #h", from: "= 1 #h$"))
         XCTAssertTrue(isBold("->", from: "-> solve"))
-        XCTAssertEqual(storage.attribute(.strokeWidth, at: s.range(of: "= 1 \"h\"$").location, effectiveRange: nil) as? Int, -3)
+        XCTAssertEqual(storage.attribute(.strokeWidth, at: s.range(of: "= 1 #h$").location, effectiveRange: nil) as? Int, -3)
         XCTAssertNil(storage.attribute(.strokeWidth, at: s.range(of: "= 2000").location, effectiveRange: nil))
         XCTAssertFalse(isBold("=", from: "= 2000"))
         XCTAssertTrue(isBold(":=", from: ":= Q_0"))
@@ -610,15 +574,5 @@ final class EditorTests: XCTestCase {
         let s = chapter.string as NSString
         XCTAssertEqual(chapter.attribute(.foregroundColor, at: s.range(of: "5").location, effectiveRange: nil) as? NSColor,
                        Highlighter.numberColor)
-    }
-
-    func testConcealsSolvengCode() {
-        // DeltaT is a name of its own; Delta_T is the letter with an index
-        // A prefix goes with Omega glued, k""Omega, whose empty string hides
-        let text = "```solveng\nDelta_T := 2 k\"\"Omega -> mA\nDeltaT := 1\n```\n$Omega$"
-        let shown = Highlighter.conceals(in: text)
-        let s = text as NSString
-        XCTAssertEqual(shown.map { s.substring(with: $0.range) }, ["Delta", "\"", "\"", "Omega", "Omega"])
-        XCTAssertEqual(shown.map { Character(UnicodeScalar($0.replacement)!) }, ["Δ", "\0", "\0", "Ω", "Ω"])
     }
 }

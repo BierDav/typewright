@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn completes_and_documents_new_calculation_builtins() {
         for name in ["sum", "det", "tr", "integrate"] {
-            let doc = format!("#import functions: *\n#value(${name}$)");
+            let doc = format!("#import operations: *\n#value(${name}$)");
             let at = doc.find(name).unwrap() as u32;
             let result: Value = serde_json::from_str(&call("complete", &doc, "", at + name.len() as u32)).unwrap();
             let item = result["items"].as_array().unwrap().iter().find(|i| i["label"] == name).unwrap();

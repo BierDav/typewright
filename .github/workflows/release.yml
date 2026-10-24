@@ -20,11 +20,14 @@ concurrency: release
 
 jobs:
   release:
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Same Xcode as local development, so CI compiles what we compile.
+      - name: Select Xcode 27.1
+        run: sudo xcode-select -s /Applications/Xcode_27.1.app
       - name: Update solveng to its latest main
         run: scripts/update-solveng.sh
       - name: Calculate version

@@ -99,7 +99,7 @@ final class RenameTests: XCTestCase {
     }
 
     func testSolvengPreviewFormatsEverySpellingAndCancelRestoresThem() async {
-        let original = "#show: worksheet\n$\"Delta2tau\" := 3$\n```solveng\nx := Δ2τ\n```\n#graph(\"Delta2tau * x\")"
+        let original = "#show: worksheet\n$\"Delta2tau\" := 3$\n#graph($\"Delta2tau\" x$)"
         let (tv, c, language) = setUp(original)
         language.source = { [weak tv] in tv?.string ?? "" }
         var published: [String] = []
@@ -108,7 +108,7 @@ final class RenameTests: XCTestCase {
         c.startRename()
         await settle()
         tv.insertText("2x", replacementRange: tv.selectedRange())
-        let expected = "#show: worksheet\n$2\"\"x := 3$\n```solveng\nx := 2\"\"x\n```\n#graph(\"2\\\"\\\"x * x\")"
+        let expected = "#show: worksheet\n$2\"\"x := 3$\n#graph($2\"\"x x$)"
         XCTAssertEqual(tv.string, expected)
         XCTAssertEqual(published, [expected], "publish the fully formatted preview once")
         tv.insertText("y", replacementRange: tv.selectedRange())
@@ -118,22 +118,22 @@ final class RenameTests: XCTestCase {
         XCTAssertEqual(published.last, original)
     }
 
-    func testSolvengPreviewSupportsUndoRedoAndCommitInEscapedStrings() async {
-        let original = "#show: worksheet\n$\"foo\" := 3$\n#graph(\"foo * x\")"
+    func testSolvengPreviewSupportsUndoRedoAndCommit() async {
+        let original = "#show: worksheet\n$\"foo\" := 3$\n#graph($\"foo\" x$)"
         let (tv, c, language) = setUp(original)
         language.source = { [weak tv] in tv?.string ?? "" }
-        tv.setSelectedRange(NSRange(location: (original as NSString).range(of: "foo *").location, length: 0))
+        tv.setSelectedRange(NSRange(location: (original as NSString).range(of: "foo\" x").location, length: 0))
         c.startRename()
         await settle()
         tv.insertText("2x", replacementRange: tv.selectedRange())
-        let expected = "#show: worksheet\n$2\"\"x := 3$\n#graph(\"2\\\"\\\"x * x\")"
+        let expected = "#show: worksheet\n$2\"\"x := 3$\n#graph($2\"\"x x$)"
         XCTAssertEqual(tv.string, expected)
         XCTAssertTrue(c.undoRename())
         XCTAssertEqual(tv.string, original)
         XCTAssertTrue(c.redoRename())
         XCTAssertEqual(tv.string, expected)
         tv.insertText("y", replacementRange: tv.selectedRange())
-        let continued = "#show: worksheet\n$2\"\"\"xy\" := 3$\n#graph(\"2\\\"\\\"xy * x\")"
+        let continued = "#show: worksheet\n$2\"\"\"xy\" := 3$\n#graph($2\"\"\"xy\" x$)"
         XCTAssertEqual(tv.string, continued)
         c.commitRename()
         await settle()
@@ -141,11 +141,11 @@ final class RenameTests: XCTestCase {
     }
 
     func testInvalidSolvengRenameFailsWithoutChangingTheDocument() async {
-        let original = "#show: worksheet\n$\"foo\" := 3$\n#graph(\"foo * x\")"
+        let original = "#show: worksheet\n$\"foo\" := 3$\n#graph($\"foo\" x$)"
         for invalid in ["^", "a+b", "2 bad-name", "a\\b"] {
             let (tv, c, language) = setUp(original)
             language.source = { [weak tv] in tv?.string ?? "" }
-            tv.setSelectedRange(NSRange(location: (original as NSString).range(of: "foo *").location, length: 0))
+            tv.setSelectedRange(NSRange(location: (original as NSString).range(of: "foo\" x").location, length: 0))
             c.startRename()
             await settle()
             tv.insertText(invalid, replacementRange: tv.selectedRange())

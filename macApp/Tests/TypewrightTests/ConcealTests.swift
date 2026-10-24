@@ -5,7 +5,7 @@ import XCTest
 @MainActor
 final class ConcealTests: XCTestCase {
     func testConstructorDisplayStaysCollapsedWhileTypingWithAStaleReport() async throws {
-        let equation = "$y := op(\"tri\")(x) + 1unit(\"km\") $"
+        let equation = "$y := op(\"tri\")(x) + 1 $"
         let prefix = "#show: worksheet\n"
         let report: [String: Any] = ["blocks": 1, "elements": [[
             "path": "main.typ", "start": prefix.utf16.count, "end": prefix.utf16.count + equation.utf16.count,
@@ -21,7 +21,6 @@ final class ConcealTests: XCTestCase {
         tv.concealsMath = true
         func check() {
             let expected = tv.string.replacingOccurrences(of: "op(\"tri\")", with: "tri")
-                .replacingOccurrences(of: "unit(\"km\")", with: "km")
                 .replacingOccurrences(of: "\n", with: "?")
             XCTAssertEqual(shown(tv), expected)
         }
@@ -205,7 +204,7 @@ final class ConcealTests: XCTestCase {
     }
 
     func testInlineConstructorsRevealAsAWhole() {
-        for constructor in ["unit(\"km\")", "unit(\"Omega\")", "op(\"tri\")"] {
+        for constructor in ["op(\"tri\")", "op(\"rect\")"] {
             let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
             tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
             tv.string = "#show: worksheet\n$y := 1" + constructor + "$"
@@ -213,7 +212,6 @@ final class ConcealTests: XCTestCase {
             tv.concealsMath = true
             let range = (tv.string as NSString).range(of: constructor)
             let collapsed = shown(tv)
-            XCTAssertFalse(collapsed.contains("unit("))
             XCTAssertFalse(collapsed.contains("op("))
             for offset in range.location...NSMaxRange(range) {
                 tv.setSelectedRange(NSRange(location: offset, length: 0))
@@ -704,31 +702,6 @@ final class ConcealTests: XCTestCase {
         }
     }
 
-    func testColumnDragExpandsSolvengNames() {
-        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
-        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        tv.string = "```solveng\nDelta_T := 2\nDelta_T := 3\n```"
-        tv.setSelectedRange(NSRange(location: 0, length: 0))
-        tv.concealsMath = true
-        let lm = tv.layoutManager!, container = tv.textContainer!
-        lm.ensureLayout(for: container)
-        // `shown` draws line breaks as `?` too.
-        let drawn = "```solveng??_T := 2??_T := 3?```"
-        XCTAssertEqual(shown(tv), drawn)
-        func box(_ index: Int) -> NSRect {
-            lm.boundingRect(forGlyphRange: NSRange(location: index, length: 1), in: container)
-        }
-        // From the start of Delta on the first line to after it on the second.
-        let start = NSPoint(x: box(11).minX + tv.textContainerOrigin.x, y: box(11).midY + tv.textContainerOrigin.y)
-        let end = NSPoint(x: box(29).minX + tv.textContainerOrigin.x, y: box(29).midY + tv.textContainerOrigin.y)
-        let found = tv.columnCarets(from: start, to: end)
-        tv.setColumns(found.carets, primary: found.primary)
-        XCTAssertEqual(tv.columnCarets.map(\.range), [NSRange(location: 11, length: 5), NSRange(location: 24, length: 5)],
-                       "the drag covers both names")
-        XCTAssertEqual(shown(tv), "```solveng?Delta_T := 2?Delta_T := 3?```",
-                       "the names uncollapse while the drag is still going")
-    }
-
     func testColumnSelectsIntoAPieceAndUncollapsesIt() {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -831,12 +804,6 @@ final class AutoCloseTests: XCTestCase {
     }
 
     func testQuotesPairAfterLettersWhereTheyGlueNames() {
-        let block = "```solveng\nt\n```"
-        let code = editor(block, caret: 12)
-        type(code, "\"")
-        XCTAssertEqual(code.string, "```solveng\nt\"\"\n```")
-        type(code, "\"tau")
-        XCTAssertEqual(code.string, "```solveng\nt\"\"tau\n```", "the second quote steps over")
         let math = editor("$Delta$", caret: 6)
         type(math, "\"\"")
         XCTAssertEqual(math.string, "$Delta\"\"$")

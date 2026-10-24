@@ -68,7 +68,7 @@ final class CommitScheduler {
         guard watcher == nil, repo.isOpen else { return }
         SpaceFolders.prepareRepository(repo.root)
         // FSEvents reports real paths (`/private/tmp/…`), which `resolvingSymlinksInPath` would turn back into `/tmp/…`.
-        let root = realpath(repo.root.path, nil).map { defer { free($0) }; return String(cString: $0) } ?? repo.root.path
+        let root = realpath(repo.root.path, nil).map { path in defer { free(path) }; return String(cString: path) } ?? repo.root.path
         watcher = FolderWatcher(repo.root) { [weak self] paths in
             guard paths.contains(where: { CommitTiming.counts($0, root: root) }) else { return }
             self?.noteChange()

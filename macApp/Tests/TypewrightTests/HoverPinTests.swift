@@ -45,7 +45,7 @@ final class HoverPinTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
         let tv = TypstTextView(frame: window.contentView!.bounds)
         window.contentView!.addSubview(tv)
-        let document = "#show: worksheet\n$1e^10$"
+        let document = "#import constants: e\n#show: worksheet\n$1#e^10$"
         tv.string = document
         let at = (document as NSString).range(of: "e^").location
         let hover = HoverController(textView: tv)
@@ -58,7 +58,7 @@ final class HoverPinTests: XCTestCase {
             hover.toggleAtCaret()
             await shown(hover)
             let content = try XCTUnwrap(window.childWindows?.last?.contentView as? PopupHostingView<HoverContent>)
-            XCTAssertTrue(content.rootView.markdown?.contains("Euler") == true)
+            XCTAssertTrue(content.rootView.markdown?.contains("euler") == true)
             XCTAssertTrue(content.rootView.errors.isEmpty)
             hover.hide()
         }
@@ -68,7 +68,7 @@ final class HoverPinTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
         let tv = TypstTextView(frame: window.contentView!.bounds)
         window.contentView!.addSubview(tv)
-        let document = "#show: worksheet\n$1e-10 + pi + e$"
+        let document = "#import constants: e, pi\n#show: worksheet\n$1#e - 10 + pi + #e$"
         tv.string = document
         let hover = HoverController(textView: tv)
         hover.provider = { offset in
@@ -81,7 +81,7 @@ final class HoverPinTests: XCTestCase {
             for _ in 0..<100 where hover.isPinned { try? await Task.sleep(for: .milliseconds(10)) }
             XCTAssertFalse(hover.isShown, "caret \(caret)")
         }
-        // Between the minus and the exponent: e is across the operator.
+        // After the minus: e is across it.
         let minus = (document as NSString).range(of: "-").location
         await noDocs(at: minus + 1)
         // After the space: pi is across it.
@@ -92,7 +92,7 @@ final class HoverPinTests: XCTestCase {
         hover.toggleAtCaret()
         await shown(hover)
         let content = try XCTUnwrap(window.childWindows?.last?.contentView as? PopupHostingView<HoverContent>)
-        XCTAssertTrue(content.rootView.markdown?.contains("3,14159") == true)
+        XCTAssertTrue(content.rootView.markdown?.contains("`pi`") == true)
         hover.hide()
     }
 
@@ -100,24 +100,24 @@ final class HoverPinTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
         let tv = TypstTextView(frame: window.contentView!.bounds)
         window.contentView!.addSubview(tv)
-        let document = "#show: worksheet\n$1e-10$"
+        let document = "#import constants: e\n#show: worksheet\n$1#e - 10$"
         tv.string = document
         let hover = HoverController(textView: tv)
         hover.provider = { offset in
             guard let docs = SolvengSupport.hover(document, context: "", offset: offset) else { return nil }
             return (docs.markdown, NSRange(location: docs.start, length: docs.end - docs.start))
         }
-        // On the minus sign: e is next to it, but not under the pointer.
+        // On the minus sign: e is near it, but not under the pointer.
         let minus = (document as NSString).range(of: "-").location
         hover.pointerMoved(to: try point(at: minus, in: tv))
         try? await Task.sleep(for: .milliseconds(650))
         XCTAssertFalse(hover.isShown)
         // On e, where the pointer is.
-        let e = (document as NSString).range(of: "1e-").location + 1
+        let e = (document as NSString).range(of: "1#e").location + 2
         hover.pointerMoved(to: try point(at: e, in: tv))
         await shown(hover)
         let content = try XCTUnwrap(window.childWindows?.last?.contentView as? PopupHostingView<HoverContent>)
-        XCTAssertTrue(content.rootView.markdown?.contains("Euler") == true)
+        XCTAssertTrue(content.rootView.markdown?.contains("euler") == true)
         hover.hide()
     }
 
