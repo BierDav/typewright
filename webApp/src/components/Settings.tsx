@@ -9,6 +9,7 @@ import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
 import { pickFiles } from "~/lib/drop";
+import { cloneFromGitHub } from "~/lib/packages";
 import { Download, KeyRound, Link, MonitorSmartphone, Package, Pencil, Settings as Gear, Trash2, Type, Users, X } from "./icons";
 
 const TABS: { id: SettingsTab; label: string; icon: () => JSX.Element }[] = [
@@ -364,9 +365,31 @@ function Packages() {
     }
   }
 
+  const [cloning, setCloning] = createSignal(false);
+  const [cloneMessage, setCloneMessage] = createSignal<string | null>(null);
+
+  async function clone() {
+    const repository = (await prompt("Clone from GitHub", "", "Next", "A package repository with a typst.toml, or one of name/version folders.", "owner/repo or a GitHub link"))?.trim();
+    if (!repository) return;
+    const namespace = (await prompt("Clone from GitHub", "local", "Clone", "The namespace documents import it from, as in @local/name:1.0.0."))?.trim();
+    if (!namespace) return;
+    setCloning(true);
+    setCloneMessage("Cloning…");
+    try {
+      setCloneMessage(`Added ${await cloneFromGitHub(repository, namespace)}.`);
+      void refetch();
+      await compiler.retryPackages();
+      workspace()?.scheduleCompile(0);
+    } catch (err) {
+      setCloneMessage((err as Error).message);
+    } finally {
+      setCloning(false);
+    }
+  }
+
   return (
     <>
-      <Section title="Installed" footer="Other namespaces, like @local, come from folders you add here; each holds name/version folders.">
+      <Section title="Installed" footer="Other namespaces, like @local, come from folders you add or repositories you clone from GitHub; each holds name/version folders.">
         <For each={installed()} fallback={<div class="form-row secondary">No packages yet.</div>}>
           {(item) => (
             <div class="form-row">
@@ -378,7 +401,7 @@ function Packages() {
           )}
         </For>
         <div class="form-row">
-          <span />
+          <span class="form-label" />
           <button
             class="button small"
             onClick={async () => {
@@ -396,7 +419,13 @@ function Packages() {
           >
             Add Local Packages…
           </button>
+          <button class="button small" disabled={cloning()} onClick={() => void clone()}>
+            Clone from GitHub…
+          </button>
         </div>
+        <Show when={cloneMessage()}>
+          <div class="form-row secondary">{cloneMessage()}</div>
+        </Show>
       </Section>
       <Section title="Typst Universe" footer={`Downloaded automatically when a document imports "@preview/…", and kept in this browser. Download one ahead of time, e.g. to work offline. Typst ${compiler.version || "built in"}.`}>
         <div class="form-row">

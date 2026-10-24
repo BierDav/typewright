@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 /// A package's name and version from its `typst.toml`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
 pub struct PackageManifest {
     pub name: String,
     pub version: String,
@@ -59,6 +60,29 @@ pub fn package_clone_url(input: &str) -> Option<String> {
         return Some(format!("https://github.com/{}/{repo}.git", &m[1]));
     }
     (text.starts_with("git@") || URL_SCHEME.is_match(text)).then(|| text.to_string())
+}
+
+/// `owner/repo` when `input` names a GitHub repository, for downloads without git (the web app).
+pub fn package_github_repo(input: &str) -> Option<String> {
+    let url = package_clone_url(input)?;
+    let path = url.strip_prefix("https://github.com/")?.strip_suffix(".git")?;
+    Some(path.to_string())
+}
+
+/// The `<name>/<version>` folders among a repository's file paths that hold a package (`typst.toml` inside),
+/// for repositories that are a whole namespace.
+pub fn namespace_packages(paths: &[String]) -> Vec<String> {
+    let mut found: Vec<String> = paths
+        .iter()
+        .filter_map(|path| {
+            let mut parts = path.split('/');
+            let (name, version, file) = (parts.next()?, parts.next()?, parts.next()?);
+            (file == "typst.toml" && parts.next().is_none() && NAME.is_match(name) && VERSION.is_match(version))
+                .then(|| format!("{name}/{version}"))
+        })
+        .collect();
+    found.sort();
+    found
 }
 
 /// The repository's name from its clone URL, e.g. for a namespace made of the whole repository.
@@ -232,6 +256,16 @@ mod tests {
         assert_eq!(Some("git@gitlab.com:a/b.git".into()), package_clone_url("git@gitlab.com:a/b.git"));
         assert_eq!(None, package_clone_url("not a repo"));
         assert_eq!("b", package_repo_name("git@gitlab.com:a/b.git"));
+    }
+
+    #[test]
+    fn finds_github_repositories_and_namespace_packages() {
+        assert_eq!(Some("a/b".into()), package_github_repo("https://github.com/a/b/tree/main"));
+        assert_eq!(Some("typst/templates".into()), package_github_repo("typst/templates"));
+        assert_eq!(None, package_github_repo("git@gitlab.com:a/b.git"));
+        let paths = ["README.md", "lib/1.0.0/typst.toml", "lib/1.0.0/lib.typ", "lib/0.9.0/typst.toml", "x/typst.toml", "y/1.0/typst.toml"];
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        assert_eq!(namespace_packages(&paths), ["lib/0.9.0", "lib/1.0.0"]);
     }
 
     #[test]

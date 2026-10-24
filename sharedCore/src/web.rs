@@ -122,3 +122,21 @@ pub fn share_status(head: Option<String>, peers: Vec<Ts<PeerHead>>, others: u32,
     let peers = peers.iter().map(Ts::to_rust).collect::<Result<Vec<_>, _>>()?;
     Ok(Ts::from_rust(&crate::shares::share_status(head, peers, others, conflicted, working))?)
 }
+
+/// `owner/repo` when the input names a GitHub repository.
+#[wasm_bindgen(js_name = packageGithubRepo)]
+pub fn package_github_repo(input: &str) -> Option<String> {
+    crate::packages::package_github_repo(input)
+}
+
+/// The `<name>/<version>` package folders of a repository that is a whole namespace.
+#[wasm_bindgen(js_name = namespacePackages)]
+pub fn namespace_packages(paths: Vec<String>) -> Vec<String> {
+    crate::packages::namespace_packages(&paths)
+}
+
+/// Name and version of a `typst.toml`'s `[package]` table.
+#[wasm_bindgen(js_name = packageManifest)]
+pub fn package_manifest(toml: &str) -> Js<Option<Ts<crate::packages::PackageManifest>>> {
+    Ok(crate::packages::package_manifest(toml).map(|m| m.into_ts()).transpose()?)
+}
