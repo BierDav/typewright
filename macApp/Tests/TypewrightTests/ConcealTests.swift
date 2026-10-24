@@ -796,6 +796,27 @@ final class AutoCloseTests: XCTestCase {
         XCTAssertEqual(tv.string, "#f(\"a\") ", "backspace takes the empty pair")
     }
 
+    func testClosingMathDoesNotInsertAnotherDollar() {
+        for source in ["$rect(t)", "$x + ", "$ x + 1 ", "$\n  x + 1\n", "😀 $rect(t)", "$x$ and $rect(t)"] {
+            let tv = editor(source, caret: (source as NSString).length)
+            type(tv, "$")
+            XCTAssertEqual(tv.string, source + "$", source)
+            XCTAssertEqual(tv.selectedRange().location, (source as NSString).length + 1)
+        }
+        let closed = editor("$rect(t)$", caret: 8)
+        type(closed, "$")
+        XCTAssertEqual(closed.string, "$rect(t)$")
+        XCTAssertEqual(closed.selectedRange().location, 9)
+    }
+
+    func testOpeningMathIgnoresDollarsInCommentsRawTextAndStrings() {
+        for source in ["", "$x$ ", "\\$ ", "// $\n", "`$` ", "#let x = \"$\"\n"] {
+            let tv = editor(source, caret: (source as NSString).length)
+            type(tv, "$")
+            XCTAssertEqual(tv.string, source + "$$", source)
+        }
+    }
+
     func testWrapsSelectionsAndLeavesWordsAlone() {
         let tv = editor("x word", caret: 2, length: 4)
         type(tv, "[")

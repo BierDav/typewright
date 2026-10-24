@@ -388,11 +388,15 @@ private struct PDFVersionView: NSViewRepresentable {
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.document = document
+        view.documentView?.enclosingScrollView?.scrollerStyle = .overlay
+        view.documentView?.enclosingScrollView?.autohidesScrollers = true
         return view
     }
 
     func updateNSView(_ view: PDFView, context: Context) {
         if view.document !== document { view.document = document }
+        view.documentView?.enclosingScrollView?.scrollerStyle = .overlay
+        view.documentView?.enclosingScrollView?.autohidesScrollers = true
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: PDFView, context: Context) -> CGSize? {

@@ -21,6 +21,27 @@ final class EditorTests: XCTestCase {
                        [NSRange(location: url.length - 1, length: 1), NSRange(location: url.length - 3, length: 1)])
     }
 
+    @MainActor func testWarningMarkerStaysOnItsLineWhileTypingBeforeIt() throws {
+        let view = TypstTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))
+        view.string = "= Aufgabe 1.1 (20 Punkte) <exercise>\nEin kausales LTI System antwortet auf ein Rechtecksignal $s(t) = rect(t) <here>$\n\n#grid()"
+        let coordinator = CodeEditor.Coordinator()
+        coordinator.textView = view
+        coordinator.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        view.delegate = coordinator
+        let markers = DiagnosticMarkers(textView: view)
+        coordinator.markers = markers
+        coordinator.diagnostics = [Diagnostic(path: "main.typ", line: 4, column: 2, severity: .warning,
+                                              message: "grid is not supported in HTML export", length: 4)]
+        let range = (view.string as NSString).range(of: "#grid()")
+        markers.diagnostics = [(range, try XCTUnwrap(coordinator.diagnostics.first))]
+        let index = (view.string as NSString).range(of: "<here>").location
+        for _ in 0..<5 {
+            view.insertText("a", replacementRange: NSRange(location: index, length: 0))
+            let warning = try XCTUnwrap(markers.diagnostics.first)
+            XCTAssertEqual((view.string as NSString).substring(with: warning.range), "#grid()")
+        }
+    }
+
     @MainActor func testDocumentEditingPerformance() throws {
         guard let path = ProcessInfo.processInfo.environment["TYPEWRIGHT_PERF_DOCUMENT"] else {
             throw XCTSkip("Set TYPEWRIGHT_PERF_DOCUMENT to profile a local document")

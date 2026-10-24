@@ -59,6 +59,58 @@ final class SpaceSwipeTests: XCTestCase {
         XCTAssertNil(swipe.handle(event))
     }
 
+    func testHiddenSidebarDoesNotCapturePDFScrollingAfterToggling() {
+        let (window, swipe, state) = setUpSwipe()
+        defer { window.close() }
+        state.sidebarVisible = false
+        state.sidebarVisible = true
+        state.sidebarVisible = false
+        XCTAssertFalse(state.floatingSidebar)
+        let event = ScrollEvent()
+        event.host = window
+        event.dx = 30
+        for phase in [NSEvent.Phase.began, .changed, .ended] {
+            event.scrollPhase = phase
+            XCTAssertTrue(swipe.handle(event) === event)
+            XCTAssertNil(state.swipe)
+            XCTAssertFalse(state.spacesOpen)
+        }
+        event.scrollPhase = []
+        event.momentum = .began
+        XCTAssertTrue(swipe.handle(event) === event)
+    }
+
+    func testHiddenSwipeViewDoesNotCaptureScrolling() {
+        let (window, swipe, state) = setUpSwipe()
+        defer { window.close() }
+        swipe.isHidden = true
+        let event = ScrollEvent()
+        event.host = window
+        event.dx = 30
+        event.scrollPhase = .began
+        XCTAssertTrue(swipe.handle(event) === event)
+        event.scrollPhase = .changed
+        XCTAssertTrue(swipe.handle(event) === event)
+        XCTAssertNil(state.swipe)
+    }
+
+    func testOpenSelectorCanStillBeDismissedWithSidebarHidden() {
+        let (window, swipe, state) = setUpSwipe()
+        defer { window.close() }
+        state.sidebarVisible = false
+        state.spacesOpen = true
+        let event = ScrollEvent()
+        event.host = window
+        event.dx = -30
+        event.scrollPhase = .began
+        XCTAssertNil(swipe.handle(event))
+        event.scrollPhase = .changed
+        XCTAssertNil(swipe.handle(event))
+        event.scrollPhase = .ended
+        XCTAssertNil(swipe.handle(event))
+        XCTAssertFalse(state.spacesOpen)
+    }
+
     func testVerticalGestureStillReachesTheFileTree() {
         let (window, swipe, state) = setUpSwipe()
         defer { window.close() }

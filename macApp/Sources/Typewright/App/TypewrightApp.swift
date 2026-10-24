@@ -60,8 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Pending edits reach disk and the history before quitting.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !Self.isTesting, SpaceRepository.shared.isOpen else { return .terminateNow }
-        Opener.shared.flushAllSaves()
+        guard !Self.isTesting else { return .terminateNow }
+        Opener.shared.prepareToQuit()
+        guard SpaceRepository.shared.isOpen else { return .terminateNow }
         Task { @MainActor in
             await CommitScheduler.shared.commitNow()
             sender.reply(toApplicationShouldTerminate: true)
@@ -70,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        Opener.shared.isTerminating = true
+        Opener.shared.prepareToQuit()
     }
 }
 

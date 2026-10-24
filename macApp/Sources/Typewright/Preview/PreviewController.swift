@@ -158,6 +158,8 @@ final class PreviewController {
         guard let scroll = view.documentView?.enclosingScrollView else { return }
         scroll.automaticallyAdjustsContentInsets = false
         scroll.drawsBackground = false
+        scroll.scrollerStyle = .overlay
+        scroll.autohidesScrollers = true
         // Light knobs vanish over white pages in dark mode.
         scroll.scrollerKnobStyle = .dark
         // PDFKit's clip is flipped, so `top` is the space under the glass bar; a bottom inset would
@@ -218,6 +220,8 @@ final class PreviewController {
         guard attempt < 2 else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, let page = self.view.document?.page(at: index) else { return }
+            // Overlay scrollers can change the available width after the first layout.
+            self.applyPan(pan)
             let bounds = page.bounds(for: self.view.displayBox)
             guard bounds.height > 0, let now = self.position() else { return }
             let target = Double(index) + (bounds.maxY - point.y) / bounds.height

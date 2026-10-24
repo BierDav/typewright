@@ -235,6 +235,9 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
             super.insertText(String(c) + inner + String(closer), replacementRange: selection)
             return setSelectedRange(NSRange(location: selection.location + 1, length: selection.length))
         }
+        if c == "$", Highlighter.closesMath(in: self.string, at: selection.location) {
+            return super.insertText(string, replacementRange: replacementRange)
+        }
         // Only before whitespace, a closer or punctuation, so typing in front of a word doesn't add a stray closer.
         let symmetric = c == closer
         let freeAfter = next.map { $0.isWhitespace || closers.contains($0) || ",;:.".contains($0) } ?? true
@@ -1891,10 +1894,7 @@ struct CodeEditor: NSViewRepresentable {
 
         if c.diagnostics != diagnostics {
             c.diagnostics = diagnostics
-            let marked = markDiagnostics(in: tv)
-            c.hover?.diagnostics = marked
-            c.markers?.diagnostics = marked
-            c.markers?.isHidden = marked.isEmpty
+            c.updateDiagnostics()
         }
         c.markers?.topInset = topInset
 
@@ -1908,29 +1908,6 @@ struct CodeEditor: NSViewRepresentable {
     // Fitting size follows the text; never let it set the column's min size.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 300, height: proposal.height ?? 300)
-    }
-
-    /// Tints and underlines diagnostic lines; returns each diagnostic with its line for hovering.
-    private func markDiagnostics(in tv: NSTextView) -> [(range: NSRange, diagnostic: Diagnostic)] {
-        guard let lm = tv.layoutManager else { return [] }
-        var marked: [(range: NSRange, diagnostic: Diagnostic)] = []
-        let s = tv.string as NSString
-        lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: s.length))
-        lm.removeTemporaryAttribute(.underlineStyle, forCharacterRange: NSRange(location: 0, length: s.length))
-        for d in diagnostics {
-            guard let range = Self.lineRange(d.line, in: s) else { continue }
-            let tint: NSColor = d.severity == .error ? .systemRed : .systemYellow
-            // Warnings only get their underline; errors tint the whole line.
-            if d.severity == .error {
-                lm.addTemporaryAttributes([.backgroundColor: tint.withAlphaComponent(0.12)], forCharacterRange: range)
-            }
-            let start = min(range.location + max(d.column - 1, 0), NSMaxRange(range))
-            let underline = NSRange(location: start, length: min(d.length ?? .max, NSMaxRange(range) - start))
-            lm.addTemporaryAttributes([.underlineStyle: NSUnderlineStyle.patternDot.rawValue | NSUnderlineStyle.single.rawValue,
-                                       .underlineColor: tint], forCharacterRange: underline)
-            marked.append((range, d))
-        }
-        return marked
     }
 
     static func lineRange(_ line: Int, in s: NSString) -> NSRange? {
@@ -2110,9 +2087,36 @@ struct CodeEditor: NSViewRepresentable {
             return false
         }
 
+        /// Keeps underlines, hover ranges and markers on the same diagnostic lines.
+        func updateDiagnostics() {
+            guard let tv = textView, let lm = tv.layoutManager else { return }
+            var marked: [(range: NSRange, diagnostic: Diagnostic)] = []
+            let s = tv.string as NSString
+            lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: s.length))
+            lm.removeTemporaryAttribute(.underlineStyle, forCharacterRange: NSRange(location: 0, length: s.length))
+            for d in diagnostics {
+                guard let range = CodeEditor.lineRange(d.line, in: s) else { continue }
+                let tint: NSColor = d.severity == .error ? .systemRed : .systemYellow
+                // Warnings only get their underline; errors tint the whole line.
+                if d.severity == .error {
+                    lm.addTemporaryAttributes([.backgroundColor: tint.withAlphaComponent(0.12)], forCharacterRange: range)
+                }
+                let start = min(range.location + max(d.column - 1, 0), NSMaxRange(range))
+                let underline = NSRange(location: start, length: min(d.length ?? .max, NSMaxRange(range) - start))
+                lm.addTemporaryAttributes([.underlineStyle: NSUnderlineStyle.patternDot.rawValue | NSUnderlineStyle.single.rawValue,
+                                           .underlineColor: tint], forCharacterRange: underline)
+                marked.append((range, d))
+            }
+            hover?.diagnostics = marked
+            markers?.diagnostics = marked
+            markers?.isHidden = marked.isEmpty
+        }
+
         func textDidChange(_ notification: Notification) {
             guard let tv = textView else { return }
             if let storage = tv.textStorage { style(storage) }
+            // Edits shift character offsets before the compiler supplies new diagnostics.
+            updateDiagnostics()
             // A change of the user's own ends a color session; the wheel's edits continue it.
             if !isApplyingColor { endColorEdit() }
             (tv as? TypstTextView)?.occurrences = []

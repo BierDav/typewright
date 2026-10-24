@@ -124,9 +124,14 @@ final class WindowState {
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let state: WindowState
+    var onClose: (() -> Void)?
 
-    init(space: URL?, copying source: WindowState? = nil, renameNewSpace: Bool = false) {
+    init(space: URL?, file: URL? = nil, copying source: WindowState? = nil,
+         restoring session: WindowSession? = nil, renameNewSpace: Bool = false) {
         state = WindowState(space: space, copying: source)
+        state.pendingFile = file ?? session?.file
+        if let saved = session?.workspace { state.pendingSession = WorkspaceSession(state: saved, buffers: [:]) }
+        if let visible = session?.sidebarVisible { state.sidebarVisible = visible }
         state.renameNewSpace = renameNewSpace
         let host = NSHostingController(rootView: MainWindow(state: state))
         host.sceneBridgingOptions = .all
@@ -146,7 +151,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func windowWillClose(_ notification: Notification) {
-        Opener.shared.closed(self)
+        onClose?()
     }
 
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { state.undoManager }

@@ -791,6 +791,13 @@ struct SpaceSwipe: NSViewRepresentable {
         func handle(_ event: NSEvent) -> NSEvent? {
             guard let state, event.window === window, event.hasPreciseScrollingDeltas, state.space != nil,
                   state.overlay == nil || tracking == true else { return event }
+            guard state.spacesOpen || (state.sidebarVisible && !isHiddenOrHasHiddenAncestor) else {
+                if tracking == true { state.swipe = nil }
+                tracking = nil
+                horizontal = false
+                swallowMomentum = false
+                return event
+            }
             // The flick's momentum would otherwise scroll whatever is under the pointer.
             if event.momentumPhase != [] {
                 let swallow = swallowMomentum

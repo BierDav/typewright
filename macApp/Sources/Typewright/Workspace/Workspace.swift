@@ -107,6 +107,7 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored let markdownPreview = HTMLPreviewController(markdown: true)
     /// Shows a selected PDF file instead of the compiled document.
     @ObservationIgnored let filePreview = PreviewController()
+    @ObservationIgnored private var filePreviewData: Data?
     /// Shows a selected image file.
     @ObservationIgnored let imagePreview = ImagePreviewController()
     /// Shares the shown file with the account's other devices while they have it open too.
@@ -404,10 +405,12 @@ final class Workspace: EditorLanguage {
         } else {
             text = ""
         }
+        filePreviewData = nil
         if kind == .pdf {
             // Each PDF reopens where it was left; new ones start at the top.
             filePreview.pendingRestore = previewStates[url] ?? PreviewState()
-            filePreview.show(PDFDocument(url: url), keepingPosition: false)
+            filePreviewData = try? Data(contentsOf: url)
+            filePreview.show(filePreviewData.flatMap { PDFDocument(data: $0) }, keepingPosition: false)
         }
         if kind == .image { imagePreview.show(url) }
         if kind == .typst { languageClient()?.open(url, text: text) }
@@ -671,7 +674,12 @@ final class Workspace: EditorLanguage {
             live.textDidChange()
         }
         if let selected = selectedFile, selectedKind == .pdf {
-            filePreview.show(PDFDocument(url: selected))
+            let data = try? Data(contentsOf: selected)
+            // Library events cover unrelated files and windows too.
+            if data != filePreviewData {
+                filePreviewData = data
+                filePreview.show(data.flatMap { PDFDocument(data: $0) })
+            }
         }
         // Quick Look caches the document; a new revision makes a fresh preview.
         if selectedKind == .document { revision += 1 }

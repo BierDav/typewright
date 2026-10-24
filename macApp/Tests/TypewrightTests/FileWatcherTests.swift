@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import PDFKit
 @testable import Typewright
 
 @MainActor
@@ -105,6 +106,41 @@ final class FileWatcherTests: XCTestCase {
         state.workspace?.flushSaves()
         XCTAssertFalse(fm.fileExists(atPath: old.path))
         XCTAssertEqual(try String(contentsOf: renamed.appendingPathComponent("main.typ"), encoding: .utf8), "= Unsaved")
+    }
+
+    func testUnrelatedEditsKeepPDFDocumentUntilItsContentsChange() async throws {
+        let ws = try XCTUnwrap(workspace)
+        let file = root.appendingPathComponent("preview.pdf")
+        func writePDF(_ text: String) throws {
+            let document = PDFDocument()
+            let image = NSImage(size: NSSize(width: 200, height: 200), flipped: false) { _ in
+                (text as NSString).draw(at: NSPoint(x: 20, y: 20), withAttributes: [.font: NSFont.systemFont(ofSize: 14)])
+                return true
+            }
+            document.insert(try XCTUnwrap(PDFPage(image: image)), at: 0)
+            XCTAssertTrue(document.write(to: file))
+        }
+        try writePDF("Before")
+        let originalData = try Data(contentsOf: file)
+        ws.select(file)
+        let original = try XCTUnwrap(ws.filePreview.view.document)
+        let other = Workspace(url: root.appendingPathComponent("main.typ"))
+        defer { other.close() }
+        other.textDidChange("= An unrelated edit", live: false)
+        other.flushSaves()
+        await LibraryWatcher.shared.refreshNow()
+        XCTAssertTrue(ws.filePreview.view.document === original)
+        ws.refreshFromDisk()
+        XCTAssertTrue(ws.filePreview.view.document === original)
+        try originalData.write(to: file, options: .atomic)
+        ws.refreshFromDisk()
+        XCTAssertTrue(ws.filePreview.view.document === original)
+        try writePDF("After")
+        ws.refreshFromDisk()
+        let changed = try XCTUnwrap(ws.filePreview.view.document)
+        XCTAssertFalse(changed === original)
+        ws.refreshFromDisk()
+        XCTAssertTrue(ws.filePreview.view.document === changed)
     }
 
     func testRefreshPreservesUnsavedEditsInOtherWindows() async throws {

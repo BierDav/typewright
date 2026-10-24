@@ -121,6 +121,15 @@ enum Highlighter {
         return (remaining + replacements).sorted { $0.range.location < $1.range.location }
     }
 
+    static func closesMath(in text: String, at location: Int) -> Bool {
+        // The typed delimiter lets the parser recognize an unfinished equation.
+        let source = NSMutableString(string: text)
+        source.insert("$", at: location)
+        let delimiters = runs(in: source as String).filter { $0.tag == .mathDelimiter && $0.range.location < location }
+        let count = delimiters.reduce(0) { $0 + min($1.range.length, location - $1.range.location) }
+        return count % 2 == 1
+    }
+
     /// Whether a quote continues a joined math name.
     static func gluesNames(in text: String, at location: Int) -> Bool {
         guard location > 0 else { return false }

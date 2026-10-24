@@ -8,6 +8,12 @@ final class Opener {
     static let shared = Opener()
 
     private var controllers: [MainWindowController] = []
+    private let defaults: UserDefaults?
+    private var isRestoringSession = false
+
+    init(defaults: UserDefaults? = AppDelegate.isTesting ? nil : .standard) {
+        self.defaults = defaults
+    }
 
     /// Focuses the window showing `url`, else loads it into an empty window, else opens a new one.
     func open(_ url: URL) {
@@ -22,8 +28,7 @@ final class Opener {
             target.state.space = url
             target.showWindow(nil)
         } else {
-            let controller = MainWindowController(space: url)
-            controller.state.pendingFile = file
+            let controller = MainWindowController(space: url, file: file)
             show(controller)
         }
     }
@@ -59,8 +64,7 @@ final class Opener {
 
     /// A new window on `space`, showing `file` when given.
     func openInNewWindow(_ space: URL, file: URL? = nil) {
-        let controller = MainWindowController(space: space.standardizedFileURL)
-        controller.state.pendingFile = file?.standardizedFileURL
+        let controller = MainWindowController(space: space.standardizedFileURL, file: file?.standardizedFileURL)
         show(controller)
     }
 
@@ -257,22 +261,46 @@ final class Opener {
             ?? controllers.first { $0.window === Popups.menuWindow }?.state
     }
 
-    /// Reopens the spaces from the last session, or an empty window.
+    /// Reopens each window with its own navigation and preview state.
     func restoreSession() {
-        guard !AppDelegate.isTesting, controllers.isEmpty else { return }
-        let paths = UserDefaults.standard.stringArray(forKey: Self.sessionKey) ?? []
-        let urls = paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
-        if urls.isEmpty { newWindow() } else {
-            // Imported folders left links behind; open their copies.
-            urls.forEach { show(MainWindowController(space: Self.resolve($0).space)) }
+        guard let defaults, controllers.isEmpty else { return }
+        let saved: [WindowSession]
+        if let data = defaults.data(forKey: Self.windowsKey),
+           let windows = try? JSONDecoder().decode([WindowSession].self, from: data) {
+            saved = windows
+        } else {
+            saved = (defaults.stringArray(forKey: Self.sessionKey) ?? []).map {
+                WindowSession(space: URL(fileURLWithPath: $0))
+            }
         }
+        let windows = saved.filter { $0.space.map { FileManager.default.fileExists(atPath: $0.path) } ?? true }
+        isRestoringSession = true
+        for session in windows {
+            let resolved = session.space.map { Self.resolve($0) }
+            show(MainWindowController(space: resolved?.space, file: session.file ?? resolved?.file, restoring: session), frame: session.frame)
+        }
+        if windows.isEmpty { show(MainWindowController(space: nil)) }
+        isRestoringSession = false
+        saveSession()
     }
 
     func saveSession() {
-        guard !AppDelegate.isTesting else { return }
-        let paths = controllers.compactMap { $0.state.space?.path }
-        UserDefaults.standard.set(paths, forKey: Self.sessionKey)
+        guard let defaults, !isRestoringSession, !isTerminating else { return }
+        let windows = controllers.map { WindowSession(controller: $0) }
+        guard let data = try? JSONEncoder().encode(windows) else { return }
+        defaults.set(data, forKey: Self.windowsKey)
     }
+
+    /// Capture every window before termination starts closing them.
+    func prepareToQuit() {
+        guard !isTerminating else { return }
+        flushAllSaves()
+        controllers.forEach { $0.state.workspace?.persist() }
+        saveSession()
+        isTerminating = true
+    }
+
+    private static let windowsKey = "openWindows"
 
     // Named before projects became spaces; kept so the session survives.
     private static let sessionKey = "openProjects"
@@ -283,18 +311,25 @@ final class Opener {
         if !isTerminating { saveSession() }
     }
 
-    var isTerminating = false
+    private(set) var isTerminating = false
 
     func flushAllSaves() {
         controllers.forEach { $0.state.workspace?.flushSaves() }
     }
 
-    private func show(_ controller: MainWindowController) {
+    private func show(_ controller: MainWindowController, frame: String? = nil) {
+        controller.onClose = { [weak self, weak controller] in
+            if let controller { self?.closed(controller) }
+        }
         // Offset from the front window, so the new one doesn't hide exactly behind it.
         if let front = controllers.first(where: { $0.window?.isKeyWindow == true })?.window ?? controllers.last?.window,
            let window = controller.window {
             window.setFrame(front.frame, display: false)
             window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: front.frame.minX, y: front.frame.maxY)))
+        }
+        if let frame, let window = controller.window {
+            let rect = NSRectFromString(frame)
+            if !rect.isEmpty { window.setFrame(window.constrainFrameRect(rect, to: window.screen), display: false) }
         }
         controllers.append(controller)
         controller.showWindow(nil)
