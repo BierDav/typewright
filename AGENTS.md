@@ -29,7 +29,7 @@ Every module lives in its own top-level folder; `scripts/` is shared.
 - `jjBridge/` Rust static library holding the library, one jj repository (jj-lib, git backend, not colocated) with every space as a top-level folder: commits, retention squashing (`retention.rs`, `squash.rs`), file history, conflicts, deletions (`deleted.rs`), sync nodes (`nodes.rs`), the managed jj config (`repo_config.toml`) and recovery from whatever the jj CLI left (`normalize.rs`). C API in `include/JJBridge.h` (JSON in and out). Built for wasm32-wasip1 too (`scripts/build-webApp-jj.sh`, patched crates in `vendor/`), run by the web app's `workers/jj.worker.ts` on the OPFS WASI host `lib/wasi.ts`.
 - `irohBridge/` Rust static library syncing shares between a user's devices (and invited accounts) with iroh-docs, iroh-blobs and iroh-gossip (`shares.rs`, node bundles in `bundle.rs`), plus live editing of open files (`live.rs`, yrs CRDT over gossip); events reach Swift as JSON through one C callback.
 - Both Rust bridges are built by `scripts/build-rust-bridge.sh <crate> <lib>` (needs `cargo`): the typst bridge in the Quick Look extension's build phase (the app depends on it, so it builds first), the iroh and jj bridges in the app's. Their C API lives in `ffi.rs`, the wasm-bindgen API in `web.rs`.
-- `scripts/` build phases, icon generation, release build, version calculation, cask generation. Scripts for one module are named after it (`run-macApp.sh`, `build-sharedCore.sh`); `build-rust-bridge.sh` and `next-version.sh` serve several.
+- `scripts/` build phases, icon generation, release build, version calculation, cask generation. Scripts for one module are named after it (`run-macApp.sh`, `run-webApp.sh`, `build-sharedCore.sh`); `build-rust-bridge.sh` and `next-version.sh` serve several.
 
 ## Commands
 
@@ -41,6 +41,7 @@ Run from the repository root.
 - Rust core tests: `cargo test --manifest-path sharedCore/Cargo.toml --target-dir .build/cargo`; the jj bridge's the same with `jjBridge/Cargo.toml` (some drive the `jj` CLI and skip without it)
 - Sync over the network (two devices in one process, real n0 relays): `TEST_RUNNER_TYPEWRIGHT_NETWORK_TESTS=1 xcodebuild -project macApp/Typewright.xcodeproj -scheme Typewright -derivedDataPath .build test -only-testing:TypewrightTests/SyncNetworkTests` and `cargo test --release --manifest-path irohBridge/Cargo.toml --target-dir .build/cargo -- --ignored`
 - Sync with the web app (this Mac against a headless browser, real n0 relays): run `bun run dev --port 5391` and `bun tests/webpeer.ts <folder> http://localhost:5391/` in `webApp/` (Chromium from `bunx playwright install chromium`), then `TEST_RUNNER_TYPEWRIGHT_WEB_PEER_DIR=<folder> xcodebuild … test -only-testing:TypewrightTests/WebPeerSyncTests`
+- Run the dev web app: `scripts/run-webApp.sh` (builds the wasm, installs packages, starts vite; extra arguments go to vite)
 - Web app: `scripts/build-webApp-wasm.sh` (needs Homebrew's `llvm`) first, then `bun install` and `bun run dev` / `bun run check` / `bun run build` in `webApp/`
 - Release bundle: `scripts/build-macApp.sh <version>`
 - Icon: `swift scripts/make-icon-macApp.swift`
