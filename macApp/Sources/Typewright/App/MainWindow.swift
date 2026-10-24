@@ -16,7 +16,12 @@ final class WindowState {
     var space: URL?
     /// Whether the space selector covers the file tree.
     var spacesOpen = false {
-        didSet { if spacesOpen { Popups.dismiss(in: window) } }
+        didSet {
+            if spacesOpen {
+                if !sidebarVisible { floatingSidebar = true }
+                Popups.dismiss(in: window)
+            }
+        }
     }
     /// The command palette or full text search over the window.
     var overlay: WindowOverlay? {
@@ -41,10 +46,14 @@ final class WindowState {
     var renameNewSpace = false
     var relocatingSpace = false
     var sidebarVisible = true {
-        didSet { if sidebarVisible { floatingSidebar = false } }
+        didSet {
+            if sidebarVisible { floatingSidebar = false }
+            else if keepsFloatingSidebarOpen { floatingSidebar = true }
+        }
     }
     /// The hidden sidebar floating over the space while the pointer is near the window's left edge.
     var floatingSidebar = false
+    var keepsFloatingSidebarOpen: Bool { spacesOpen || swipe != nil }
     /// The window's content size, to place the selector and floating sidebar while the sidebar is hidden.
     var windowSize = CGSize(width: 1280, height: 820)
     /// Set while switching with ⌘1–9: true moves to a later space in the list, so the new one slides in from the right.
@@ -183,7 +192,7 @@ struct MainWindow: View {
                 }
             }
             // Shifted, not squeezed; the window's edge cuts off what moves past it.
-            .offset(x: WindowState.spacesExtra * (workspace == nil ? 1 : state.spacesProgress))
+            .offset(x: WindowState.spacesExtra * (workspace == nil ? 1 : state.sidebarVisible ? state.spacesProgress : 0))
             .overlay { dimming }
         }
         .toolbar(removing: .sidebarToggle)
@@ -196,7 +205,9 @@ struct MainWindow: View {
         .overlay {
             if let workspace, !state.sidebarVisible { FloatingSidebar(state: state, workspace: workspace) }
         }
-        .overlay { SpacesOverlay(state: state, workspace: workspace) }
+        .overlay {
+            if state.sidebarVisible || workspace == nil { SpacesOverlay(state: state, workspace: workspace) }
+        }
         .overlay { WindowOverlayView(state: state, workspace: workspace) }
         .background(HiddenTitleBar(title: workspace?.selectedFile?.lastPathComponent ?? workspace?.name ?? "Typewright",
                                    subtitle: workspace?.name ?? ""))
@@ -244,7 +255,7 @@ struct MainWindow: View {
 
     /// Blurs and darkens the space behind the selector; clicking it returns to the space.
     private var dimming: some View {
-        let progress = workspace == nil ? 0 : state.spacesProgress
+        let progress = workspace == nil || !state.sidebarVisible ? 0 : state.spacesProgress
         // A material rather than `.blur`, which can't reach the AppKit editor and PDF views underneath.
         // Its blur strength is fixed, so a half-transparent material reads as a light blur.
         return Rectangle()
@@ -275,11 +286,17 @@ private struct FloatingSidebar: View {
     let state: WindowState
     let workspace: Workspace
     @State private var hideTask: Task<Void, Never>?
+    @State private var spaces: [URL] = []
+    @State private var hovering = false
 
     private static let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
 
     var body: some View {
-        let available = state.spacesProgress == 0 && state.overlay == nil
+        let available = state.overlay == nil
+        let progress = state.spacesProgress
+        let sidebarWidth = state.panelFrame.width
+        let openWidth = sidebarWidth + WindowState.spacesExtra
+        let width = sidebarWidth + WindowState.spacesExtra * progress
         ZStack(alignment: .leading) {
             if available {
                 // The strip that summons it; thin, so the editor's edge stays clickable.
@@ -287,16 +304,27 @@ private struct FloatingSidebar: View {
                     .frame(width: 6)
                     .frame(maxHeight: .infinity)
                     .contentShape(Rectangle())
-                    .onHover { inside in inside ? show() : scheduleHide() }
+                    .onHover(perform: hover)
             }
             if available && state.floatingSidebar {
-                SidebarView(workspace: workspace, onShowSpaces: {
-                    state.floatingSidebar = false
-                    state.setSpacesOpen(true)
-                }) { name in
-                    Opener.shared.rename(space: workspace.root, to: name)
+                ZStack(alignment: .leading) {
+                    SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) }) { name in
+                        Opener.shared.rename(space: workspace.root, to: name)
+                    }
+                    .frame(width: sidebarWidth)
+                    .opacity(1 - progress)
+                    .allowsHitTesting(progress == 0)
+                    if state.keepsFloatingSidebarOpen {
+                        SpacesPane(state: state, workspace: workspace, current: workspace.root.path, canClose: true,
+                                   active: progress == 1, spaces: spaces) { spaces = SpaceList.all }
+                            .frame(width: openWidth)
+                            .offset(x: -openWidth * (1 - progress))
+                            .allowsHitTesting(progress == 1)
+                    }
                 }
-                .frame(width: state.panelFrame.width)
+                .frame(width: width, alignment: .leading)
+                .clipped()
+                .background(SpaceSwipe(state: state, width: openWidth, floating: true))
                 // The card reaches up behind the traffic lights; the file tree stays below them.
                 .background {
                     // Floats over the space, so it blurs the editor and preview beneath it.
@@ -306,18 +334,30 @@ private struct FloatingSidebar: View {
                         .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
                         // The editor underneath would set its I-beam on every move.
                         .background(CursorArea())
-                        .onHover { inside in inside ? show() : scheduleHide() }
                         .padding(.top, 8)
                         .ignoresSafeArea(edges: .top)
                 }
                 .padding([.leading, .bottom], 8)
-                .onHover { inside in inside ? show() : scheduleHide() }
+                .onHover(perform: hover)
                 .transition(.move(edge: .leading).combined(with: .opacity))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .animation(.smooth(duration: 0.25), value: state.floatingSidebar)
+        .onAppear { spaces = SpaceList.all }
+        .onChange(of: workspace.root) { spaces = SpaceList.all }
+        .onChange(of: state.keepsFloatingSidebarOpen) { _, open in
+            if open { show() } else if !hovering { scheduleHide() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: SpaceList.didChange).receive(on: RunLoop.main)) { _ in
+            spaces = SpaceList.all
+        }
         .onDisappear { hideTask?.cancel() }
+    }
+
+    private func hover(_ inside: Bool) {
+        hovering = inside
+        if inside { show() } else { scheduleHide() }
     }
 
     private func show() {
@@ -329,9 +369,10 @@ private struct FloatingSidebar: View {
     /// A short grace period, so brushing past its edge doesn't close it.
     private func scheduleHide() {
         hideTask?.cancel()
+        guard !state.keepsFloatingSidebarOpen else { return }
         hideTask = Task {
             try? await Task.sleep(for: .seconds(0.35))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, !state.keepsFloatingSidebarOpen else { return }
             state.floatingSidebar = false
         }
     }

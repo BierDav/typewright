@@ -227,8 +227,6 @@ final class Opener {
 
     func toggleSpaces() {
         guard let state = keyState, state.space != nil else { return }
-        // A hidden sidebar stays hidden; the selector slides in along the window's edge instead.
-        state.floatingSidebar = false
         state.setSpacesOpen(!state.spacesOpen)
     }
 

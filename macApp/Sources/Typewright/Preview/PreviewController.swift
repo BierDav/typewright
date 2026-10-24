@@ -82,40 +82,43 @@ final class PreviewController {
     /// Swaps the document, keeping zoom and scroll position unless told otherwise.
     func show(_ document: PDFDocument?, keepingPosition: Bool = true) {
         guard let document, document !== view.document else { return }
-        compiledPages.removeAll()
-        if pendingRestore == nil, let position = pendingPosition {
-            pendingPosition = nil
-            pendingRestore = Self.state(for: position, in: document)
-            pendingPan = position.pan
-        }
-        if let state = pendingRestore {
-            pendingRestore = nil
-            let pan = pendingPan
-            pendingPan = nil
+        withoutAnimation {
+            compiledPages.removeAll()
+            if pendingRestore == nil, let position = pendingPosition {
+                pendingPosition = nil
+                pendingRestore = Self.state(for: position, in: document)
+                pendingPan = position.pan
+            }
+            if let state = pendingRestore {
+                pendingRestore = nil
+                let pan = pendingPan
+                pendingPan = nil
+                view.document = document
+                insetForToolbar()
+                // Wait for the first layout so fit-to-width and the destination use the real size.
+                DispatchQueue.main.async { self.restore(state, pan: pan) }
+                sync()
+                return
+            }
+            guard keepingPosition, view.document != nil, let scroll = view.documentView?.enclosingScrollView else {
+                view.document = document
+                insetForToolbar()
+                sync()
+                return
+            }
+            let origin = scroll.contentView.bounds.origin
+            let auto = view.autoScales
+            let scale = view.scaleFactor
             view.document = document
             insetForToolbar()
-            // Wait for the first layout so fit-to-width and the destination use the real size.
-            DispatchQueue.main.async { self.restore(state, pan: pan) }
+            if auto { view.autoScales = true } else { view.scaleFactor = scale }
+            view.layoutDocumentView()
+            if let newScroll = view.documentView?.enclosingScrollView {
+                newScroll.contentView.scroll(to: origin)
+                newScroll.reflectScrolledClipView(newScroll.contentView)
+            }
             sync()
-            return
         }
-        guard keepingPosition, view.document != nil, let scroll = view.documentView?.enclosingScrollView else {
-            view.document = document
-            insetForToolbar()
-            sync()
-            return
-        }
-        let origin = scroll.contentView.bounds.origin
-        let auto = view.autoScales
-        let scale = view.scaleFactor
-        view.document = document
-        if auto { view.autoScales = true } else { view.scaleFactor = scale }
-        view.layoutDocumentView()
-        if let newScroll = view.documentView?.enclosingScrollView {
-            newScroll.contentView.scroll(to: origin)
-            newScroll.reflectScrolledClipView(newScroll.contentView)
-        }
-        sync()
     }
 
     /// Keeps PDFKit's unchanged page objects and replaces only newly compiled pages.
@@ -131,18 +134,39 @@ final class PreviewController {
         let mustRestore = pendingPosition != nil
         pendingPosition = nil
         guard pages != compiledPages || mustRestore else { return }
-        for index in pages.indices {
-            if index < compiledPages.count, pages[index] === compiledPages[index] { continue }
-            if index < document.pageCount { document.removePage(at: index) }
-            document.insert(pages[index].page.copy() as! PDFPage, at: index)
+        withoutAnimation {
+            for index in pages.indices {
+                if index < compiledPages.count, pages[index] === compiledPages[index] { continue }
+                let replacement = pages[index].page.copy() as! PDFPage
+                if index < document.pageCount {
+                    // Keep a page installed at every visible index while PDFKit updates its layout.
+                    document.insert(replacement, at: index)
+                    document.removePage(at: index + 1)
+                } else {
+                    document.insert(replacement, at: index)
+                }
+            }
+            while document.pageCount > pages.count { document.removePage(at: document.pageCount - 1) }
+            compiledPages = pages
+            view.layoutDocumentView()
+            if let position, mustRestore || self.position() != position {
+                restore(Self.state(for: position, in: document), pan: position.pan)
+            }
+            // PDFKit's crossfade reveals the page before its text tiles finish rendering.
+            view.documentView?.layer?.removeAnimation(forKey: "transition")
+            sync()
         }
-        while document.pageCount > pages.count { document.removePage(at: document.pageCount - 1) }
-        compiledPages = pages
-        view.layoutDocumentView()
-        if let position { restore(Self.state(for: position, in: document), pan: position.pan) }
-        // PDFKit's crossfade reveals the page before its text tiles finish rendering.
-        view.documentView?.layer?.removeAnimation(forKey: "transition")
-        sync()
+    }
+
+    private func withoutAnimation(_ update: () -> Void) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            update()
+            CATransaction.commit()
+        }
     }
 
     /// Empties the view when another file is previewed, so the old document never stands in for the new one.
@@ -201,7 +225,9 @@ final class PreviewController {
 
     private func restore(_ state: PreviewState, pan: Double? = nil) {
         guard let doc = view.document, doc.pageCount > 0 else { return }
-        if let scale = state.scale { view.scaleFactor = scale } else { view.autoScales = true }
+        if let scale = state.scale {
+            if view.scaleFactor != scale { view.scaleFactor = scale }
+        } else if !view.autoScales { view.autoScales = true }
         view.layoutDocumentView()
         let index = min(state.page, doc.pageCount - 1)
         guard let page = doc.page(at: index) else { return }

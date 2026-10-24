@@ -3,6 +3,15 @@ import PDFKit
 import XCTest
 @testable import Typewright
 
+private final class TrackingPDFDocument: PDFDocument {
+    var minimumPageCount = Int.max
+
+    override func removePage(at index: Int) {
+        super.removePage(at: index)
+        minimumPageCount = min(minimumPageCount, pageCount)
+    }
+}
+
 @MainActor
 final class IncrementalPreviewTests: XCTestCase {
     private var root: URL!
@@ -39,6 +48,11 @@ final class IncrementalPreviewTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
             if preview.position() == before { return }
         }
+    }
+
+    private func horizontalRange(_ preview: PreviewController) throws -> CGFloat {
+        let scroll = try XCTUnwrap(preview.view.documentView?.enclosingScrollView)
+        return max(try XCTUnwrap(scroll.documentView).frame.width - scroll.contentView.bounds.width, 0)
     }
 
     private func pages(_ text: String) async throws -> [CompiledPage] {
@@ -82,6 +96,25 @@ final class IncrementalPreviewTests: XCTestCase {
             let bitmap = try XCTUnwrap(preview.view.bitmapImageRepForCachingDisplay(in: preview.view.bounds))
             preview.view.cacheDisplay(in: preview.view.bounds, to: bitmap)
             print("Incremental PDF edit \(revision): compile \(result.duration * 1000) ms, PDFKit update \(ready) ms, snapshot \(Date().timeIntervalSince(start) * 1000) ms")
+        }
+    }
+
+    func testReplacingTheOnlyPageNeverEmptiesTheDocument() async throws {
+        let preview = PreviewController()
+        attach(preview)
+        let before = try await pages("Before")
+        preview.showPages(before)
+        try await settle(preview)
+        let document = TrackingPDFDocument()
+        document.insert(try XCTUnwrap(before.first?.page.copy() as? PDFPage), at: 0)
+        preview.view.document = document
+        document.minimumPageCount = document.pageCount
+        for revision in 0..<3 {
+            preview.showPages(try await pages("After \(revision)"))
+            XCTAssertTrue(preview.view.document === document)
+            XCTAssertEqual(document.pageCount, 1)
+            XCTAssertEqual(document.minimumPageCount, 1)
+            XCTAssertTrue(document.page(at: 0)?.string?.contains("After \(revision)") == true)
         }
     }
 
@@ -151,7 +184,8 @@ final class IncrementalPreviewTests: XCTestCase {
             try await settle(fast)
             let transferred = try XCTUnwrap(fast.position())
             XCTAssertEqual(transferred.page, position.page, accuracy: 0.001)
-            XCTAssertEqual(transferred.pan, position.pan, accuracy: 0.001)
+            // Clip views round scroll origins to pixels, especially when the horizontal range is small.
+            XCTAssertEqual((transferred.pan - position.pan) * (try horizontalRange(fast)), 0, accuracy: 1)
             XCTAssertEqual(transferred.zoom, position.zoom)
             attach(pdf)
             pdf.pendingPosition = transferred
@@ -159,7 +193,7 @@ final class IncrementalPreviewTests: XCTestCase {
             try await settle(pdf)
             let restored = try XCTUnwrap(pdf.position())
             XCTAssertEqual(restored.page, position.page, accuracy: 0.001)
-            XCTAssertEqual(restored.pan, position.pan, accuracy: 0.001)
+            XCTAssertEqual((restored.pan - position.pan) * (try horizontalRange(pdf)), 0, accuracy: 1)
         }
     }
 }

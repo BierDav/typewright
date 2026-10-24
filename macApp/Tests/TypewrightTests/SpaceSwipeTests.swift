@@ -98,6 +98,7 @@ final class SpaceSwipeTests: XCTestCase {
         let (window, swipe, state) = setUpSwipe()
         defer { window.close() }
         state.sidebarVisible = false
+        swipe.floating = true
         state.spacesOpen = true
         let event = ScrollEvent()
         event.host = window
@@ -109,6 +110,65 @@ final class SpaceSwipeTests: XCTestCase {
         event.scrollPhase = .ended
         XCTAssertNil(swipe.handle(event))
         XCTAssertFalse(state.spacesOpen)
+    }
+
+    func testFloatingSidebarGesturePinsOverviewAndLeavesPDFScrollingAlone() {
+        let (window, swipe, state) = setUpSwipe()
+        defer { window.close() }
+        state.sidebarVisible = false
+        state.floatingSidebar = true
+        swipe.floating = true
+        let event = ScrollEvent()
+        event.host = window
+        event.dx = 30
+        for phase in [NSEvent.Phase.began, .changed, .ended] {
+            event.scrollPhase = phase
+            XCTAssertNil(swipe.handle(event))
+        }
+        XCTAssertTrue(state.spacesOpen)
+        XCTAssertTrue(state.floatingSidebar)
+        XCTAssertTrue(state.keepsFloatingSidebarOpen)
+        event.point.x = 350
+        for phase in [NSEvent.Phase.began, .changed, .ended] {
+            event.scrollPhase = phase
+            XCTAssertTrue(swipe.handle(event) === event)
+        }
+        XCTAssertTrue(state.spacesOpen)
+        event.point.x = 50
+        event.dx = -30
+        for phase in [NSEvent.Phase.began, .changed, .ended] {
+            event.scrollPhase = phase
+            XCTAssertNil(swipe.handle(event))
+        }
+        XCTAssertFalse(state.spacesOpen)
+        XCTAssertFalse(state.keepsFloatingSidebarOpen)
+    }
+
+    func testHiddenDockedSidebarDoesNotStealFloatingOverviewGestures() {
+        let (window, swipe, state) = setUpSwipe()
+        defer { window.close() }
+        state.sidebarVisible = false
+        state.spacesOpen = true
+        let event = ScrollEvent()
+        event.host = window
+        event.dx = -30
+        event.scrollPhase = .began
+        XCTAssertTrue(swipe.handle(event) === event)
+        event.scrollPhase = .changed
+        XCTAssertTrue(swipe.handle(event) === event)
+        XCTAssertTrue(state.spacesOpen)
+        XCTAssertNil(state.swipe)
+    }
+
+    func testCollapsingSidebarKeepsAnOpenOverviewInTheFloatingCard() {
+        let state = WindowState(space: URL(fileURLWithPath: "/test-space"))
+        state.spacesOpen = true
+        state.sidebarVisible = false
+        XCTAssertTrue(state.spacesOpen)
+        XCTAssertTrue(state.floatingSidebar)
+        XCTAssertTrue(state.keepsFloatingSidebarOpen)
+        state.spacesOpen = false
+        XCTAssertFalse(state.keepsFloatingSidebarOpen)
     }
 
     func testVerticalGestureStillReachesTheFileTree() {

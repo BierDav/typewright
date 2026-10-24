@@ -185,7 +185,7 @@ private struct SplitViewFinder: NSViewRepresentable {
 }
 
 /// The spaces as Zen-style rows in the user's order, and the way to open another folder as a space.
-private struct SpacesPane: View {
+struct SpacesPane: View {
     let state: WindowState
     let workspace: Workspace?
     let current: String?
@@ -751,12 +751,14 @@ private struct ZenRowPressStyle: ButtonStyle {
 struct SpaceSwipe: NSViewRepresentable {
     let state: WindowState
     let width: CGFloat
+    var floating = false
 
     func makeNSView(context: Context) -> SwipeView { SwipeView() }
 
     func updateNSView(_ view: SwipeView, context: Context) {
         view.state = state
         view.width = width
+        view.floating = floating
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: SwipeView, context: Context) -> CGSize? {
@@ -766,6 +768,7 @@ struct SpaceSwipe: NSViewRepresentable {
     final class SwipeView: NSView {
         var state: WindowState?
         var width: CGFloat = 1
+        var floating = false
         private var monitor: Any?
         /// nil until the gesture's direction is known.
         private var tracking: Bool?
@@ -791,7 +794,8 @@ struct SpaceSwipe: NSViewRepresentable {
         func handle(_ event: NSEvent) -> NSEvent? {
             guard let state, event.window === window, event.hasPreciseScrollingDeltas, state.space != nil,
                   state.overlay == nil || tracking == true else { return event }
-            guard state.spacesOpen || (state.sidebarVisible && !isHiddenOrHasHiddenAncestor) else {
+            let visible = floating ? !state.sidebarVisible && state.floatingSidebar : state.sidebarVisible
+            guard visible, !isHiddenOrHasHiddenAncestor else {
                 if tracking == true { state.swipe = nil }
                 tracking = nil
                 horizontal = false
@@ -808,9 +812,9 @@ struct SpaceSwipe: NSViewRepresentable {
             let dx = event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
             switch event.phase {
             case .began:
-                // Over the sidebar always; anywhere once the selector covers it, to swipe back.
+                // The floating selector leaves scrolling in the document alone.
                 let inside = bounds.contains(convert(event.locationInWindow, from: nil))
-                tracking = inside || state.spacesOpen ? nil : false
+                tracking = inside || (!floating && state.spacesOpen) ? nil : false
                 start = state.spacesProgress
                 distance = CGSize(width: dx, height: event.scrollingDeltaY)
                 lastDelta = 0
