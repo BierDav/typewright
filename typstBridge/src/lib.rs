@@ -709,6 +709,7 @@ mod conceal_tests {
         assert_eq!(shown("$a -> b != c, arrow.r.double, alpha sqrt(x)$"), "$a → b ≠ c, ⇒, α sqrt(x)$");
         assert_eq!(shown(r#"$#"x" + "y"$"#), r#"$#"x" + y$"#);
         assert_eq!(shown("$cos(pi*t)$"), "$cos(π*t)$");
+        assert_eq!(shown("$x < 0 and x > 2 or x = 1$"), "$x < 0 ∧ x > 2 ∨ x = 1$");
         assert_eq!(shown(r"1\. Rechenübung \# \u{2014} $a \$ b$ #raw(`\.`) \"), r"1. Rechenübung # — $a $ b$ #raw(`\.`) \");
     }
 

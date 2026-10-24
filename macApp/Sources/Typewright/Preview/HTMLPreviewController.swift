@@ -286,7 +286,10 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
           font: 11pt/1.4 "New Computer Modern", "Libertinus Serif", Georgia, serif; overflow-wrap: break-word;
         }
         .tw-page > :first-child { margin-top: 0; }
-        @media (prefers-color-scheme: dark) { svg { filter: invert(1) hue-rotate(180deg); } }
+        /* solveng's live graphs draw in the page's colors already. */
+        @media (prefers-color-scheme: dark) {
+          svg:not(.solveng-plot-live > svg, .solveng-plot-live .sp-row > svg) { filter: invert(1) hue-rotate(180deg); }
+        }
         """
 
     /// Keeps the rendered top-level blocks and swaps only the range that differs from the new output.
@@ -328,8 +331,8 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             if (doc.head.innerHTML !== this.headSource) {
               this.headSource = doc.head.innerHTML;
               this.head.forEach(n => n.remove());
-              this.head = [...doc.head.children].filter(n => n.tagName !== 'SCRIPT')
-                .map(n => document.head.appendChild(document.adoptNode(n)));
+              this.head = this.runScripts([...doc.head.children].filter(n => !this.markdown || n.tagName !== 'SCRIPT')
+                .map(n => document.head.appendChild(document.adoptNode(n))));
             }
             const fresh = [...doc.body.children];
             const sources = fresh.map(n => n.outerHTML);
@@ -342,13 +345,31 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             const anchor = this.nodes[old.length - q] || null;
             const parent = anchor ? anchor.parentNode : (p > 0 ? this.nodes[p - 1].parentNode : this.container());
             this.nodes.slice(p, old.length - q).forEach(n => n.remove());
-            const added = fresh.slice(p, sources.length - q).map(n => document.adoptNode(n));
+            let added = fresh.slice(p, sources.length - q).map(n => document.adoptNode(n));
             for (const n of added) parent.insertBefore(n, anchor);
+            added = this.runScripts(added);
             this.nodes = [...this.nodes.slice(0, p), ...added, ...this.nodes.slice(old.length - q)];
             this.sources = sources;
             if (this.pages) this.paginate();
             if (this.markdown) this.renderDiagrams(added);
             if (window.twReport) twReport();
+          },
+
+          // Parsed scripts never run, so typst's are swapped for fresh copies once in the page; GitHub runs none.
+          runScripts(nodes) {
+            if (this.markdown) return nodes;
+            const fresh = old => {
+              const s = document.createElement('script');
+              for (const a of old.attributes) s.setAttribute(a.name, a.value);
+              s.textContent = old.textContent;
+              old.replaceWith(s);
+              return s;
+            };
+            return nodes.map(n => {
+              if (n.tagName === 'SCRIPT') return fresh(n);
+              n.querySelectorAll('script').forEach(fresh);
+              return n;
+            });
           },
 
           // Mermaid is fetched on first use; GitHub draws these diagrams too.
