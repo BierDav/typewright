@@ -60,8 +60,9 @@ fn context(raw: &str) -> Context {
             } else {
                 (Report::parse(&e.file_report), true, e.path.clone())
             };
-            // Use the main file's syntax until its first successful compile reports calculations.
-            let fallback = if e.main && report.blocks == 0 { text } else { solveng_ide::with_compiled(&text, 0) };
+            // Before compilation, included chapters inherit the worksheets written around them.
+            let uncompiled = e.report.is_empty() && e.file_report.is_empty();
+            let fallback = if report.blocks == 0 && (e.main || uncompiled) { text } else { solveng_ide::with_compiled(&text, 0) };
             let c = Context::new(&fallback).with_files(files).with_report(&report, &e.path, main);
             if main_path.is_empty() { c } else { c.with_main(&main_path) }
         }
@@ -71,20 +72,10 @@ fn context(raw: &str) -> Context {
     c
 }
 
-/// `op` on `document`: `tokens` (of solveng code), `pretty` (`{text, tokens}`: the code as documentation shows it, the context its own units, comma separated),
-/// `documentTokens`, `conceals` (flat UTF-16 triples and
-/// quintuples), `highlight` (`{tokens, plain}`, plain as start/end pairs), `complete`, `hover`, `definition`
-/// (an object or null), `conversions`, `diagnostics`, `usages`, `references` (arrays), `renameTarget` (an object or
-/// null), `rename:<new name>` and `format` (edits), `function` (a package function's docs by name, or null) and `version`.
+/// Editor operations on a document and its context, with UTF-16 offsets and JSON results.
 pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> String {
     let value = match op {
-        "tokens" => json!(solveng_ide::tokens(document).iter().flat_map(|t| [t.start, t.length, t.kind as u32]).collect::<Vec<_>>()),
-        "pretty" => {
-            // the context is the document's own units, comma separated
-            let units: Vec<String> = raw_context.split(',').map(str::trim).filter(|u| !u.is_empty()).map(String::from).collect();
-            let (text, tokens) = solveng_ide::pretty(document, &units);
-            json!({ "text": text, "tokens": tokens.iter().flat_map(|t| [t.start, t.length, t.kind as u32]).collect::<Vec<_>>() })
-        }
+        "mathTokens" => json!(solveng_ide::math_tokens_of(document).iter().flat_map(|t| [t.start, t.length, t.kind as u32]).collect::<Vec<_>>()),
         "references" => json!(solveng_ide::references(document)),
         // the document is the function's name
         "function" => json!(solveng_ide::params::functions().iter().find(|f| f.name == document)),
@@ -118,7 +109,6 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
                 ),
                 "complete" => json!(solveng_ide::complete(document, &c, offset)),
                 "hover" => json!(solveng_ide::hover(document, &c, offset)),
-                "conversions" => json!(solveng_ide::conversions(document, &c, offset)),
                 "fixes" => json!(solveng_ide::unit_fixes(document, &c, offset)),
                 "format" => json!(solveng_ide::format(document, &c)),
                 "diagnostics" => json!(solveng_ide::diagnostics(document, &c)),
@@ -170,8 +160,8 @@ mod tests {
 
     #[test]
     fn value_supports_editor_features_in_math() {
-        for expression in [r#"$U_2 / 2 = unit("mV")$"#] {
-            let doc = format!("#show: worksheet\n$U_2 := 5 unit(\"V\")$\nVoltage: #value({expression}).");
+        for expression in [r#"$U_2 / 2 = mV$"#] {
+            let doc = format!("#import units: V, mV\n#show: worksheet\n$U_2 := 5 #V$\nVoltage: #value({expression}).");
             let context = serde_json::json!({"path": "main.typ", "main": true}).to_string();
             let at = doc[..doc.rfind("U_2").unwrap()].encode_utf16().count() as u32;
             let json = |op, offset| serde_json::from_str::<Value>(&call(op, &doc, &context, offset)).unwrap();
@@ -192,8 +182,8 @@ mod tests {
 
     #[test]
     fn completes_and_documents_new_calculation_builtins() {
-        for name in ["sum", "laplace", "det", "tr", "integrate"] {
-            let doc = format!("#value(${name}$)");
+        for name in ["sum", "det", "tr", "integrate"] {
+            let doc = format!("#import functions: *\n#value(${name}$)");
             let at = doc.find(name).unwrap() as u32;
             let result: Value = serde_json::from_str(&call("complete", &doc, "", at + name.len() as u32)).unwrap();
             let item = result["items"].as_array().unwrap().iter().find(|i| i["label"] == name).unwrap();
@@ -208,7 +198,12 @@ mod tests {
         let doc = "#import units: s\n#show: worksheet\n$x := 1 #s$";
         let at = doc.rfind("#s").unwrap() as u32;
         let complete: Value = serde_json::from_str(&call("complete", doc, "", at + 2)).unwrap();
-        assert!(complete["items"].as_array().unwrap().iter().any(|item| item["label"] == "s" && item["insert"] == "#s"));
+        let item = complete["items"].as_array().unwrap().iter().find(|item| item["label"] == "s").unwrap();
+        let mut text: Vec<u16> = doc.encode_utf16().collect();
+        let from = complete["from"].as_u64().unwrap() as usize;
+        let to = complete["to"].as_u64().unwrap_or((at + 2) as u64) as usize;
+        text.splice(from..to, item["insert"].as_str().unwrap().encode_utf16());
+        assert_eq!(String::from_utf16(&text).unwrap(), doc);
         let conceals: Value = serde_json::from_str(&call("conceals", doc, "", 0)).unwrap();
         assert!(conceals.as_array().unwrap().chunks_exact(5).any(|item| item[0] == at && item[1] == 1 && item[2] == 0));
         let string = "#value(\"x + 1\")";
@@ -229,7 +224,7 @@ mod tests {
         assert_eq!(hover["end"], at + 4);
         let markdown = hover["markdown"].as_str().unwrap();
         assert!(markdown.contains("Σr = 1 + x + y^2"), "{markdown}");
-        assert!(markdown.contains("### Depends on\n\n```solveng\nx // undefined\ny // undefined\n```"), "{markdown}");
+        assert!(markdown.contains("### Depends on\n\n```text\nx // undefined\ny // undefined\n```"), "{markdown}");
         for offset in at + 1..at + 4 {
             let other: Value = serde_json::from_str(&call("hover", doc, "", offset)).unwrap();
             assert_eq!(other, hover);
@@ -238,24 +233,24 @@ mod tests {
 
     #[test]
     fn documents_transitive_dependencies_without_parameters_or_units() {
-        let doc = "#show: worksheet\n$a := 2 unit(\"A\")$\n$b := a + 3 unit(\"A\")$\n$f(x: A) := b + x$\n$f(1 unit(\"A\")) =$";
+        let doc = "#import units: A\n#show: worksheet\n$a := 2 #A$\n$b := a + 3 #A$\n$f(x: #A) := b + x$\n$f(1 #A) =$";
         let at = doc.rfind("f(").unwrap() as u32;
         let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
         let markdown = hover["markdown"].as_str().unwrap();
         let dependencies = markdown.split("### Depends on\n\n").nth(1).unwrap();
-        assert_eq!(dependencies, "```solveng\nb = a + 3 A\na: A = 2 A\n```");
+        assert_eq!(dependencies, "```text\nb = a + 3 A\na: A = 2 A\n```");
     }
 
     #[test]
-    fn documents_code_and_call_string_dependencies() {
+    fn documents_equation_and_call_dependencies() {
         for doc in [
-            "#show: worksheet\n```solveng\na := 2\nb := a + a\nf(x) := b + x\nf(1) =\n```",
-            "#worksheet(`a := 2`, `b := a + a`, `f(x) := b + x`, `f(1) =`)",
+            "#show: worksheet\n$a := 2$\n$b := a + a$\n$f(x) := b + x$\n$f(1) =$",
+            "#worksheet($a := 2$, $b := a + a$, $f(x) := b + x$, $f(1) =$)",
         ] {
             let at = doc.rfind("f(").unwrap() as u32;
             let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
             let markdown = hover["markdown"].as_str().unwrap();
-            assert!(markdown.ends_with("### Depends on\n\n```solveng\nb = a + a\na = 2\n```"), "{markdown}");
+            assert!(markdown.ends_with("### Depends on\n\n```text\nb = a + a\na = 2\n```"), "{markdown}");
         }
     }
 
@@ -265,7 +260,7 @@ mod tests {
         let at = doc.find("a =").unwrap() as u32;
         let hover: Value = serde_json::from_str(&call("hover", doc, "", at)).unwrap();
         let markdown = hover["markdown"].as_str().unwrap();
-        assert!(markdown.ends_with("### Depends on\n\n```solveng\nx = 1\n```"), "{markdown}");
+        assert!(markdown.ends_with("### Depends on\n\n```text\nx = 1\n```"), "{markdown}");
     }
 
     #[test]
@@ -288,46 +283,46 @@ mod tests {
         let at = main.rfind("b =").unwrap() as u32;
         let hover: Value = serde_json::from_str(&call("hover", main, &context, at)).unwrap();
         let markdown = hover["markdown"].as_str().unwrap();
-        assert!(markdown.ends_with("### Depends on\n\n```solveng\na = 2\n```"), "{markdown}");
+        assert!(markdown.ends_with("### Depends on\n\n```text\na = 2\n```"), "{markdown}");
     }
 
     #[test]
     fn reads_the_editor_context() {
         // A chapter included inside the main file's worksheet sees its definitions.
         let context = serde_json::json!({
-            "files": [{"path": "main.typ", "text": "#show: worksheet\n#worksheet(`U := 5 V`)\n#include \"ch.typ\""}],
+            "files": [{"path": "main.typ", "text": "#show: worksheet\n$U := 5$\n#include \"ch.typ\""}],
             "report": "", "path": "ch.typ", "main": false, "mainPath": "main.typ",
         })
         .to_string();
-        let doc = "```solveng\nP := U * 2 A\nQ := P = [blorps]\n```";
+        let doc = "$P := U * 2$\n$Q := P$\n$P := 3$";
         let at = doc.find("U *").unwrap() as u32;
         let definition: Value = serde_json::from_str(&call("definition", doc, &context, at)).unwrap();
         assert_eq!(definition["path"], "main.typ");
         let usages: Value = serde_json::from_str(&call("usages", doc, &context, at)).unwrap();
         assert_eq!(usages.as_array().unwrap().len(), 2);
         let problems: Value = serde_json::from_str(&call("diagnostics", doc, &context, 0)).unwrap();
-        assert!(problems[0]["message"].as_str().unwrap().contains("blorps"));
+        assert!(problems[0]["message"].as_str().unwrap().contains("assigned again"));
         assert_eq!(problems[0]["severity"], "warning");
     }
 
     #[test]
     fn keeps_blocks_apart() {
         let context = serde_json::json!({"files": [], "report": "", "path": "main.typ", "main": true}).to_string();
-        let doc = "#worksheet[```solveng\nx := 1\ny := x\n```]\n#worksheet[```solveng\nx := 2\nz := x\n```]";
+        let doc = "#worksheet[$x := 1$ $y := x$]\n#worksheet[$x := 2$ $z := x$]";
         let usages: Value = serde_json::from_str(&call("usages", doc, &context, doc.find("x := 1").unwrap() as u32)).unwrap();
         let starts: Vec<u64> = usages.as_array().unwrap().iter().map(|u| u["start"].as_u64().unwrap()).collect();
-        assert_eq!(starts, vec![doc.find("x := 1").unwrap() as u64, doc.find("= x\n").unwrap() as u64 + 2]);
+        assert_eq!(starts, vec![doc.find("x := 1").unwrap() as u64, doc.find("= x$").unwrap() as u64 + 2]);
     }
 
     #[test]
     fn renames_through_the_op() {
-        let doc = "#show: worksheet\n$R_\"load\" := 1$\n```solveng\nq := R_load\n```";
-        let at = doc.find("R_load\n").unwrap() as u32;
+        let doc = "#show: worksheet\n$R_\"load\" := 1$\n$q := R_\"load\"$";
+        let at = doc.rfind("R_\"load\"").unwrap() as u32;
         let target: Value = serde_json::from_str(&call("renameTarget", doc, "", at)).unwrap();
-        assert_eq!(target["name"], "R_load");
+        assert_eq!(target["name"], "R_\"load\"");
         let edits: Value = serde_json::from_str(&call("rename:tews", doc, "", at)).unwrap();
         let texts: Vec<&str> = edits.as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect();
-        assert_eq!(texts, ["\"tews\"", "tews"]);
+        assert_eq!(texts, ["\"tews\"", "\"tews\""]);
     }
 
     #[test]

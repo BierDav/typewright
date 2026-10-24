@@ -66,7 +66,7 @@ void tw_result_free(TWResult result);
 /// `{blocks, elements: [{path, start, end, text, kind, active, integration}], defined, units}`; free with `tw_string_free`.
 char *_Nonnull tw_world_solveng(TWWorld *_Nonnull world);
 
-/// solveng's editor support: `op` (`tokens`, `documentTokens`, `conceals`, `complete`, `hover`, `conversions`,
+/// solveng's editor support: `op` (`mathTokens`, `documentTokens`, `conceals`, `complete`, `hover`, `fixes`,
 /// `diagnostics`, `definition`, `usages`, `references`, `version`) on `document` with its context JSON `{files: [{path, text}], report, path, main}`, at a UTF-16
 /// `offset`; answers JSON. Free with `tw_string_free`.
 char *_Nonnull tw_solveng(const char *_Nonnull op, const uint8_t *_Nullable document, size_t document_len,

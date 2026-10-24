@@ -50,15 +50,10 @@ fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// The units of a solveng fence's info: `solveng units=bar,ü`.
-fn fence_units(info: &str) -> Vec<String> {
-    info.split_whitespace().find_map(|w| w.strip_prefix("units=")).map(|u| u.split(',').filter(|u| !u.is_empty()).map(String::from).collect()).unwrap_or_default()
-}
-
-/// solveng code as documentation shows it (A², x₂), coloured with the editor's classes.
-fn solveng_html(code: &str, units: &[String]) -> String {
-    const CLASS: [&str; 11] = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit", "tw-param tw-parameter"];
-    let (text, tokens) = solveng_ide::pretty(code, units);
+/// Math snippets in older solveng documentation use the editor's token colours.
+fn solveng_html(text: &str) -> String {
+    const CLASS: [&str; 15] = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit", "tw-param tw-parameter", "tw-keyword tw-evaluate", "tw-param", "tw-function", "tw-comment"];
+    let tokens = solveng_ide::math_tokens_of(text);
     let units: Vec<u16> = text.encode_utf16().collect();
     let piece = |a: usize, b: usize| escape(&String::from_utf16_lossy(&units[a..b]));
     let (mut out, mut at) = (String::new(), 0);
@@ -86,10 +81,9 @@ pub fn to_html(markdown: &str) -> String {
                 block_type: 6,
                 literal: format!("<div class=\"math-display\">{}</div>\n", mathml(&code.literal, true)),
             })),
-            // ```solveng units=bar,ü: the document's own units
             NodeValue::CodeBlock(code) if code.info.split_whitespace().next() == Some("solveng") => Some(NodeValue::HtmlBlock(NodeHtmlBlock {
                 block_type: 6,
-                literal: format!("<pre><code class=\"language-solveng\">{}</code></pre>\n", solveng_html(code.literal.trim_end(), &fence_units(&code.info))),
+                literal: format!("<pre><code class=\"language-solveng\">{}</code></pre>\n", solveng_html(code.literal.trim_end())),
             })),
             NodeValue::CodeBlock(code) if code.info.trim() == "mermaid" => Some(NodeValue::HtmlBlock(NodeHtmlBlock {
                 block_type: 6,
@@ -132,8 +126,8 @@ mod tests {
             assert!(html.contains(needle), "{needle} missing in {html}");
         }
         assert!(code_css().contains("prefers-color-scheme: light"));
-        let html = to_html("```solveng units=über\nU(x: V): A^2 = 2 x_2 * [3 über]\n```\n");
-        assert!(html.contains("<span class=\"tw-unit\">über</span>"), "{html}");
-        assert!(html.contains("<span class=\"tw-unit\">²</span>") && html.contains("x₂") && html.contains("class=\"tw-function\""), "{html}");
+        let html = to_html("```solveng\nU(x) := x_2^2 =\n```\n");
+        assert!(html.contains("</span>_<span") && html.contains("class=\"tw-function\""), "{html}");
+        assert!(html.contains("tw-evaluate"), "{html}");
     }
 }

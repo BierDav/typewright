@@ -130,17 +130,8 @@ enum SolvengSupport {
 
     private static func decode<T: Decodable>(_ data: Data) -> T? { try? JSONDecoder().decode(T.self, from: data) }
 
-    /// Tokens of solveng code as flat `(start, length, kind)` triples, kinds as in `InjectedLanguages.Kind`.
-    static func tokens(_ code: String) -> [Int32] { decode(call("tokens", code)) ?? [] }
-
-    /// solveng code as documentation shows it (A², x₂), with its tokens as flat triples.
-    struct Pretty: Decodable {
-        let text: String
-        let tokens: [Int32]
-    }
-
-    /// `units`: the document's own, read as units after a number like the built-in ones.
-    static func pretty(_ code: String, units: [String] = []) -> Pretty? { decode(call("pretty", code, context: units.joined(separator: ","))) }
+    /// Tokens of a math expression as flat UTF-16 `(start, length, kind)` triples.
+    static func mathTokens(_ math: String) -> [Int32] { decode(call("mathTokens", math)) ?? [] }
 
     /// Every solveng token of a document (calculated code and math, its calls' strings and options), and `(start, end)`
     /// pairs of calculated code and call strings, plain under them.
@@ -164,10 +155,6 @@ enum SolvengSupport {
 
     static func hover(_ document: String, context: String, offset: Int) -> Hover? {
         decode(call("hover", document, context: context, offset: offset))
-    }
-
-    static func conversions(_ document: String, context: String, offset: Int) -> [Conversion] {
-        decode(call("conversions", document, context: context, offset: offset)) ?? []
     }
 
     static func formattingEdits(_ document: String, context: String, preceding: [TextEdit] = []) -> [TextEdit] {

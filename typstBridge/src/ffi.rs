@@ -651,13 +651,12 @@ mod solveng_tests {
         if !root.join("solveng/lib.typ").exists() { return; }
         let main = r#"#import "solveng/lib.typ": *
 #show: worksheet
-$U := 5 "V"$
-$U + 2 "s" =$
-```solveng
-x := U + 3 s =
-```
-Voltage: #value("U = mV").
-Bad: #value("q + 1"), #value($r + 2$).
+#import units: V, s, mV
+$U := 5 #V$
+$U + 2 #s =$
+$x := U + 3 #s =$
+Voltage: #value($U = mV$).
+Bad: #value($q + 1$), #value($r + 2$).
 "#;
         let root = CString::new(root.to_str().unwrap()).unwrap();
         let path = CString::new("main.typ").unwrap();
@@ -685,11 +684,11 @@ Bad: #value("q + 1"), #value($r + 2$).
     }
 
     #[test]
-    fn reports_solveng_errors_in_elements_and_call_strings() {
-        let main = r#"#show math.equation: it => it + context [#metadata((kind: "error", element: it.location(), message: "incompatible units", source: "")) <solveng>]
+    fn reports_solveng_errors_in_elements_and_call_math() {
+        let main = r#"#show math.equation: it => if it.body == $1 V + 2 s =$.body { it + context [#metadata((kind: "error", element: it.location(), message: "incompatible units", source: "")) <solveng>] } else { it }
 #metadata((kind: "error", element: none, message: "undefined q", source: "q + 1")) <solveng>
 #let value(expr) = []
-😀 $1 V + 2 s =$ #value("q + 1")"#;
+😀 $1 V + 2 s =$ #value($q + 1$)"#;
         let report = unsafe { compile_report(main) };
         assert_eq!(report["elements"].as_array().unwrap().len(), 0);
         let errors = report["errors"].as_array().unwrap();

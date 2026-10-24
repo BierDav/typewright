@@ -640,11 +640,8 @@ struct MarkdownView: View {
     }
 
     private static func code(_ text: String, language: String) -> AttributedString {
-        // ```solveng units=bar,ü: the document's own units
-        let words = language.split(separator: " ")
-        if words.first.map(String.init) == SolvengSupport.tag {
-            let units = words.first { $0.hasPrefix("units=") }.map { $0.dropFirst(6).split(separator: ",").map(String.init) } ?? []
-            return solveng(text, units: units)
+        if language.split(separator: " ").first.map(String.init) == SolvengSupport.tag {
+            return solveng(text)
         }
         return switch language {
         case "typc": Highlighter.highlighted(text, code: true, size: 12)
@@ -653,14 +650,11 @@ struct MarkdownView: View {
         }
     }
 
-    /// solveng code with powers and indices written out, coloured like the editor colours it.
-    private static func solveng(_ text: String, units: [String]) -> AttributedString {
-        let pretty = SolvengSupport.pretty(text, units: units)
-        let shown = pretty?.text ?? text
+    private static func solveng(_ text: String) -> AttributedString {
         let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        let storage = NSTextStorage(string: shown, attributes: [.font: font, .foregroundColor: NSColor.textColor])
-        InjectedLanguages.color(pretty?.tokens ?? [], in: storage, at: 0, length: storage.length, font: font)
-        return (try? AttributedString(storage, including: \.appKit)) ?? AttributedString(shown)
+        let storage = NSTextStorage(string: text, attributes: [.font: font, .foregroundColor: NSColor.textColor])
+        InjectedLanguages.color(SolvengSupport.mathTokens(text), in: storage, at: 0, length: storage.length, font: font)
+        return (try? AttributedString(storage, including: \.appKit)) ?? AttributedString(text)
     }
 
     /// The scheme of links to another function's docs, `typewright-docs:defined`.

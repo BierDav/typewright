@@ -75,8 +75,8 @@ final class SolvengContextTests: XCTestCase {
     }
 
     func testValueEditorFeatures() throws {
-        for expression in ["\"U_2 / 2 = mV\"", "$U_2 / 2 = \"mV\"$"] {
-            let document = "#show: worksheet\n$U_2 := 5 V$\nVoltage: #value(\(expression))."
+        for expression in ["$U_2 / 2 = mV$"] {
+            let document = "#import units: V, mV\n#show: worksheet\n$U_2 := 5 #V$\nVoltage: #value(\(expression))."
             let source = document as NSString
             let at = source.range(of: "U_2", options: .backwards).location
             let context = SolvengSupport.context(files: [], report: "", path: "main.typ", main: true)
@@ -106,7 +106,7 @@ final class SolvengContextTests: XCTestCase {
         let chapter = chapters.appendingPathComponent("one.typ")
         try "#import \"defaults.typ\": *\n#show: setup\n#show: worksheet\n#include \"chapters/one.typ\""
             .write(to: main, atomically: true, encoding: .utf8)
-        try "#let setup = worksheet.with(units: (bar: \"100 kPa\"))\n#worksheet(\"U := 5 V\")"
+        try "#let setup = worksheet.with(evaluate: true)\n#worksheet($U := 5$)"
             .write(to: root.appendingPathComponent("defaults.typ"), atomically: true, encoding: .utf8)
         try "#import \"../loop.typ\"\nText $P := U$".write(to: chapter, atomically: true, encoding: .utf8)
         try "#import \"chapters/one.typ\"".write(to: root.appendingPathComponent("loop.typ"), atomically: true, encoding: .utf8)
@@ -122,7 +122,7 @@ final class SolvengContextTests: XCTestCase {
         XCTAssertEqual(files.first?["path"], "main.typ")
         let context = files.compactMap { $0["text"] }.joined(separator: "\n")
         XCTAssertTrue(context.contains("#show: worksheet"), "the main file")
-        XCTAssertTrue(context.contains("units: (bar: \"100 kPa\")"), "its defaults")
+        XCTAssertTrue(context.contains("worksheet.with(evaluate: true)"), "its defaults")
         XCTAssertTrue(context.contains("#import \"chapters/one.typ\""), "the chapter's own import")
         XCTAssertFalse(context.contains("Text $P := U$"), "not the chapter itself, despite the loop")
     }
