@@ -2214,13 +2214,12 @@ struct CodeEditor: NSViewRepresentable {
             return fixes + solvengConversions(at: index).filter { conversion in !fixes.contains { $0.title == conversion.title } }
         }
 
-        /// solveng math ⇄ a solveng code block.
+        /// Fixes for explicit calculation bindings.
         private func solvengConversions(at index: Int) -> [QuickFix] {
             guard let tv = textView else { return [] }
             let text = tv.string
             let context = language?.solvengContext() ?? ""
             let found = SolvengSupport.unitFixes(text, context: context, offset: index)
-                + SolvengSupport.conversions(text, context: context, offset: index)
             return found.map { conversion in
                 QuickFix(id: "solveng.\(conversion.title)", title: conversion.title, icon: "arrow.left.arrow.right") { [weak self] in
                     guard let self, self.textView?.string == text else { return }

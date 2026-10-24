@@ -39,8 +39,6 @@ export const Solveng = {
   /** `items` replace `from..<(to ?? offset)`; `exclusive` ones replace typst's completions. */
   complete: (document: string, context: string, offset: number) =>
     compiler.solveng<{ from: number; to?: number; items: SolvengItem[]; exclusive: boolean } | null>("complete", document, context, offset),
-  conversions: (document: string, context: string, offset: number) =>
-    compiler.solveng<SolvengConversion[]>("conversions", document, context, offset),
   format: (document: string, context: string) =>
     compiler.solveng<{ start: number; end: number; text: string }[]>("format", document, context),
   fixes: (document: string, context: string, offset: number) =>
@@ -71,12 +69,12 @@ export const fenceClosing = EditorView.inputHandler.of((view, from, to, text) =>
 
 export type Conversion = { title: string; run: () => void };
 
-/** solveng math ⇄ a solveng code block at the caret; `around` is the text of the files around. */
+/** Calculation fixes at the caret. */
 export async function conversions(view: EditorView, around: string): Promise<Conversion[]> {
   const text = view.state.doc.toString();
   const offset = view.state.selection.main.head;
-  const [fixes, rewrites] = await Promise.all([Solveng.fixes(text, around, offset), Solveng.conversions(text, around, offset)]);
-  return [...fixes, ...rewrites].map((c) => ({
+  const fixes = await Solveng.fixes(text, around, offset);
+  return fixes.map((c) => ({
     title: c.title,
     run: () => {
       if (view.state.doc.toString() !== text) return;

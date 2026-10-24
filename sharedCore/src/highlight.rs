@@ -49,8 +49,6 @@ const ALIASES: &[(&str, &str)] = &[
     ("typc", "typc"),
     ("mermaid", "mermaid"),
     ("mmd", "mermaid"),
-    // Highlighted by solveng's own editor support (solveng-ide, in the typst bridge).
-    ("solveng", "solveng"),
 ];
 
 /// Canonical languages, for completing fence tags.

@@ -59,7 +59,7 @@ function injection(raw: string): { language: string; from: number; to: number } 
   if (!raw.startsWith("```")) return null;
   const parts = rawBlockParts(raw);
   const language = parts.length ? codeLanguage(raw.slice(parts[0], parts[1])) : null;
-  return language && language !== Solveng.TAG ? { language, from: parts[2], to: parts[3] } : null;
+  return language ? { language, from: parts[2], to: parts[3] } : null;
 }
 
 /** `ranges` without the parts `cuts` (sorted, not overlapping) cover. */

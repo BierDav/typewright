@@ -44,10 +44,6 @@ enum InjectedLanguages {
             Highlighter.apply(to: storage, range: range, font: font, code: language == "typc", depth: depth)
         case "markdown":
             MarkdownHighlighter.apply(to: storage, range: range, font: font, depth: depth)
-        case SolvengSupport.tag:
-            storage.addAttributes([.font: font, .foregroundColor: NSColor.textColor], range: range)
-            let code = (storage.string as NSString).substring(with: range)
-            color(SolvengSupport.tokens(code), in: storage, at: range.location, length: range.length, font: font)
         default:
             storage.addAttributes([.font: font, .foregroundColor: NSColor.textColor], range: range)
             let code = (storage.string as NSString).substring(with: range)
