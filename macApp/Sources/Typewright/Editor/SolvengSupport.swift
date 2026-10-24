@@ -95,6 +95,11 @@ enum SolvengSupport {
         let start: Int
         let end: Int
         let name: String
+        /// The name is in an import list, where renaming writes an alias (`pi as tau`) once it's done.
+        var inImport: Bool { importAlias ?? false }
+        private let importAlias: Bool?
+
+        enum CodingKeys: String, CodingKey { case start, end, name, importAlias = "import_alias" }
     }
 
     /// A problem solveng would report, found while typing, like an unknown unit.

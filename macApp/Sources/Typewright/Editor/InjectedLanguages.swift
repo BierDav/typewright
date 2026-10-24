@@ -15,6 +15,7 @@ enum InjectedLanguages {
     static let functionCall: Int32 = 12
     static let builtinFunction: Int32 = 13
     static let unitReference: Int32 = 14
+    static let constant: Int32 = 15
 
     /// Bounds Markdown in Typst in Markdown …, since each level highlights its body again.
     static let maxDepth = 3
@@ -55,6 +56,8 @@ enum InjectedLanguages {
     static func color(_ tokens: [Int32], in storage: NSTextStorage, at location: Int, length: Int, font: NSFont) {
         let italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
         let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        // Weight 7 of 15 is medium; families without it fall back to the regular face.
+        let medium = font.familyName.flatMap { NSFontManager.shared.font(withFamily: $0, traits: [], weight: 7, size: font.pointSize) } ?? font
         for i in stride(from: 0, to: tokens.count - 2, by: 3) {
             let start = Int(tokens[i]), count = Int(tokens[i + 1])
             // solveng's parameters: variables that stand out.
@@ -73,6 +76,12 @@ enum InjectedLanguages {
             if (tokens[i + 2] == functionCall || tokens[i + 2] == builtinFunction), start + count <= length {
                 let r = NSRange(location: location + start, length: count)
                 storage.addAttribute(.foregroundColor, value: tokens[i + 2] == builtinFunction ? Highlighter.typeColor : NSColor.textColor, range: r)
+                continue
+            }
+            if tokens[i + 2] == constant, start + count <= length {
+                let r = NSRange(location: location + start, length: count)
+                storage.addAttributes([.foregroundColor: Highlighter.constantColor,
+                                       .font: medium], range: r)
                 continue
             }
             if tokens[i + 2] == unitReference, start + count <= length {

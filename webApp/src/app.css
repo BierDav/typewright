@@ -34,6 +34,7 @@
   --hl-comment: #8c8c8c;
   --hl-math: #0e7c86;
   --hl-type: #1f7a6b;
+  --hl-constant: #c2185b;
   --hl-link: #0068da;
 }
 
@@ -62,6 +63,7 @@
     --hl-comment: #7a7e85;
     --hl-math: #5fb8c2;
     --hl-type: #4ec9b0;
+    --hl-constant: #f08db4;
     --hl-link: #4ea1ff;
   }
 }
@@ -91,6 +93,7 @@
   --hl-comment: #7a7e85;
   --hl-math: #5fb8c2;
   --hl-type: #4ec9b0;
+  --hl-constant: #f08db4;
   --hl-link: #4ea1ff;
 }
 
@@ -1062,6 +1065,11 @@ button.issue:hover:not(:disabled) {
 }
 .tw-unit-reference {
   color: var(--hl-comment);
+}
+/* solveng's constants (π, e, i, c): a colour nothing else uses */
+.tw-constant {
+  color: var(--hl-constant);
+  font-weight: 500;
 }
 .tw-plain {
   color: var(--text);

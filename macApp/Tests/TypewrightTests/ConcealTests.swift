@@ -96,6 +96,23 @@ final class ConcealTests: XCTestCase {
         XCTAssertNil(tv.collapsedSegment(at: NSPoint(x: box.midX, y: box.midY)))
     }
 
+    func testBindingHashCollapsesIntoItsName() throws {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = "#import units: cm\n#let inch = unit($2.54 #cm$)\n#show: worksheet\n$1#inch =$"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        let source = tv.string as NSString
+        let reference = source.range(of: "#inch", options: .backwards)
+        let segment = try XCTUnwrap(tv.collapsedSegmentBoxes(in: tv.bounds).first { $0.range == reference })
+        // The marker spans the shown name, not just the hidden `#`.
+        let name = try XCTUnwrap(tv.highlightBoxes(for: NSRange(location: reference.location + 1, length: 4)).first)
+        XCTAssertEqual(segment.box.width, name.width, accuracy: 0.5)
+        XCTAssertGreaterThan(segment.box.width, 0)
+        tv.setSelectedRange(NSRange(location: NSMaxRange(reference) - 1, length: 0))
+        XCTAssertFalse(tv.collapsedSegments.contains(reference))
+    }
+
     func testCollapsedIndicatorsFollowVisiblePieces() throws {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)

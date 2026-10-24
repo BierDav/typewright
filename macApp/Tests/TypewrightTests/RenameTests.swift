@@ -154,4 +154,60 @@ final class RenameTests: XCTestCase {
             XCTAssertEqual(tv.string, original, invalid)
         }
     }
+
+    /// Renames the name at `needle` (its `occurrence`th match) to `name` and returns the shown text before committing.
+    private func renameImported(_ original: String, at needle: String, occurrence: Int = 0, to name: String,
+                                commit: Bool = true) async -> (live: String, done: String) {
+        let (tv, c, language) = setUp(original)
+        language.source = { [weak tv] in tv?.string ?? "" }
+        var range = NSRange(location: 0, length: 0)
+        for _ in 0...occurrence {
+            let from = NSMaxRange(range)
+            range = (original as NSString).range(of: needle, range: NSRange(location: from, length: (original as NSString).length - from))
+        }
+        tv.setSelectedRange(NSRange(location: range.location, length: 0))
+        c.startRename()
+        await settle()
+        tv.insertText(name, replacementRange: tv.selectedRange())
+        let live = tv.string
+        if commit { c.commitRename() } else { c.cancelRename() }
+        await settle()
+        return (live, tv.string)
+    }
+
+    private let header = "#import \"@preview/solveng:1.0.0\": *\n"
+
+    func testRenamingAnImportedNameAtAUseAliasesItRightAway() async {
+        let result = await renameImported(header + "#import constants: pi\n#show: worksheet\n$x := 2 pi$", at: "pi$", to: "tau")
+        let expected = header + "#import constants: pi as tau\n#show: worksheet\n$x := 2 tau$"
+        XCTAssertEqual(result.live, expected)
+        XCTAssertEqual(result.done, expected)
+    }
+
+    func testRenamingAtTheImportWritesTheAliasWhenDone() async {
+        let result = await renameImported(header + "#import constants: pi\n#show: worksheet\n$x := 2 pi$", at: "pi\n", to: "tau")
+        XCTAssertEqual(result.live, header + "#import constants: tau\n#show: worksheet\n$x := 2 tau$")
+        XCTAssertEqual(result.done, header + "#import constants: pi as tau\n#show: worksheet\n$x := 2 tau$")
+    }
+
+    func testRenamingBackToTheModuleNameDropsTheAlias() async {
+        let original = header + "#import constants: pi as tau\n#show: worksheet\n$x := 2 tau$"
+        let fromUse = await renameImported(original, at: "tau$", to: "pi")
+        let expected = header + "#import constants: pi\n#show: worksheet\n$x := 2 pi$"
+        XCTAssertEqual(fromUse.live, expected, "a use drops the alias right away")
+        XCTAssertEqual(fromUse.done, expected)
+        let atImport = await renameImported(original, at: "tau\n", to: "pi")
+        XCTAssertEqual(atImport.live, header + "#import constants: pi as pi\n#show: worksheet\n$x := 2 pi$")
+        XCTAssertEqual(atImport.done, expected, "the import drops it once done")
+    }
+
+    func testRenamingAWildcardImportedNameAddsAnAliasImport() async {
+        let original = header + "#import constants: *\n#show: worksheet\n$x := 2 pi + pi$"
+        let expected = header + "#import constants: *\n#import constants: pi as tau\n#show: worksheet\n$x := 2 tau + tau$"
+        let result = await renameImported(original, at: "pi", to: "tau")
+        XCTAssertEqual(result.live, expected)
+        XCTAssertEqual(result.done, expected)
+        let cancelled = await renameImported(original, at: "pi", to: "tau", commit: false)
+        XCTAssertEqual(cancelled.done, original)
+    }
 }

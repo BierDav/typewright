@@ -551,7 +551,7 @@ final class EditorTests: XCTestCase {
     func testSolvengResultsAreBold() {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         // The = and -> that show a result stand out as in Mathcad; = in a definition or a step doesn't.
-        let storage = NSTextStorage(string: "#show: worksheet\n$t := Q_0/I = 1 \"h\"$ $V := 2 \"A\" = 2000 \"mA\"$ $x^2 = 4 -> solve(x)$\n")
+        let storage = NSTextStorage(string: "#import modifiers: solve\n#show: worksheet\n$t := Q_0/I = 1 \"h\"$ $V := 2 \"A\" = 2000 \"mA\"$ $x^2 = 4 -> solve(x)$\n")
         Highlighter.apply(to: storage, font: font)
         let s = storage.string as NSString
         func isBold(_ needle: String, from: String) -> Bool {

@@ -48,6 +48,8 @@ enum Highlighter {
     static let commentColor = color(0x8C8C8C, 0x7A7E85)
     static let mathColor = color(0x0E7C86, 0x5FB8C2)
     static let typeColor = color(0x1F7A6B, 0x4EC9B0)
+    /// solveng's constants (π, e, i, c): a colour nothing else uses.
+    static let constantColor = color(0xC2185B, 0xF08DB4)
 
     private static func foreground(_ tag: Tag) -> NSColor? {
         switch tag {

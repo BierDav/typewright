@@ -326,6 +326,16 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
                 i = end + 1
                 continue
             }
+            // A hidden prefix like the `#` of `#inch` collapses into the name it introduces, so that name is marked.
+            if c.replacement == 0, c.range.location == c.equation.location, NSMaxRange(c.equation) > NSMaxRange(c.range) {
+                var end = i
+                while end + 1 < conceals.count, conceals[end + 1].equation == c.equation,
+                      NSMaxRange(conceals[end + 1].range) <= NSMaxRange(c.equation) { end += 1 }
+                let box = NSRange(location: NSMaxRange(c.range), length: NSMaxRange(c.equation) - NSMaxRange(c.range))
+                singles.append((c.equation, box, conceals[i...end]))
+                i = end + 1
+                continue
+            }
             // Hidden quotes come in pairs.
             if c.replacement == 0, i + 1 < conceals.count, conceals[i + 1].replacement == 0, conceals[i + 1].equation == c.equation {
                 let close = conceals[i + 1].range
@@ -2303,9 +2313,14 @@ struct CodeEditor: NSViewRepresentable {
             /// Where the symbol was, for asking the server once the name is final.
             let origin: Int
             let text: String
-            let originalRanges: [NSRange]
-            let originalNames: [String]
+            /// What each range covered before the session; the server's edits can widen them or add new ones.
+            var originalRanges: [NSRange]
+            var originalNames: [String]
+            /// Ranges the server's edits added (a new import line) or widened (`pi as tau`).
+            var managed: [Bool]
             let solvengContext: String?
+            /// The name is renamed in its import: it shows as typed until the rename is done, then gets its alias.
+            let inImport: Bool
             var ranges: [NSRange]
             var primary: Int
             var pending: (range: NSRange, length: Int)?
@@ -2319,14 +2334,16 @@ struct CodeEditor: NSViewRepresentable {
             var registrationOff = false
 
             init(original: String, origin: Int, text: String, ranges: [NSRange], primary: Int, local: Bool = false,
-                 solvengContext: String? = nil) {
+                 solvengContext: String? = nil, inImport: Bool = false) {
                 self.original = original
                 self.origin = origin
                 self.text = text
                 self.ranges = ranges
                 self.originalRanges = ranges
                 self.originalNames = ranges.map { (text as NSString).substring(with: $0) }
+                self.managed = ranges.map { _ in false }
                 self.solvengContext = solvengContext
+                self.inImport = inImport
                 self.primary = primary
                 self.local = local ? ranges : nil
             }
@@ -2353,7 +2370,8 @@ struct CodeEditor: NSViewRepresentable {
                 guard tv.string == before, renameSession == nil else { return }
                 let s = before as NSString
                 let context = language.solvengContext()
-                let solveng = SolvengSupport.renameTarget(before, context: context, offset: target.range.location) != nil
+                let solvengTarget = SolvengSupport.renameTarget(before, context: context, offset: target.range.location)
+                let solveng = solvengTarget != nil
                 var ranges = (uses + [target.range]).filter {
                     NSMaxRange($0) <= s.length && (solveng || s.substring(with: $0) == target.name)
                 }
@@ -2363,7 +2381,8 @@ struct CodeEditor: NSViewRepresentable {
                 tv.breakUndoCoalescing()
                 // The session's keystrokes become one rename step, registered when it's committed.
                 renameSession = RenameSession(original: target.name, origin: target.range.location, text: before,
-                                              ranges: ranges, primary: primary, solvengContext: solveng ? context : nil)
+                                              ranges: ranges, primary: primary, solvengContext: solveng ? context : nil,
+                                              inImport: solvengTarget?.inImport ?? false)
                 tv.setSelectedRange(target.range)
                 showRenameRanges()
             }
@@ -2413,13 +2432,32 @@ struct CodeEditor: NSViewRepresentable {
             } else if let context = session.solvengContext {
                 let edits = SolvengSupport.rename(session.text, context: context, offset: session.origin, to: name)
                     .filter { $0.path == nil }
-                for i in names.indices {
-                    let original = session.originalRanges[i]
-                    if let edit = edits.first(where: { $0.start == original.location && $0.end == NSMaxRange(original) }) {
-                        names[i] = edit.text
-                    } else if i != session.primary {
-                        names[i] = (tv.string as NSString).substring(with: session.ranges[i])
+                let current = tv.string as NSString
+                var written = Array(repeating: false, count: names.count)
+                for edit in edits {
+                    let range = NSRange(location: edit.start, length: edit.end - edit.start)
+                    if let i = session.originalRanges.firstIndex(of: range) {
+                        // The edited name keeps the typed spelling where its import gets an alias only at the end.
+                        if !(i == session.primary && session.inImport) { names[i] = edit.text }
+                        written[i] = true
+                    } else if let i = session.originalRanges.indices.first(where: { overlaps(session.originalRanges[$0], range) }) {
+                        if i == session.primary { written[i] = true; continue }
+                        // An edit reaching past a use, like `pi as tau` back to `pi`: the range grows to cover it.
+                        widenRename(session, i, to: NSUnionRange(session.originalRanges[i], range))
+                        let base = session.originalRanges[i]
+                        names[i] = (session.originalNames[i] as NSString)
+                            .replacingCharacters(in: NSRange(location: range.location - base.location, length: range.length), with: edit.text)
+                        written[i] = true
+                    } else {
+                        // An edit elsewhere, like a new import line, shows right away too.
+                        let i = addRename(session, range)
+                        names.insert(edit.text, at: i)
+                        written.insert(true, at: i)
                     }
+                }
+                // Ranges the edits added or widened go back once no edit needs them; other uses stay as they are.
+                for i in names.indices where !written[i] && i != session.primary {
+                    names[i] = session.managed[i] ? session.originalNames[i] : current.substring(with: session.ranges[i])
                 }
             }
             for i in session.ranges.indices.reversed() {
@@ -2437,6 +2475,43 @@ struct CodeEditor: NSViewRepresentable {
             tv.setSelectedRange(NSRange(location: primary.location + min(max(position, 0), primary.length), length: 0))
             isMirroring = false
             showRenameRanges()
+        }
+
+        /// Whether two ranges share text, or an insertion falls inside the other.
+        private func overlaps(_ a: NSRange, _ b: NSRange) -> Bool {
+            NSIntersectionRange(a, b).length > 0 || (b.length == 0 && b.location > a.location && b.location < NSMaxRange(a))
+                || (a.length == 0 && a.location > b.location && a.location < NSMaxRange(b))
+        }
+
+        /// Where `original`, a range of the session's text, is now: shifted by the ranges before it.
+        private func currentLocation(_ session: RenameSession, of original: Int) -> Int {
+            var location = original
+            for j in session.ranges.indices where NSMaxRange(session.originalRanges[j]) <= original {
+                location += session.ranges[j].length - session.originalRanges[j].length
+            }
+            return location
+        }
+
+        /// Grows range `i` to `span` of the session's text; what it gains around it is still as it was.
+        private func widenRename(_ session: RenameSession, _ i: Int, to span: NSRange) {
+            let old = session.originalRanges[i]
+            let before = old.location - span.location, after = NSMaxRange(span) - NSMaxRange(old)
+            session.ranges[i] = NSRange(location: session.ranges[i].location - before, length: session.ranges[i].length + before + after)
+            session.originalRanges[i] = span
+            session.originalNames[i] = (session.text as NSString).substring(with: span)
+            session.managed[i] = true
+        }
+
+        /// Adds a range of the session's text to the session, in order; returns its index.
+        private func addRename(_ session: RenameSession, _ range: NSRange) -> Int {
+            let i = session.originalRanges.firstIndex { $0.location >= NSMaxRange(range) } ?? session.ranges.count
+            let current = NSRange(location: currentLocation(session, of: range.location), length: range.length)
+            session.ranges.insert(current, at: i)
+            session.originalRanges.insert(range, at: i)
+            session.originalNames.insert((session.text as NSString).substring(with: range), at: i)
+            session.managed.insert(true, at: i)
+            if i <= session.primary { session.primary += 1 }
+            return i
         }
 
         private func replaceForRename(_ range: NSRange, with text: String) {

@@ -35,7 +35,7 @@ const MATH = 4;
 
 /** `highlight::kind` from the Rust core. */
 // Then solveng's: parameters, variables that stand out, and the = or -> showing a result, bold as in Mathcad.
-const CODE_CLASS = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit", "tw-param tw-parameter", "tw-keyword tw-evaluate", "tw-plain", "tw-type", "tw-unit-reference"];
+const CODE_CLASS = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit", "tw-param tw-parameter", "tw-keyword tw-evaluate", "tw-plain", "tw-type", "tw-unit-reference", "tw-constant"];
 
 const marks = new Map<string, Decoration>();
 function mark(cls: string): Decoration {
