@@ -239,6 +239,9 @@ extension MarkdownBlock {
         case .paragraph(let text): text
         case .list(let items, let markers): zip(markers, items).map { ($0 == "•" ? "-" : $0) + " " + $1 }.joined(separator: "\n")
         case .image(let url): "![](\(url.absoluteString))"
+        case .quote(let inner, let alert):
+            ((alert.map { ["[!\($0.rawValue.uppercased())]"] } ?? []) + inner.map(\.markdown))
+                .joined(separator: "\n\n").components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
         }
     }
 }

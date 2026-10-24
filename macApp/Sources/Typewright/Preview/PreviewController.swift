@@ -23,17 +23,20 @@ final class PreviewController {
 
     @ObservationIgnored let view: PDFView = {
         let v = ArrowAwarePDFView()
-        v.autoScales = true
         v.displayMode = .singlePageContinuous
         v.displaysPageBreaks = true
+        // Pages run edge to edge; only the gap between pages stays.
+        let gap = v.pageBreakMargins.top + v.pageBreakMargins.bottom
+        v.pageBreakMargins = NSEdgeInsets(top: 0, left: 0, bottom: gap, right: 0)
         v.maxScaleFactor = 100
+        // Last, since setting the maximum scale ends autoScales.
+        v.autoScales = true
         // Clear so the pane's sidebar material shows around the pages.
         v.backgroundColor = .clear
         return v
     }()
 
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
-    @ObservationIgnored private var defaultMargins = NSEdgeInsets()
     @ObservationIgnored nonisolated(unsafe) private var magnifyMonitor: Any?
     /// Applied to the next document instead of keeping the current scroll position.
     @ObservationIgnored var pendingRestore: PreviewState?
@@ -45,8 +48,6 @@ final class PreviewController {
     @ObservationIgnored private var compiledPages: [CompiledPage] = []
 
     init() {
-        defaultMargins = view.pageBreakMargins
-        applyMargins(auto: true)
         let nc = NotificationCenter.default
         observers = [
             nc.addObserver(forName: .PDFViewScaleChanged, object: view, queue: .main) { [weak self] _ in
@@ -103,6 +104,10 @@ final class PreviewController {
             guard keepingPosition, view.document != nil, let scroll = view.documentView?.enclosingScrollView else {
                 view.document = document
                 insetForToolbar()
+                // PDFKit keeps the offset of its first layout when fitting, which leaves the top page scrolled.
+                if let first = document.page(at: 0) {
+                    align(index: 0, to: NSPoint(x: 0, y: first.bounds(for: view.displayBox).maxY), pan: nil, attempt: 0)
+                }
                 sync()
                 return
             }
@@ -177,7 +182,7 @@ final class PreviewController {
         sync()
     }
 
-    /// Pages end above the glass bar but scroll under it.
+    /// Pages fill the pane; the floating bar only shows on hover, over them.
     private func insetForToolbar() {
         guard let scroll = view.documentView?.enclosingScrollView else { return }
         scroll.automaticallyAdjustsContentInsets = false
@@ -186,9 +191,7 @@ final class PreviewController {
         scroll.autohidesScrollers = true
         // Light knobs vanish over white pages in dark mode.
         scroll.scrollerKnobStyle = .dark
-        // PDFKit's clip is flipped, so `top` is the space under the glass bar; a bottom inset would
-        // reserve it above the pages and shrink the scroll range, which breaks every restored spot.
-        scroll.contentInsets = NSEdgeInsets(top: 76, left: 0, bottom: 0, right: 0)
+        scroll.contentInsets = NSEdgeInsets()
     }
 
     func state() -> PreviewState? {
@@ -197,7 +200,7 @@ final class PreviewController {
                             page: doc.index(for: page), x: dest.point.x, y: dest.point.y)
     }
 
-    /// The top of the view as a page position, which the SVG and A4 HTML previews understand too.
+    /// The top of the view as a page position, shared with the SVG preview.
     func position() -> DocumentPosition? {
         guard let doc = view.document, let dest = topDestination(), let page = dest.page else { return nil }
         let bounds = page.bounds(for: view.displayBox)
@@ -304,7 +307,6 @@ final class PreviewController {
             view.autoScales = false
             return sync()
         }
-        applyMargins(auto: true)
         animateZoom(to: view.scaleFactorForSizeToFit) { [weak self] in
             self?.view.autoScales = true
             self?.sync()
@@ -365,20 +367,7 @@ final class PreviewController {
         scroll.reflectScrolledClipView(clip)
     }
 
-    /// Fit-to-width pages span the full pane; zoomed pages keep PDFKit's side margins. No margin above pages.
-    private func applyMargins(auto: Bool) {
-        var margins = defaultMargins
-        if auto { margins.left = 0; margins.right = 0 }
-        // The first page starts at the top edge; the gap between pages stays the same.
-        margins.bottom += margins.top
-        margins.top = 0
-        let current = view.pageBreakMargins
-        guard current.left != margins.left || current.right != margins.right || current.top != margins.top else { return }
-        view.pageBreakMargins = margins
-    }
-
     private func sync() {
-        applyMargins(auto: view.autoScales)
         scale = view.scaleFactor
         autoScales = view.autoScales
         pageCount = view.document?.pageCount ?? 0

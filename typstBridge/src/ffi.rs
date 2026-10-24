@@ -14,7 +14,7 @@ use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::Library;
-use typst_html::{HtmlDocument, HtmlOptions};
+use typst_html::HtmlDocument;
 use typst_kit::datetime::Time;
 use typst_kit::downloader::SystemDownloader;
 use typst_kit::files::FsRoot;
@@ -75,6 +75,22 @@ pub struct TWWorld {
     pdf_pages: Mutex<HashMap<u128, Arc<[u8]>>>,
     /// solveng's report from the last compile that produced a document, see `solveng_report`.
     solveng: Mutex<String>,
+    /// The large images of the last HTML outputs, which reference them as `twimage:` URLs.
+    images: Mutex<crate::images::PreviewImages>,
+    /// How each file read from disk looked when it was read, so a reset only drops the ones that changed.
+    stamps: Mutex<HashMap<FileId, Stamp>>,
+}
+
+/// Size, modification time and inode: a file whose stamp is unchanged needs no new read.
+#[derive(PartialEq)]
+struct Stamp(u64, std::time::SystemTime, u64);
+
+impl Stamp {
+    fn of(path: &std::path::Path) -> Option<Stamp> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Stamp(meta.len(), meta.modified().ok()?, meta.ino()))
+    }
 }
 
 impl TWWorld {
@@ -92,9 +108,22 @@ impl TWWorld {
         if let Some(text) = self.overlays.get(&id) {
             return Ok(Bytes::from_string(text.clone()));
         }
-        match id.root() {
+        // Stamped before reading, so a change while reading shows at the next reset.
+        let stamp = Self::path(&self.root, id).and_then(|path| Stamp::of(&path));
+        let bytes = match id.root() {
             VirtualRoot::Project => self.root.load(id.vpath()),
             VirtualRoot::Package(spec) => PACKAGES.obtain(spec)?.load(id.vpath()),
+        }?;
+        if let Some(stamp) = stamp {
+            self.stamps.lock().insert(id, stamp);
+        }
+        Ok(bytes)
+    }
+
+    fn path(root: &FsRoot, id: FileId) -> Option<PathBuf> {
+        match id.root() {
+            VirtualRoot::Project => root.resolve(id.vpath()).ok(),
+            VirtualRoot::Package(spec) => PACKAGES.obtain(spec).ok()?.resolve(id.vpath()).ok(),
         }
     }
 
@@ -126,10 +155,10 @@ impl TWWorld {
         }
         fn finish<T>(
             Warned { output, warnings }: Warned<typst::diag::SourceResult<T>>,
-            export: impl FnOnce(&T) -> typst::diag::SourceResult<Vec<u8>>,
+            export: impl FnOnce(&mut T) -> typst::diag::SourceResult<Vec<u8>>,
         ) -> (Option<Vec<u8>>, Vec<SourceDiagnostic>) {
             let mut diags: Vec<_> = warnings.into_iter().collect();
-            match output.and_then(|doc| export(&doc)) {
+            match output.and_then(|mut doc| export(&mut doc)) {
                 Ok(data) => (Some(data), diags),
                 Err(errors) => {
                     diags.splice(0..0, errors);
@@ -144,7 +173,7 @@ impl TWWorld {
             }),
             TWFormat::Html => finish(typst::compile::<HtmlDocument>(self), |doc| {
                 *self.solveng.lock() = solveng_report(self, &**doc.introspector());
-                typst_html::html(doc, &HtmlOptions::default()).map(String::into_bytes)
+                self.images.lock().html(doc)
             }),
             TWFormat::Svg => finish(typst::compile::<PagedDocument>(self), |doc| {
                 *self.solveng.lock() = solveng_report(self, &**doc.introspector());
@@ -308,6 +337,8 @@ pub unsafe extern "C" fn tw_world_new(root: *const c_char) -> *mut TWWorld {
         pdf_preview: Mutex::new(Vec::new()),
         pdf_pages: Mutex::new(HashMap::new()),
         solveng: Mutex::new("{}".into()),
+        images: Mutex::new(Default::default()),
+        stamps: Mutex::new(HashMap::new()),
     }))
 }
 
@@ -378,15 +409,20 @@ pub unsafe extern "C" fn tw_world_remove_overlay(world: *mut TWWorld, path: *con
 pub unsafe extern "C" fn tw_world_reset(world: *mut TWWorld) {
     let world = unsafe { &mut *world };
     let overlays = &world.overlays;
-    // Overlays and downloaded packages can't change on disk under us; local packages and failed downloads can.
+    let stamps = world.stamps.get_mut();
+    // Overlays and downloaded packages can't change on disk under us; local packages and failed reads can.
+    // Files read fine are read again only when their stamp changed: photos and packages are large.
     for (id, slot) in world.slots.get_mut().iter_mut() {
+        let failed = matches!(slot.source, Some(Err(_))) || matches!(slot.file, Some(Err(_)));
         let on_disk = match id.root() {
             VirtualRoot::Project => !overlays.contains_key(id),
-            VirtualRoot::Package(spec) => {
-                spec.namespace != "preview" || matches!(slot.source, Some(Err(_))) || matches!(slot.file, Some(Err(_)))
-            }
+            VirtualRoot::Package(spec) => spec.namespace != "preview" || failed,
         };
-        if on_disk {
+        let unchanged = !failed && stamps.get(id).is_some_and(|stamp| {
+            TWWorld::path(&world.root, *id).and_then(|path| Stamp::of(&path)).as_ref() == Some(stamp)
+        });
+        if on_disk && !unchanged {
+            stamps.remove(id);
             slot.invalidate();
         }
     }
@@ -569,6 +605,62 @@ pub unsafe extern "C" fn tw_refactor(request: *const c_char) -> *mut c_char {
     CString::new(refactor_json(unsafe { str(request) })).unwrap_or_default().into_raw()
 }
 
+// MARK: - Preview images
+
+pub struct TWPreviewImages(Mutex<crate::images::PreviewImages>);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tw_preview_images_new() -> *mut TWPreviewImages {
+    Box::into_raw(Box::new(TWPreviewImages(Mutex::new(Default::default()))))
+}
+
+/// # Safety
+/// `images` must come from `tw_preview_images_new` and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_preview_images_free(images: *mut TWPreviewImages) {
+    drop(unsafe { Box::from_raw(images) });
+}
+
+/// Preview HTML with large `data:` images swapped for `twimage:` URLs. Free with `tw_bytes_free`.
+///
+/// # Safety
+/// `images` must be valid, `html` point to `len` bytes and `out_len` be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_preview_images_rewrite(
+    images: *mut TWPreviewImages, html: *const u8, len: usize, out_len: *mut usize,
+) -> *mut u8 {
+    let html = if len == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(html, len) } };
+    let out = unsafe { &*images }.0.lock().rewrite(html);
+    byte_result(out, out_len)
+}
+
+/// The image behind `twimage:///<mime>/<id>`, NULL once no recent output uses it. Free with `tw_bytes_free`.
+///
+/// # Safety
+/// `out_len` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_preview_image(id: u64, out_len: *mut usize) -> *mut u8 {
+    match crate::images::image(id) {
+        Some(data) => byte_result(data, out_len),
+        None => std::ptr::null_mut(),
+    }
+}
+
+fn byte_result(data: Vec<u8>, out_len: *mut usize) -> *mut u8 {
+    let mut data = data.into_boxed_slice();
+    unsafe { *out_len = data.len() };
+    let ptr = data.as_mut_ptr();
+    std::mem::forget(data);
+    ptr
+}
+
+/// # Safety
+/// `data` and `len` must come from one of this library's byte results.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_bytes_free(data: *mut u8, len: usize) {
+    drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len)) });
+}
+
 // MARK: - Markdown
 
 /// # Safety
@@ -589,6 +681,43 @@ pub extern "C" fn tw_markdown_code_css() -> *mut c_char {
 #[cfg(test)]
 mod solveng_tests {
     use super::*;
+
+    #[test]
+    fn reset_rereads_only_files_that_changed() {
+        let dir = std::env::temp_dir().join(format!("tw-reset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.typ"), "#read(\"a.txt\") #read(\"b.txt\")").unwrap();
+        std::fs::write(dir.join("a.txt"), "alpha").unwrap();
+        std::fs::write(dir.join("b.txt"), "bravo").unwrap();
+        let (root, main) = (CString::new(dir.to_str().unwrap()).unwrap(), CString::new("main.typ").unwrap());
+        unsafe {
+            let world = tw_world_new(root.as_ptr());
+            tw_world_set_main(world, main.as_ptr());
+            let html = |world| {
+                let result = tw_world_compile(world, TWFormat::Html);
+                let text = String::from_utf8_lossy(std::slice::from_raw_parts(result.data, result.len)).into_owned();
+                tw_result_free(result);
+                text
+            };
+            assert!(html(world).contains("alpha bravo"));
+            let slot_kept = |world: *mut TWWorld, name: &str| {
+                let id = TWWorld::id(name).unwrap();
+                (*world).slots.lock().get(&id).is_some_and(|slot| slot.file.is_some())
+            };
+            // Same size, new content: the stamp changes with the modification time.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::fs::write(dir.join("a.txt"), "ALPHA").unwrap();
+            tw_world_reset(world);
+            assert!(!slot_kept(world, "a.txt"));
+            assert!(slot_kept(world, "b.txt"), "unchanged files stay cached");
+            assert!(html(world).contains("ALPHA bravo"));
+            std::fs::remove_file(dir.join("b.txt")).unwrap();
+            tw_world_reset(world);
+            assert!(!slot_kept(world, "b.txt"));
+            tw_world_free(world);
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn pdf_preview_reuses_unchanged_buffers() {

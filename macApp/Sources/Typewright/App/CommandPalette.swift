@@ -755,9 +755,6 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "settings.htmlDark", title: "\(html.darkMode ? "Turn Off" : "Turn On") Dark HTML Preview",
                                      icon: "doc.richtext", section: "Settings", keywords: ["preview", "invert", "setting"],
                                      action: .run { html.darkMode.toggle() }))
-            items.append(PaletteItem(id: "settings.htmlPages", title: "\(html.pages ? "Turn Off" : "Turn On") A4 Pages in HTML Preview",
-                                     icon: "doc.plaintext", section: "Settings", keywords: ["preview", "paginate", "setting"],
-                                     action: .run { html.pages.toggle() }))
         }
         let layout = KeyLayout.current
         for other in KeyLayout.all where other.id != layout.id {

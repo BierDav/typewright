@@ -54,6 +54,7 @@ struct GeneralSettings: View {
     @AppStorage("ignoreLibraryWarnings") private var ignoreLibraryWarnings = true
     @AppStorage("appearance") private var appearance = Appearance.system.rawValue
     @AppStorage(PreviewPosition.defaultsKey) private var previewPosition = PreviewPosition.trailing
+    @AppStorage(DarkModeWarning.defaultsKey) private var warnsAboutDarkMode = true
     @Bindable private var compilers = CompilerManager.shared
     @Bindable private var textSize = PreviewTextSize.shared
 
@@ -71,12 +72,13 @@ struct GeneralSettings: View {
                     ForEach(PreviewPosition.allCases) { Text($0.title).tag($0) }
                 }
                 Stepper(value: $textSize.size, in: PreviewTextSize.range, step: 1) {
-                    LabeledContent("Text size", value: "\(Int(textSize.size.rounded())) px")
+                    LabeledContent("Markdown text size", value: "\(Int(textSize.size.rounded())) px")
                 }
+                Toggle("Warn when HTML ignores dark mode", isOn: $warnsAboutDarkMode)
             } header: {
                 Text("Preview")
             } footer: {
-                Text("For Markdown and for HTML without A4 pages. Zooming those previews changes it too.")
+                Text("Zooming Markdown previews changes this size. HTML previews use browser zoom.")
                     .foregroundStyle(.secondary)
             }
 

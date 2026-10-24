@@ -334,13 +334,31 @@ final class LanguageClient {
         let scratch = url.deletingLastPathComponent().appendingPathComponent(".typewright-docs-\(url.lastPathComponent)")
         open(scratch, text: filled as String)
         let offset = range.location + (item.label as NSString).length - 1
-        return await hover(in: scratch, text: filled, at: offset)?.markdown
+        return await documentedHover(in: scratch, text: filled, at: offset)?.markdown
+    }
+
+    /// Like `hover`, with functions taking their parameters through `..args`, like a package's override of `grid`,
+    /// documented from their own doc comment: tinymist leaves out every parameter the signature doesn't name.
+    func documentedHover(in url: URL, text: NSString, at offset: Int) async -> (markdown: String, range: NSRange?)? {
+        guard let docs = await hover(in: url, text: text, at: offset) else { return nil }
+        guard FunctionDocs(markdown: docs.markdown)?.parameters.contains(where: { $0.name.hasPrefix("..") }) == true,
+              let (source, line) = await definitionSource(in: url, text: text, at: offset),
+              let own = overriddenFunctionDocs(source: source, line: line) else { return docs }
+        return (own, docs.range)
+    }
+
+    /// The text of the file defining what's at `offset`, and the definition's line.
+    private func definitionSource(in url: URL, text: NSString, at offset: Int) async -> (String, Int32)? {
+        guard let target = await definition(in: url, text: text, at: offset) else { return nil }
+        let source = target.url == url.standardizedFileURL ? text as String : try? String(contentsOf: target.url, encoding: .utf8)
+        return source.map { ($0, Int32(clamping: target.line)) }
     }
 
     /// A string or MarkupContent; nil when empty.
     private static func markdown(_ value: Any?) -> String? {
         let text = value as? String ?? (value as? [String: Any])?["value"] as? String
-        return text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? text : nil
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return repairUnparsedDocs(markdown: text)
     }
 
     /// Where the symbol or path at `offset` is defined, as a file and a zero-based line and column.
@@ -376,13 +394,20 @@ final class LanguageClient {
         let contents = result["contents"]
         let markdown = (contents as? [Any]).map { $0.compactMap(plain).joined(separator: "\n\n") } ?? plain(contents)
         guard let markdown, !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return (markdown, (result["range"] as? [String: Any]).flatMap { Self.range($0, in: text) })
+        return (repairUnparsedDocs(markdown: markdown), (result["range"] as? [String: Any]).flatMap { Self.range($0, in: text) })
     }
 
     /// Docs of the named argument at `offset`, like `unit` in `solve(x, unit: "min")`, which hover doesn't cover.
     func parameterDocs(in url: URL, text: NSString, at offset: Int) async -> (markdown: String, range: NSRange?)? {
-        guard let argument = namedArgument(text: text as String, offset: Int32(clamping: offset)),
-              let result = await request("textDocument/signatureHelp", Self.position(url, text, offset)) as? [String: Any],
+        guard let argument = namedArgument(text: text as String, offset: Int32(clamping: offset)) else { return nil }
+        let range = NSRange(location: Int(argument.range.location), length: Int(argument.range.length))
+        // Documented in the function's own comment when its signature only has `..args`.
+        if let callee = calleeName(text: text as String, offset: Int32(clamping: offset)),
+           let (source, line) = await definitionSource(in: url, text: text, at: Int(callee.location)),
+           let docs = overriddenParameterDocs(source: source, line: line, name: argument.name) {
+            return (docs, range)
+        }
+        guard let result = await request("textDocument/signatureHelp", Self.position(url, text, offset)) as? [String: Any],
               let signatures = result["signatures"] as? [[String: Any]], !signatures.isEmpty else { return nil }
         let signature = signatures[min(result["activeSignature"] as? Int ?? 0, signatures.count - 1)]
         let label = signature["label"] as? String ?? ""
@@ -391,7 +416,6 @@ final class LanguageClient {
         else { return nil }
         let docs = parameter["documentation"].flatMap { ($0 as? String) ?? ($0 as? [String: Any])?["value"] as? String } ?? ""
         let type = parameterType(signature: label, name: argument.name).map { ": \($0)" } ?? ""
-        let range = NSRange(location: Int(argument.range.location), length: Int(argument.range.length))
         return ("```typc\n\(argument.name)\(type)\n```" + (docs.isEmpty ? "" : "\n\n" + docs), range)
     }
 

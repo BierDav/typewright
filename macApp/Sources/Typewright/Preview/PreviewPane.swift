@@ -78,6 +78,9 @@ enum PreviewPosition: String, CaseIterable, Identifiable {
 struct PreviewPane: View {
     let workspace: Workspace
     @State private var hovering = false
+    @AppStorage(DarkModeWarning.defaultsKey) private var warnsAboutDarkMode = true
+    @State private var darkModeWarningDismissed = false
+    @Environment(\.colorScheme) private var colorScheme
     private var preview: PreviewController { workspace.preview }
     private var htmlPreview: HTMLPreviewController { workspace.htmlPreview }
     private var markdownPreview: HTMLPreviewController { workspace.markdownPreview }
@@ -112,6 +115,20 @@ struct PreviewPane: View {
         .overlay(alignment: .bottom) {
             FloatingBar(isVisible: hovering && (compilers.active != nil || markdown) && workspace.previewFile != nil) { bar }
         }
+        .overlay(alignment: .top) {
+            if showsDarkModeWarning {
+                // An existing import decides the version; only the show rule is missing.
+                DarkModeWarning(letmeout: workspace.previewImportsLetmeout ? [""] : PackageLibrary.shared.newestSpecs(of: "letmeout"),
+                                add: workspace.addLetmeout,
+                                dismiss: { darkModeWarningDismissed = true }, suppress: { warnsAboutDarkMode = false })
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: showsDarkModeWarning)
+        // Dismissing lasts while this preview stays up; coming back to it warns again.
+        .onChange(of: wouldWarnAboutDarkMode) { _, warns in if !warns { darkModeWarningDismissed = false } }
+        .onChange(of: workspace.previewFile) { darkModeWarningDismissed = false }
+        .onDisappear { darkModeWarningDismissed = false }
         .onHover { hovering = $0 }
         .onChange(of: workspace.document) { _, doc in preview.show(doc) }
         .onChange(of: workspace.html) { _, html in htmlPreview.show(html, baseURL: baseURL) }
@@ -121,6 +138,14 @@ struct PreviewPane: View {
             htmlPreview.show(workspace.html, baseURL: baseURL)
             markdownPreview.show(workspace.markdownHTML, baseURL: baseURL)
         }
+    }
+
+    /// Dark HTML preview of a document that doesn't style itself for dark mode.
+    private var showsDarkModeWarning: Bool { wouldWarnAboutDarkMode && !darkModeWarningDismissed }
+
+    private var wouldWarnAboutDarkMode: Bool {
+        warnsAboutDarkMode && !markdown && workspace.renderMode == .html && htmlPreview.darkMode && colorScheme == .dark
+            && workspace.html != nil && !htmlPreview.handlesColorScheme
     }
 
     private var firstError: String? {
@@ -168,8 +193,6 @@ struct PreviewPane: View {
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
-                Toggle("A4 Pages", isOn: Bindable(htmlPreview).pages)
-                    .disabled(workspace.renderMode != .html)
                 Toggle("Dark Mode", isOn: Bindable(htmlPreview).darkMode).disabled(workspace.renderMode != .html)
             }
             Divider()
@@ -199,6 +222,62 @@ struct PreviewPane: View {
             alert.informativeText = error
             alert.runModal()
         }
+    }
+}
+
+/// Explains that dark mode only switches the page's color scheme, which typst's own HTML doesn't follow.
+struct DarkModeWarning: View {
+    static let defaultsKey = "htmlDarkModeWarning"
+    /// The newest letmeout of each namespace that has one, like `@preview/letmeout:0.2.0`; `[""]` when it's imported already.
+    let letmeout: [String]
+    let add: (String) -> Void
+    let dismiss: () -> Void
+    let suppress: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("This document ignores dark mode", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+                .symbolRenderingMode(.multicolor)
+            Text("Typewright only sets the browser's color scheme. Typst's HTML output doesn't adapt to it, so it's recommended to use a package that handles dark mode, like letmeout.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Don't Show Again", action: suppress)
+                Spacer()
+                Button("Dismiss", action: dismiss)
+                if letmeout.count > 1 {
+                    // The same package in several namespaces; which one is the user's call.
+                    Menu("Add letmeout") {
+                        ForEach(letmeout, id: \.self) { spec in Button(spec) { add(spec) } }
+                    }
+                    .fixedSize()
+                } else if let spec = letmeout.first {
+                    Button("Add letmeout") { add(spec) }
+                        .help(spec.isEmpty ? "Adds #show: letmeout below its import" : spec)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 440)
+        .background(StillArea())
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .padding(12)
+    }
+}
+
+/// Takes clicks between controls, so they don't drag the window.
+private struct StillArea: NSViewRepresentable {
+    final class Still: NSView {
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func mouseDown(with event: NSEvent) {}
+    }
+
+    func makeNSView(context: Context) -> Still { Still() }
+    func updateNSView(_ view: Still, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: Still, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
 }
 
@@ -242,19 +321,19 @@ struct PDFZoomControls: View {
     }
 }
 
-/// A4 pages zoom like the PDF preview; reflowing text changes the text size shared by all such previews.
+/// HTML uses browser zoom; Markdown shares its text size across previews.
 struct HTMLZoomControls: View {
     let controller: HTMLPreviewController
 
     var body: some View {
-        if controller.paged {
-            let percent = "\(Int((controller.effectiveScale * 100).rounded()))%"
+        if !controller.isMarkdown {
+            let percent = "\(Int((controller.zoomScale * 100).rounded()))%"
             Button { controller.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
                 .help("Zoom out")
             Button { controller.resetZoom() } label: {
-                Text(controller.pageScale == nil ? "Auto (\(percent))" : percent).monospacedDigit().frame(minWidth: 38)
+                Text(percent).monospacedDigit().frame(minWidth: 38)
             }
-            .help(controller.pageScale == nil ? "Fitting to width" : "Fit to width")
+            .help("Actual size")
             Button { controller.zoomIn() } label: { Image(systemName: "plus.magnifyingglass") }
                 .help("Zoom in")
         } else {

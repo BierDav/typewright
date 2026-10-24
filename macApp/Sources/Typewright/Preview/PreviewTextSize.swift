@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// Text size of the reflowing previews (HTML without A4 pages, and Markdown); zooming them changes it everywhere.
+/// Markdown text size, shared across previews.
 @MainActor @Observable
 final class PreviewTextSize {
     static let shared = PreviewTextSize()

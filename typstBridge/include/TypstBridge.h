@@ -9,6 +9,7 @@ typedef struct TWWorld TWWorld;
 
 typedef enum : uint8_t {
     TWFormatPDF = 0,
+    /// For the preview: large images become `twimage:` URLs, see `tw_preview_image`.
     TWFormatHTML = 1,
     /// Pages as SVG documents separated by NUL bytes.
     TWFormatSVG = 2,
@@ -93,6 +94,17 @@ void tw_string_free(char *_Nonnull string);
 /// names, count}`, edits as `{start, length, text}` in the old text, names as `[start, length]` in the new one.
 /// Free with `tw_string_free`.
 char *_Nonnull tw_refactor(const char *_Nonnull request);
+
+/// The large images of one HTML preview's recent outputs, for HTML from an external compiler; thread safe.
+typedef struct TWPreviewImages TWPreviewImages;
+TWPreviewImages *_Nonnull tw_preview_images_new(void);
+void tw_preview_images_free(TWPreviewImages *_Nonnull images);
+/// Swaps large `data:` images in `html` for `twimage:///<mime>/<id>` URLs; free with `tw_bytes_free`.
+uint8_t *_Nonnull tw_preview_images_rewrite(TWPreviewImages *_Nonnull images, const uint8_t *_Nullable html, size_t len,
+                                            size_t *_Nonnull out_len);
+/// The bytes behind a `twimage:` id, NULL once no recent output uses it; free with `tw_bytes_free`.
+uint8_t *_Nullable tw_preview_image(uint64_t id, size_t *_Nonnull out_len);
+void tw_bytes_free(uint8_t *_Nonnull data, size_t len);
 
 /// GitHub flavored Markdown as HTML, math as MathML and code with syntect classes; free with `tw_string_free`.
 char *_Nonnull tw_markdown_html(const uint8_t *_Nullable text, size_t len);

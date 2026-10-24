@@ -2754,12 +2754,14 @@ dependencies = [
 name = "typst-bridge"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "comrak",
  "ecow",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "js-sys",
+ "memchr",
  "parking_lot",
  "pulldown-latex",
  "serde",

@@ -275,7 +275,7 @@ final class Opener {
         isRestoringSession = true
         for session in windows {
             let resolved = session.space.map { Self.resolve($0) }
-            show(MainWindowController(space: resolved?.space, file: session.file ?? resolved?.file, restoring: session), frame: session.frame)
+            show(MainWindowController(space: resolved?.space, file: session.file ?? resolved?.file, restoring: session), session: session)
         }
         if windows.isEmpty { show(MainWindowController(space: nil)) }
         isRestoringSession = false
@@ -315,7 +315,7 @@ final class Opener {
         controllers.forEach { $0.state.workspace?.flushSaves() }
     }
 
-    private func show(_ controller: MainWindowController, frame: String? = nil) {
+    private func show(_ controller: MainWindowController, session: WindowSession? = nil) {
         controller.onClose = { [weak self, weak controller] in
             if let controller { self?.closed(controller) }
         }
@@ -325,12 +325,13 @@ final class Opener {
             window.setFrame(front.frame, display: false)
             window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: front.frame.minX, y: front.frame.maxY)))
         }
-        if let frame, let window = controller.window {
-            let rect = NSRectFromString(frame)
-            if !rect.isEmpty { window.setFrame(window.constrainFrameRect(rect, to: window.screen), display: false) }
-        }
+        if let rect = session?.placement(), let window = controller.window { window.setFrame(rect, display: false) }
         controllers.append(controller)
         controller.showWindow(nil)
+        // Full screen opens on the display the window is on now.
+        if session?.fullScreen == true, let window = controller.window {
+            DispatchQueue.main.async { if !window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) } }
+        }
         saveSession()
     }
 

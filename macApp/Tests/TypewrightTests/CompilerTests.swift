@@ -93,14 +93,17 @@ final class CompilerTests: XCTestCase {
         XCTAssertEqual((text as NSString).substring(with: NSRange(location: error.column - 1, length: length)), "nope")
     }
 
-    func testHTMLKeepsFontFamiliesAndUserLines() async {
+    func testHTMLIsTypstsOwnOutputWithUserLines() async throws {
         let main = "#set text(font: \"Georgia\")\nHi\n\n#nope"
         let failed = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: ["main.typ": main], format: .html)
         XCTAssertEqual(failed.diagnostics.first?.path, "main.typ")
         XCTAssertEqual(failed.diagnostics.first?.line, 4)
         let result = await BuiltinCompiler(root: root).compile(main: "main.typ", buffers: ["main.typ": "#set text(font: \"Georgia\")\nHi"],
                                                                format: .html)
-        XCTAssertTrue(String(decoding: result.output ?? Data(), as: UTF8.self).contains("font-family: &quot;georgia&quot;"))
+        let html = String(decoding: try XCTUnwrap(result.output), as: UTF8.self)
+        XCTAssertTrue(html.contains("<p>Hi</p>"))
+        // Fonts reach HTML through the document (letmeout), not through the preview.
+        XCTAssertFalse(html.contains("font-family"))
     }
 
     func testIncrementalPDFKeepsUnchangedPages() async {

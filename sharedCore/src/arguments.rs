@@ -59,6 +59,39 @@ pub fn named_argument(text: &str, offset: i32) -> Option<NamedArgument> {
     None
 }
 
+/// The name of the function whose call's parentheses hold `offset`, like `grid` in `grid(columns: 2)`.
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn callee_name(text: &str, offset: i32) -> Option<TextRange> {
+    let t = Utf16::new(text);
+    let at = t.clamp(offset);
+    let escaped = |i: usize| i > 0 && t.at(i - 1) == '\\';
+    let mut quoted = (0..at).rev().take_while(|&j| t.at(j) != '\n').filter(|&j| t.at(j) == '"' && !escaped(j)).count() % 2 == 1;
+    let mut depth = 0;
+    for i in (at.saturating_sub(LOOKBACK)..at).rev() {
+        let c = t.at(i);
+        if c == '"' && !escaped(i) {
+            quoted = !quoted;
+        }
+        if quoted {
+            continue;
+        }
+        match c {
+            ')' | ']' | '}' => depth += 1,
+            '(' if depth == 0 => {
+                let mut start = i;
+                while start > 0 && is_name(t.at(start - 1)) {
+                    start -= 1;
+                }
+                return (start < i).then(|| TextRange { location: start as i32, length: (i - start) as i32 });
+            }
+            '[' | '{' if depth == 0 => return None,
+            '(' | '[' | '{' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The type a signature like `solve(approx: auto | bool, unit: str)` gives the parameter `name`.
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
 pub fn parameter_type(signature: &str, name: &str) -> Option<String> {
@@ -147,6 +180,16 @@ mod tests {
         assert_eq!(None, named_argument(text, at("@Q")), "positional");
         assert_eq!(None, named_argument("#let unit: x", 6));
         assert_eq!(None, named_argument("Note: (unit: x)", 0));
+    }
+
+    #[test]
+    fn finds_callees() {
+        let text = "#grid(columns: (1fr, 2fr), \"(\", fill: red)[a]";
+        let at = |needle: &str| text.find(needle).unwrap() as i32;
+        assert_eq!(Some(TextRange { location: 1, length: 4 }), callee_name(text, at("columns")));
+        assert_eq!(Some(TextRange { location: 1, length: 4 }), callee_name(text, at("fill")));
+        assert_eq!(None, callee_name(text, at("1fr")), "inside an array");
+        assert_eq!(None, callee_name(text, at("a]")));
     }
 
     #[test]

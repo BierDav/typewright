@@ -104,6 +104,105 @@ fn unquote(text: &str, quote: char) -> &str {
     }
 }
 
+/// Edits applying a package's function to the whole document, like `#show: letmeout`. An existing `#import` of the
+/// package is reused: the rule goes right below it, naming the function as that import makes it visible (adding it to
+/// an item list that lacks it). Without one, `spec` is imported at the top.
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn show_rule_edits(text: &str, package: &str, function: &str, spec: &str) -> Vec<crate::text::TextEdit> {
+    let at = |byte: usize| crate::utf16::len(&text[..byte]);
+    let edit = |byte: usize, new_text: String| crate::text::TextEdit {
+        range: crate::text::TextRange { location: at(byte), length: 0 },
+        new_text,
+    };
+    let Some(import) = package_import(text, package) else {
+        let gap = if text.is_empty() { "" } else { "\n" };
+        return vec![edit(0, format!("#import \"{spec}\": *\n#show: {function}\n{gap}"))];
+    };
+    let mut edits = vec![];
+    let name = match &import.items {
+        Items::All => function.to_string(),
+        Items::None => format!("{}.{function}", import.alias.as_deref().unwrap_or(package)),
+        Items::List { names, end } => match names.iter().find(|(name, _)| name == function) {
+            Some((_, alias)) => alias.clone().unwrap_or_else(|| function.to_string()),
+            None => {
+                let comma = if text[..*end].trim_end().ends_with(',') { " " } else { ", " };
+                edits.push(edit(text[..*end].trim_end().len(), format!("{comma}{function}")));
+                function.to_string()
+            }
+        },
+    };
+    let line_end = text[import.end..].find('\n').map_or(text.len(), |i| import.end + i);
+    edits.push(edit(line_end, format!("\n#show: {name}")));
+    edits
+}
+
+/// Whether the text has a top-level `#import` of `package`, from any namespace.
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn imports_package(text: &str, package: &str) -> bool {
+    package_import(text, package).is_some()
+}
+
+enum Items {
+    /// `: *`
+    All,
+    /// A bare import, binding the module.
+    None,
+    /// `: a, b as c`, with each name's alias and where the list ends.
+    List { names: Vec<(String, Option<String>)>, end: usize },
+}
+
+struct Import {
+    alias: Option<String>,
+    items: Items,
+    /// Where the statement ends, in bytes.
+    end: usize,
+}
+
+/// The first top-level `#import "@namespace/package:version"` of `package`.
+fn package_import(text: &str, package: &str) -> Option<Import> {
+    static IMPORT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?m)^[ \t]*#import[ \t]+"@[\w-]+/([\w-]+):[\w.-]+""#).unwrap()
+    });
+    let found = IMPORT.captures_iter(text).find(|c| &c[1] == package)?;
+    let mut rest = found.get(0)?.end();
+    let skip = |i: usize| i + text[i..].len() - text[i..].trim_start_matches([' ', '\t']).len();
+    let word = |i: usize| text[i..].find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).map_or(text.len(), |e| i + e);
+    let mut alias = None;
+    let after = skip(rest);
+    if text[after..].starts_with("as ") {
+        let start = skip(after + 3);
+        alias = Some(text[start..word(start)].to_string());
+        rest = word(start);
+    }
+    let colon = skip(rest);
+    if !text[colon..].starts_with(':') {
+        return Some(Import { alias, items: Items::None, end: rest });
+    }
+    let start = skip(colon + 1);
+    if text[start..].starts_with('*') {
+        return Some(Import { alias, items: Items::All, end: start + 1 });
+    }
+    // Items up to the line's end, or the closing parenthesis of a wrapped list.
+    let (body, end, close) = if text[start..].starts_with('(') {
+        let close = start + text[start..].find(')')?;
+        (&text[start + 1..close], close, close + 1)
+    } else {
+        let end = text[start..].find(['\n', ';']).map_or(text.len(), |e| start + e);
+        let body = text[start..end].split("//").next().unwrap_or("");
+        (body, start + body.trim_end().len(), start + body.trim_end().len())
+    };
+    let names = body
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| match item.split_once(" as ") {
+            Some((name, alias)) => (name.trim().to_string(), Some(alias.trim().to_string())),
+            None => (item.to_string(), None),
+        })
+        .collect();
+    Some(Import { alias, items: Items::List { names, end }, end: close })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +240,23 @@ mod tests {
         let manifest = PackageManifest { name: "my-pkg".into(), version: "0.2.1".into() };
         assert_eq!(Some(manifest), package_manifest(toml));
         assert_eq!(None, package_manifest("[package]\nname = \"x\""));
+    }
+    #[test]
+    fn adds_show_rules_below_existing_imports() {
+        let apply = |text: &str| crate::text::apply_text_edits(show_rule_edits(text, "letmeout", "letmeout", "@preview/letmeout:0.2.0"), text);
+        assert_eq!("#import \"@preview/letmeout:0.2.0\": *\n#show: letmeout\n\n= Hi", apply("= Hi"));
+        assert_eq!("#import \"@preview/letmeout:0.2.0\": *\n#show: letmeout\n", apply(""));
+        assert_eq!("#set page(a4)\n#import \"@local/letmeout:0.1.0\": *\n#show: letmeout\n= Hi",
+                   apply("#set page(a4)\n#import \"@local/letmeout:0.1.0\": *\n= Hi"));
+        assert_eq!("#import \"@local/letmeout:0.1.0\"\n#show: letmeout.letmeout\nx", apply("#import \"@local/letmeout:0.1.0\"\nx"));
+        assert_eq!("#import \"@local/letmeout:0.1.0\" as lm\n#show: lm.letmeout", apply("#import \"@local/letmeout:0.1.0\" as lm"));
+        assert_eq!("#import \"@local/letmeout:0.1.0\": grid, letmeout // layout\n#show: letmeout",
+                   apply("#import \"@local/letmeout:0.1.0\": grid // layout"));
+        assert_eq!("#import \"@local/letmeout:0.1.0\": grid, letmeout as lmo\n#show: lmo",
+                   apply("#import \"@local/letmeout:0.1.0\": grid, letmeout as lmo"));
+        assert_eq!("#import \"@local/letmeout:0.1.0\": (\n  grid,\n  align, letmeout\n)\n#show: letmeout\nx",
+                   apply("#import \"@local/letmeout:0.1.0\": (\n  grid,\n  align,\n)\nx"));
+        assert_eq!("#import \"@preview/letmeout:0.2.0\": *\n#show: letmeout\n\n#import \"@preview/letmeout-x:1.0.0\": *\n",
+                   apply("#import \"@preview/letmeout-x:1.0.0\": *\n"), "another package");
     }
 }

@@ -60,6 +60,19 @@ final class IncrementalPreviewTests: XCTestCase {
         return try XCTUnwrap(result.previewPages, result.log)
     }
 
+    func testFittedPagesSpanThePaneEdgeToEdge() async throws {
+        let preview = PreviewController()
+        attach(preview)
+        preview.showPages(try await pages("Edge\n#pagebreak()\nTwo"))
+        try await settle(preview)
+        let first = try XCTUnwrap(preview.view.document?.page(at: 0))
+        let frame = preview.view.convert(first.bounds(for: preview.view.displayBox), from: first)
+        let bounds = preview.view.bounds
+        XCTAssertEqual(frame.minX, bounds.minX, accuracy: 1)
+        XCTAssertEqual(frame.maxX, bounds.maxX, accuracy: 1)
+        XCTAssertEqual(frame.maxY, bounds.maxY, accuracy: 1, "the first page starts at the top edge")
+    }
+
     func testInternalLinksKeepTheirDocumentDestinations() async throws {
         let text = "#link(<end>)[Jump]\n#pagebreak()\n= End <end>"
         let result = await compiler.compile(main: "main.typ", buffers: ["main.typ": text], format: .pdf, incremental: true)

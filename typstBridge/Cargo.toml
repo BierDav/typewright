@@ -24,6 +24,8 @@ syntect = { version = "5.3", default-features = false, features = ["html", "defa
 solveng-ide = { git = "https://github.com/BierDav/solveng", branch = "main" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+base64 = "0.22"
+memchr = "2"
 typst-kit = { version = "=0.15.1", features = ["embedded-fonts", "scan-fonts", "system-packages", "system-downloader", "datetime"] }
 
 # The web app's compiler (`scripts/build-webApp-wasm.sh`): files, packages and fonts come from the page.

@@ -25,8 +25,12 @@ struct SpacesSidebar: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(SpaceSwipe(state: state, width: geo.size.width + WindowState.spacesExtra))
             // The selector lives above the split view so it can grow past the sidebar.
-            .onChange(of: geo.frame(in: .global), initial: true) { _, frame in state.sidebarFrame = frame }
+            // In the coordinates of the overlays, which move down with the window below a menu bar.
+            .onChange(of: geo.frame(in: .global), initial: true) { _, frame in
+                state.sidebarFrame = frame.offsetBy(dx: 0, dy: -state.menuBarInset)
+            }
         }
+        .padding(.top, state.fullScreenTop)
         // Same behind-window blur as the preview instead of the wallpaper-tinted default.
         .background(SidebarMaterial().ignoresSafeArea())
     }

@@ -15,15 +15,15 @@ struct PreviewState: Codable, Equatable {
     var y = 0.0
 }
 
-/// Where a previewed file is shown; PDF, SVG and A4 HTML share it, so switching formats keeps the spot.
+/// Keeps each file's page position, HTML scroll position and preview zoom.
 struct DocumentPosition: Codable, Equatable {
     /// Page index plus the fraction of that page above the view's top edge.
     var page = 0.0
-    /// Points per screen point; nil fits the page width.
+    /// PDF/SVG scale or HTML browser zoom; nil fits pages or uses actual size for HTML.
     var zoom: Double?
     /// Scroll (0 = top, 1 = bottom) of reflowing HTML and Markdown, which have no pages.
     var flow = 0.0
-    /// Horizontal scroll (0 = left edge, 1 = right edge) of pages zoomed wider than the view.
+    /// Horizontal scroll (0 = left edge, 1 = right edge) of content wider than the view.
     var pan = 0.0
     /// The format the file was last previewed in; nil uses the default.
     var mode: RenderMode?

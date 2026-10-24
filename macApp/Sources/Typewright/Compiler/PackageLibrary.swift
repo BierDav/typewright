@@ -170,6 +170,13 @@ final class PackageLibrary {
             .max { $0.compare($1, options: .numeric) == .orderedAscending }
     }
 
+    /// The newest version of a package in each namespace that has it, Universe's first.
+    func newestSpecs(of name: String) -> [String] {
+        (["preview"] + namespaces.map(\.name).filter { $0 != "preview" }).compactMap { namespace in
+            latestVersion(namespace: namespace, name: name).map { "@\(namespace)/\(name):\($0)" }
+        }
+    }
+
     /// Every version in Universe and on disk, newest first.
     func versions(namespace: String, name: String) -> [String] {
         var versions = Set(localPackages(namespace: namespace, name: name).map(\.version))

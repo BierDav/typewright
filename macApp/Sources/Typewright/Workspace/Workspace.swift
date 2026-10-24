@@ -595,13 +595,9 @@ final class Workspace: EditorLanguage {
         case .html:
             guard html != nil, htmlPreview.pendingRestore == nil else { return }
             let shown = htmlPreview.position()
-            if htmlPreview.paged {
-                position.page = shown.page
-                position.zoom = shown.zoom
-                position.pan = shown.pan
-            } else {
-                position.flow = shown.flow
-            }
+            position.zoom = shown.zoom
+            position.pan = shown.pan
+            position.flow = shown.flow
         }
         positions[main] = position
     }
@@ -1184,6 +1180,25 @@ final class Workspace: EditorLanguage {
         scheduleCompile(delay: 0.25)
     }
 
+    /// Whether the previewed file already imports letmeout, so adding it only needs the show rule.
+    var previewImportsLetmeout: Bool {
+        guard let file = previewFile, let text = file == selectedFile ? text : bufferText(file) else { return false }
+        return importsPackage(text: text, package: "letmeout")
+    }
+
+    /// Applies letmeout to the previewed file: below its import of letmeout, or importing `spec` at the top.
+    /// Through the editor when that file is shown, so it's one undo step.
+    func addLetmeout(_ spec: String) {
+        guard let file = previewFile, let old = file == selectedFile ? text : bufferText(file) else { return }
+        let core = showRuleEdits(text: old, package: "letmeout", function: "letmeout", spec: spec)
+        let edits = core.map { TextEdit(range: NSRange(location: Int($0.range.location), length: Int($0.range.length)), newText: $0.newText) }
+        if file == selectedFile, selectedKind?.isEditable == true, let apply = find.applyEdits {
+            apply(edits, "Add letmeout")
+        } else {
+            updateBuffer(file, text: applyTextEdits(edits: core, text: old))
+        }
+    }
+
     /// Applies server edits (LSP JSON) to a file other than the shown one.
     func applyEdits(_ json: [[String: Any]], to url: URL) {
         guard isInSpace(url), let old = bufferText(url) else { return }
@@ -1457,7 +1472,7 @@ final class Workspace: EditorLanguage {
            let docs = PackageLibrary.shared.documentation(for: spec) {
             return (docs, range)
         }
-        var docs = await languageClient()?.hover(in: file, text: text as NSString, at: offset)
+        var docs = await languageClient()?.documentedHover(in: file, text: text as NSString, at: offset)
         if docs == nil { docs = await languageClient()?.parameterDocs(in: file, text: text as NSString, at: offset) }
         // A path to an image shows the image above the docs.
         guard let (url, range) = imageReference(at: offset) else { return docs }

@@ -11,6 +11,8 @@ mod solveng;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod ffi;
+#[cfg(not(target_arch = "wasm32"))]
+mod images;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

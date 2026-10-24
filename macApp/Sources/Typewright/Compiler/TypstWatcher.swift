@@ -19,6 +19,7 @@ final class TypstWatcher {
     private var block: [String] = []
     private var finishTask: Task<Void, Never>?
     private var stopped = false
+    private let images = PreviewImages()
 
     init(binary: URL, main: URL, root: URL, format: RenderMode, fontPaths: [URL],
          onCompiling: @escaping () -> Void, onResult: @escaping (CompileResult) -> Void) {
@@ -101,8 +102,9 @@ final class TypstWatcher {
         self.status = nil
         let log = block.joined(separator: "\n")
         let ok = !status.contains("with errors")
+        let data = ok ? try? Data(contentsOf: output) : nil
         onResult(CompileResult(
-            output: ok ? try? Data(contentsOf: output) : nil,
+            output: format == .html ? data.map(images.rewrite) : data,
             diagnostics: Diagnostic.parse(log),
             log: log,
             duration: Self.duration(in: status) ?? 0

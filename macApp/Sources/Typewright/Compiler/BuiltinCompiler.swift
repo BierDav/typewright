@@ -19,8 +19,6 @@ final class BuiltinCompiler: @unchecked Sendable {
         let low: UInt64
     }
     private var previewCache: [PreviewPageID: CompiledPage] = [:]
-    /// Main files whose HTML fails with the font spans; they compile without them from then on.
-    private var unwrapped: Set<String> = []
 
     init(root: URL) {
         world = tw_world_new(root.path)
@@ -78,38 +76,8 @@ final class BuiltinCompiler: @unchecked Sendable {
         overlays = Set(buffers.keys)
     }
 
-    /// Wraps the main file for HTML so text carries its font family, which typst's HTML export drops.
-    private static let htmlWrapper = ".typewright-html.typ"
-    private static let htmlPrelude = """
-        #show text: it => context if target() == "html" {
-          let fonts = text.font
-          let fonts = if type(fonts) == array { fonts } else { (fonts,) }
-          let names = fonts.map(f => if type(f) == dictionary { f.name } else { f })
-          html.elem("span", attrs: (style: "font-family: " + names.map(n => "\\"" + n + "\\"").join(", ")), it)
-        } else { it }
-
-        """
-
     private func run(main: String, buffers: [String: String], format: RenderMode, incremental: Bool) -> CompileResult {
         let start = Date()
-        let result = run(main: main, buffers: buffers, format: format, wrapped: format == .html && !unwrapped.contains(main),
-                         start: start, incremental: incremental)
-        // The font spans are invalid in some places, like raw text elements; plain output beats none.
-        guard format == .html, result.output == nil, result.wrapperFailed else { return result.compiled }
-        unwrapped.insert(main)
-        return run(main: main, buffers: buffers, format: format, wrapped: false, start: start, incremental: incremental).compiled
-    }
-
-    private func run(main: String, buffers: [String: String], format: RenderMode, wrapped: Bool,
-                     start: Date, incremental: Bool) -> (compiled: CompileResult, output: Data?, wrapperFailed: Bool) {
-        var buffers = buffers
-        var main = main
-        if wrapped {
-            // Included rather than edited, so diagnostics keep pointing at the user's file and lines.
-            let quoted = main.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            buffers[Self.htmlWrapper] = Self.htmlPrelude + "#include \"/\(quoted)\"\n"
-            main = Self.htmlWrapper
-        }
         load(main: main, buffers: buffers)
 
         let twFormat: TWFormat = switch format {
@@ -122,11 +90,10 @@ final class BuiltinCompiler: @unchecked Sendable {
         let output = result.data.map { Data(bytes: $0, count: result.len) }
         let all = (try? JSONDecoder().decode([Entry].self, from: Data(String(cString: result.diagnostics).utf8))) ?? []
         // Diagnostics without a location can't be listed per file, so they become the failure log.
-        let located = all.filter { !$0.path.isEmpty && $0.path != Self.htmlWrapper }
-        let log = all.filter { $0.path.isEmpty || $0.path == Self.htmlWrapper }.map { "\($0.severity): \($0.message)" }.joined(separator: "\n")
-        let wrapperFailed = all.contains { $0.path == Self.htmlWrapper && $0.severity == "error" }
+        let located = all.filter { !$0.path.isEmpty }
+        let log = all.filter { $0.path.isEmpty }.map { "\($0.severity): \($0.message)" }.joined(separator: "\n")
         let previewPages = (format == .svg || incremental) && format != .html && output?.isEmpty == true ? readPreviewPages() : nil
-        let compiled = CompileResult(
+        return CompileResult(
             output: output,
             diagnostics: located.map {
                 Diagnostic(path: $0.path, line: $0.line, column: $0.column,
@@ -138,7 +105,6 @@ final class BuiltinCompiler: @unchecked Sendable {
             solveng: output != nil ? Self.solvengReport(world) : nil,
             previewPages: previewPages
         )
-        return (compiled, output, wrapperFailed)
     }
 
     private func readPreviewPages() -> [CompiledPage]? {

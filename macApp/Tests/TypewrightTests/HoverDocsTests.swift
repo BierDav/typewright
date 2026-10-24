@@ -13,6 +13,18 @@ final class HoverDocsTests: XCTestCase {
                                 .list(["first"], markers: ["1."]), .paragraph("Text.")])
     }
 
+    func testQuotesBecomeBanners() {
+        let blocks = MarkdownBlock.parse("Intro.\n\n> **Warning:** Page settings\n> become one block.\n\n> [!TIP]\n> Use `html-only`.\n\n> Plain.\nAfter.")
+        XCTAssertEqual(blocks, [
+            .paragraph("Intro."),
+            .quote([.paragraph("Page settings\nbecome one block.")], alert: .warning),
+            .quote([.paragraph("Use `html-only`.")], alert: .tip),
+            .quote([.paragraph("Plain.")], alert: nil),
+            .paragraph("After."),
+        ])
+        XCTAssertEqual(MarkdownBlock.parse(blocks[2].markdown), [blocks[2]])
+    }
+
     /// tinymist's shape: a signature, the description with its own parameter list, then generated sections.
     func testTinymistDocsSplitUp() throws {
         let markdown = """

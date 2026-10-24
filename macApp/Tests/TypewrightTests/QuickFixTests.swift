@@ -46,6 +46,32 @@ final class QuickFixTests: XCTestCase {
         XCTAssertEqual(editor.string, "#graph($ \"tri\"(x) $)")
     }
 
+    func testAddingLetmeoutImportsItAboveTheDocument() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let main = root.appendingPathComponent("main.typ")
+        try "= Hello".write(to: main, atomically: true, encoding: .utf8)
+        let workspace = Workspace(url: main)
+        defer { workspace.close() }
+        XCTAssertEqual(workspace.previewFile?.standardizedFileURL, main.standardizedFileURL)
+        // Shown in the editor: one undoable edit.
+        var applied: [TextEdit] = []
+        workspace.find.applyEdits = { edits, _ in applied = edits }
+        workspace.addLetmeout("@preview/letmeout:0.2.0")
+        XCTAssertEqual(applied, [TextEdit(range: NSRange(location: 0, length: 0),
+                                          newText: "#import \"@preview/letmeout:0.2.0\": *\n#show: letmeout\n\n")])
+        // Without an editor the buffer changes.
+        workspace.find.applyEdits = nil
+        workspace.addLetmeout("@local/letmeout:0.1.0")
+        XCTAssertEqual(workspace.text, "#import \"@local/letmeout:0.1.0\": *\n#show: letmeout\n\n= Hello")
+        // An existing import keeps its version and gets the show rule below it.
+        workspace.updateBuffer(main, text: "#import \"@letmeout/letmeout:0.1.0\": *\n#import extras: *\n= Hello")
+        XCTAssertTrue(workspace.previewImportsLetmeout)
+        workspace.addLetmeout("")
+        XCTAssertEqual(workspace.text, "#import \"@letmeout/letmeout:0.1.0\": *\n#show: letmeout\n#import extras: *\n= Hello")
+    }
+
     func testDocsCommandLinksReplaceThePackageVersion() throws {
         let text = "#import \"@solveng/solveng:0.2.0\": *\n"
         let link = try XCTUnwrap(URL(string: "command:tinymist.replaceText?%7B%22range%22%3A%7B%22end%22%3A%7B%22character%22%3A32%2C%22line%22%3A0%7D%2C%22start%22%3A%7B%22character%22%3A8%2C%22line%22%3A0%7D%7D%2C%22replace%22%3A%22%5C%22%40solveng%2Fsolveng%3A1%2E0%2E0%5C%22%22%7D"))

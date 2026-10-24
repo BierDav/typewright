@@ -56,6 +56,10 @@ final class WindowState {
     var keepsFloatingSidebarOpen: Bool { spacesOpen || swipe != nil }
     /// The window's content size, to place the selector and floating sidebar while the sidebar is hidden.
     var windowSize = CGSize(width: 1280, height: 820)
+    /// Room for the window buttons at the top in full screen, where no toolbar holds them.
+    var fullScreenTop: CGFloat = 0
+    /// How far the menu bar reaches into a full screen window, on screens without a notch.
+    var menuBarInset: CGFloat = 0
     /// Set while switching with ⌘1–9: true moves to a later space in the list, so the new one slides in from the right.
     var switchForward: Bool?
 
@@ -165,6 +169,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { state.undoManager }
 
+    /// The frame before full screen, which a restored window comes back to when it leaves full screen.
+    private(set) var windowedFrame: NSRect?
+
+    func windowWillEnterFullScreen(_ notification: Notification) { windowedFrame = window?.frame }
+    func windowDidEnterFullScreen(_ notification: Notification) { Opener.shared.saveSession() }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        windowedFrame = nil
+        Opener.shared.saveSession()
+    }
+    func windowDidMove(_ notification: Notification) { Opener.shared.saveSession() }
+    func windowDidEndLiveResize(_ notification: Notification) { Opener.shared.saveSession() }
+
     // The empty toolbar would stay as an opaque strip; it comes down with the menu bar instead.
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
         proposedOptions.union([.fullScreen, .autoHideMenuBar, .autoHideToolbar])
@@ -209,7 +225,10 @@ struct MainWindow: View {
             if state.sidebarVisible || workspace == nil { SpacesOverlay(state: state, workspace: workspace) }
         }
         .overlay { WindowOverlayView(state: state, workspace: workspace) }
-        .background(HiddenTitleBar(title: workspace?.selectedFile?.lastPathComponent ?? workspace?.name ?? "Typewright",
+        // The whole window moves below the menu bar instead of hiding under it.
+        .padding(.top, state.menuBarInset)
+        .background(HiddenTitleBar(state: state,
+                                   title: workspace?.selectedFile?.lastPathComponent ?? workspace?.name ?? "Typewright",
                                    subtitle: workspace?.name ?? ""))
         .onChange(of: state.space, initial: true) { _, url in
             let previous = workspace
@@ -311,6 +330,7 @@ private struct FloatingSidebar: View {
                     SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) }) { name in
                         Opener.shared.rename(space: workspace.root, to: name)
                     }
+                    .padding(.top, state.fullScreenTop)
                     .frame(width: sidebarWidth)
                     .opacity(1 - progress)
                     .allowsHitTesting(progress == 0)
@@ -402,10 +422,11 @@ private struct NoSpaceView: View {
 /// Makes the title bar transparent with inset window buttons.
 /// The title still feeds the Window menu.
 private struct HiddenTitleBar: NSViewRepresentable {
+    let state: WindowState
     let title: String
     let subtitle: String
 
-    func makeNSView(context: Context) -> NSView { WindowView() }
+    func makeNSView(context: Context) -> NSView { WindowView(state: state) }
 
     func updateNSView(_ view: NSView, context: Context) {
         guard let window = view.window else { return }
@@ -416,7 +437,18 @@ private struct HiddenTitleBar: NSViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? { .zero }
 
     private final class WindowView: NSView {
+        private let state: WindowState
         private var tracking: NSTrackingArea?
+        private var stripObserver: (any NSObjectProtocol)?
+        /// Title bar views hidden in full screen, shown again when it ends.
+        private var hiddenInFullScreen: [NSView] = []
+
+        init(state: WindowState) {
+            self.state = state
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { fatalError() }
         // Live as long as the window, like this view.
         private var frameObserver: (any NSObjectProtocol)?
         private var fullScreenObservers: [any NSObjectProtocol] = []
@@ -428,20 +460,32 @@ private struct HiddenTitleBar: NSViewRepresentable {
             guard let window else { return }
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
-            // An empty unified toolbar makes AppKit inset and center the window buttons itself.
+            isFullScreen = window.styleMask.contains(.fullScreen)
+            // An empty unified toolbar makes AppKit inset and center the window buttons itself, in full screen too.
             window.toolbar = NSToolbar(identifier: "SpaceTitleBar")
             window.toolbarStyle = .unified
-            // The toolbar moves the buttons once it's laid out.
-            DispatchQueue.main.async { [weak self] in self?.setUpTrafficLights() }
+            // The toolbar moves the buttons once it's laid out; SwiftUI builds the split view later too.
+            DispatchQueue.main.async { [weak self] in
+                self?.setUpTrafficLights()
+                self?.disableEdgeReveal()
+                if self?.isFullScreen == true { self?.enteredFullScreen() }
+            }
             guard fullScreenObservers.isEmpty else { return }
-            isFullScreen = window.styleMask.contains(.fullScreen)
             let center = NotificationCenter.default
             fullScreenObservers = [
                 center.addObserver(forName: NSWindow.willEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated {
-                        self?.isFullScreen = true
-                        self?.setHighlighted(false, animated: false)
+                        guard let self else { return }
+                        self.isFullScreen = true
+                        self.setHighlighted(false, animated: false)
+                        self.disableEdgeReveal()
                     }
+                },
+                center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.enteredFullScreen() }
+                },
+                center.addObserver(forName: NSWindow.willExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.leavingFullScreen() }
                 },
                 center.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated {
@@ -450,6 +494,57 @@ private struct HiddenTitleBar: NSViewRepresentable {
                     }
                 },
             ]
+        }
+
+        /// The buttons live in a strip that slides down with the menu bar, keeping their inset; only its background goes.
+        private func enteredFullScreen() {
+            guard let titlebar = buttons.first?.superview, let strip = titlebar.window, strip !== window,
+                  let container = titlebar.superview else { return }
+            for view in container.subviews where view !== titlebar && !view.isHidden {
+                view.isHidden = true
+                hiddenInFullScreen.append(view)
+            }
+            state.fullScreenTop = strip.frame.height
+            if let stripObserver { NotificationCenter.default.removeObserver(stripObserver) }
+            stripObserver = NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: strip,
+                                                                   queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateMenuBarInset() }
+            }
+            updateMenuBarInset()
+        }
+
+        private func leavingFullScreen() {
+            if let stripObserver { NotificationCenter.default.removeObserver(stripObserver) }
+            stripObserver = nil
+            hiddenInFullScreen.forEach { $0.isHidden = false }
+            hiddenInFullScreen = []
+            state.fullScreenTop = 0
+            state.menuBarInset = 0
+        }
+
+        /// Beside a notch the menu bar sits above the window; elsewhere it covers its top, so the window moves down.
+        private func updateMenuBarInset() {
+            guard let window, let strip = buttons.first?.window, strip !== window else { return }
+            // The strip hangs below the menu bar: at the window's top beside a notch, lower with a menu bar over the window.
+            let inset = max(window.frame.maxY - strip.frame.maxY, 0)
+            guard inset != state.menuBarInset else { return }
+            withAnimation(.smooth(duration: 0.2)) { state.menuBarInset = inset }
+        }
+
+        /// AppKit slides a hidden sidebar out at the screen's edge in full screen; the floating sidebar does that here.
+        private func disableEdgeReveal() {
+            guard let split = window?.contentView.flatMap(Self.splitView(in:)),
+                  let controller = split.delegate as? NSSplitViewController else { return }
+            let setter = NSSelectorFromString("setRevealsOnEdgeHoverInFullscreen:")
+            for item in controller.splitViewItems where item.responds(to: setter) {
+                item.setValue(false, forKey: "revealsOnEdgeHoverInFullscreen")
+            }
+        }
+
+        private static func splitView(in view: NSView) -> NSSplitView? {
+            if let split = view as? NSSplitView { return split }
+            for sub in view.subviews { if let found = splitView(in: sub) { return found } }
+            return nil
         }
 
         private var buttons: [NSButton] {

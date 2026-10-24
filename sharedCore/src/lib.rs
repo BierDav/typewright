@@ -8,6 +8,7 @@ pub mod brackets;
 pub mod comments;
 pub mod diagnostics;
 pub mod diff;
+pub mod doc_comments;
 pub mod files;
 pub mod highlight;
 pub mod ignore;

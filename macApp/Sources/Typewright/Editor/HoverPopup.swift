@@ -496,9 +496,16 @@ enum MarkdownBlock: Equatable {
     case list([String], markers: [String])
     /// A line that is only `![](url)`.
     case image(URL)
+    /// `> …` lines, shown as a banner; an alert when they start with `**Note:**`, `[!NOTE]` and the like.
+    case quote([MarkdownBlock], alert: Alert?)
+
+    enum Alert: String, CaseIterable, Equatable {
+        case note, tip, important, warning, caution
+    }
 
     static func parse(_ markdown: String) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
+        var quote: [String] = []
         var paragraph: [String] = []
         var items: [String] = []
         var markers: [String] = []
@@ -515,9 +522,21 @@ enum MarkdownBlock: Equatable {
             items = []
             markers = []
         }
+        func flushQuote() {
+            if !quote.isEmpty { blocks.append(Self.quote(quote)) }
+            quote = []
+        }
         for line in markdown.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             let ticks = trimmed.prefix { $0 == "`" }.count
+            if code == nil, trimmed.hasPrefix(">") {
+                flush()
+                flushList()
+                let inner = trimmed.dropFirst()
+                quote.append(String(inner.hasPrefix(" ") ? inner.dropFirst() : inner))
+                continue
+            }
+            if code == nil { flushQuote() }
             if let lines = code {
                 // Only a fence at least as long closes, so ```` blocks can show ``` ones.
                 if ticks >= fence, trimmed.allSatisfy({ $0 == "`" }) {
@@ -563,7 +582,26 @@ enum MarkdownBlock: Equatable {
         if let code { blocks.append(.code(code.joined(separator: "\n"), language: language)) }
         flush()
         flushList()
+        flushQuote()
         return blocks
+    }
+
+    /// A quote's lines, with a leading `[!NOTE]` line or `**Note:**` label taken as its alert.
+    private static func quote(_ lines: [String]) -> MarkdownBlock {
+        var lines = lines
+        let first = lines.first?.trimmingCharacters(in: .whitespaces) ?? ""
+        for alert in Alert.allCases {
+            let word = alert.rawValue.capitalized
+            if first.caseInsensitiveCompare("[!\(alert.rawValue)]") == .orderedSame {
+                lines.removeFirst()
+            } else if let label = ["**\(word):**", "**\(word)**:", "**\(word)**"].first(where: { first.hasPrefix($0) }) {
+                lines[0] = String(first.dropFirst(label.count)).trimmingCharacters(in: .whitespaces)
+            } else {
+                continue
+            }
+            return .quote(parse(lines.joined(separator: "\n")), alert: alert)
+        }
+        return .quote(parse(lines.joined(separator: "\n")), alert: nil)
     }
 
     /// `-`, `*` or `1.` followed by a space.
@@ -634,6 +672,8 @@ struct MarkdownView: View {
                     InlineText(text: Self.inline(text, links: links))
                 case .image(let url):
                     ImageThumbnail(url: url)
+                case .quote(let inner, let alert):
+                    QuoteBanner(blocks: inner, alert: alert, links: links)
                 }
             }
         }
@@ -744,6 +784,53 @@ private struct PointerTracker: NSViewRepresentable {
         override func mouseExited(with event: NSEvent) {
             onChange?(false)
             NSCursor.arrow.set()
+        }
+    }
+}
+
+/// A quote as a tinted banner with a bar on its leading edge, coloured and titled for alerts like GitHub's.
+private struct QuoteBanner: View {
+    let blocks: [MarkdownBlock]
+    let alert: MarkdownBlock.Alert?
+    let links: (String) -> Bool
+
+    var body: some View {
+        let tint = alert.map(Self.color) ?? .secondary
+        VStack(alignment: .leading, spacing: 6) {
+            if let alert {
+                Label(alert.rawValue.capitalized, systemImage: Self.symbol(alert))
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(tint)
+            }
+            MarkdownView(blocks: blocks, links: links)
+        }
+        .padding(.vertical, 8)
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(alert == nil ? 0.06 : 0.1), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(alignment: .leading) {
+            UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 6).fill(tint).frame(width: 3)
+        }
+    }
+
+    private static func color(_ alert: MarkdownBlock.Alert) -> Color {
+        switch alert {
+        case .note: .blue
+        case .tip: .green
+        case .important: .purple
+        case .warning: .orange
+        case .caution: .red
+        }
+    }
+
+    private static func symbol(_ alert: MarkdownBlock.Alert) -> String {
+        switch alert {
+        case .note: "info.circle"
+        case .tip: "lightbulb"
+        case .important: "exclamationmark.bubble"
+        case .warning: "exclamationmark.triangle"
+        case .caution: "exclamationmark.octagon"
         }
     }
 }
