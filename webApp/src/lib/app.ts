@@ -30,12 +30,19 @@ export type Overlay =
   | { type: "settings"; tab?: SettingsTab }
   /** `scope` is a repo-relative folder (a space or one inside it); null lists every space. */
   | { type: "deleted"; scope: string | null }
+  /** `path` is repo-relative. */
+  | { type: "history"; path: string }
   | null;
 
 export type SettingsTab = "general" | "editor" | "fonts" | "packages" | "devices";
 
 const [overlay, setOverlay] = createSignal<Overlay>(null);
 export { overlay, setOverlay };
+
+/** Shows the history of a file (repo-relative). */
+export function showHistory(path: string) {
+  setOverlay({ type: "history", path });
+}
 
 export function showRecentlyDeleted(scope: string | null = workspace()?.folder ?? null) {
   setOverlay({ type: "deleted", scope });

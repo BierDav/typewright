@@ -1,5 +1,5 @@
 import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
-import CommandPalette from "~/components/CommandPalette";
+import CommandPalette, { closePalette } from "~/components/CommandPalette";
 import Dialogs from "~/components/Dialogs";
 import Editor from "~/components/Editor";
 import FileSidebar from "~/components/FileSidebar";
@@ -8,6 +8,7 @@ import { Eye, EyeOff, Link, PanelLeft, PanelRight, Plus, Search, Upload } from "
 import { MenuHost } from "~/components/Menu";
 import PreviewPane from "~/components/PreviewPane";
 import RecentlyDeleted from "~/components/RecentlyDeleted";
+import FileHistory from "~/components/FileHistory";
 import SearchPanel from "~/components/SearchPanel";
 import SettingsWindow from "~/components/Settings";
 import SpacesSidebar, { importFolder, importZip, newSpace } from "~/components/SpacesSidebar";
@@ -173,8 +174,10 @@ export default function Home() {
     if (!mod) return;
     const key = event.code;
     let handled = true;
-    if (key === "KeyK" && !event.altKey && !event.shiftKey) setOverlay(overlay()?.type === "palette" ? null : { type: "palette" });
-    else if (key === "KeyP" && !event.altKey && !event.shiftKey) setOverlay({ type: "palette" });
+    if (key === "KeyK" && !event.altKey && !event.shiftKey) {
+      if (overlay()?.type === "palette") closePalette();
+      else setOverlay({ type: "palette" });
+    } else if (key === "KeyP" && !event.altKey && !event.shiftKey) setOverlay({ type: "palette" });
     else if (key === "Comma") setOverlay({ type: "settings" });
     else if (key === "KeyF" && event.shiftKey && !event.altKey) setOverlay({ type: "search", allSpaces: false });
     else if (key === "KeyS" && event.altKey) setSettings("spacesVisible", (v) => !v);
@@ -246,6 +249,9 @@ export default function Home() {
         </Match>
         <Match when={overlay()?.type === "deleted"}>
           <RecentlyDeleted />
+        </Match>
+        <Match when={overlay()?.type === "history"}>
+          <FileHistory />
         </Match>
       </Switch>
       <Dialogs />

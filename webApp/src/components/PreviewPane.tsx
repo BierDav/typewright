@@ -37,6 +37,32 @@ ${codeCss}
 </style></head><body>${body}</body></html>`;
 }
 
+/** Registers the fonts the app posts (the sandboxed page can't read origin storage); the page stays hidden until
+ * they're in, so text doesn't jump from a fallback font. */
+const FONT_SCRIPT = `<script>(() => {
+  const root = document.documentElement;
+  root.style.visibility = "hidden";
+  const show = () => (root.style.visibility = "");
+  setTimeout(show, 1000);
+  addEventListener("message", (event) => {
+    if (event.source !== parent || event.data?.type !== "typewright-fonts") return;
+    const loads = event.data.fonts.map((f) => {
+      const face = new FontFace(f.family, f.data, { weight: String(f.weight), style: f.italic ? "italic" : "normal" });
+      document.fonts.add(face);
+      return face.load().catch(() => {});
+    });
+    Promise.all(loads).then(show);
+  });
+})();</script>`;
+
+/** typst's HTML with the font script at the start of its head. */
+function htmlPage(html: string): string {
+  const head = /<head[^>]*>/i.exec(html);
+  if (!head) return FONT_SCRIPT + html;
+  const at = head.index + head[0].length;
+  return html.slice(0, at) + FONT_SCRIPT + html.slice(at);
+}
+
 // Mobile browsers have no inline PDF viewer and leave the frame blank.
 const canShowPdf = typeof navigator === "undefined" || navigator.pdfViewerEnabled !== false;
 
@@ -50,6 +76,18 @@ export default function PreviewPane(props: { workspace: Workspace }) {
   const [marker, setMarker] = createSignal<{ page: number; x: number; y: number } | null>(null);
   const pdfUrl = blobUrl(() => ws.state.pdf, "application/pdf");
   const previewable = createMemo(() => ws.files().filter((f) => isPreviewable(f.path)));
+
+  let htmlFrame: HTMLIFrameElement | undefined;
+  // Fonts downloaded or added while the page shows.
+  createEffect(on(ws.htmlFonts, () => htmlFrame?.isConnected && postFonts(htmlFrame), { defer: true }));
+
+  /** Sends the faces of families the page names; matching the text is cheap and skips most of the bytes. */
+  function postFonts(frame: HTMLIFrameElement) {
+    const html = (ws.state.html ?? "").toLowerCase();
+    const fonts = ws.htmlFonts().filter((f) => html.includes(f.family.toLowerCase()));
+    // Copies, as transferring would detach the compiler's buffers.
+    frame.contentWindow?.postMessage({ type: "typewright-fonts", fonts: fonts.map((f) => ({ ...f, data: f.data.slice().buffer })) }, "*");
+  }
 
   // Small changes, like a scrollbar appearing, would resize the pages again and again.
   const observer = new ResizeObserver(([entry]) => {
@@ -254,7 +292,14 @@ export default function PreviewPane(props: { workspace: Workspace }) {
             <iframe class="pdf-frame" src={pdfUrl()!} title="PDF preview" />
           </Match>
           <Match when={settings.renderMode === "html" && ws.state.html !== null}>
-            <iframe class="html-frame white" sandbox="allow-popups allow-scripts" srcdoc={ws.state.html!} title="HTML preview" />
+            <iframe
+              class="html-frame white"
+              sandbox="allow-popups allow-scripts"
+              srcdoc={htmlPage(ws.state.html!)}
+              title="HTML preview"
+              ref={htmlFrame}
+              onLoad={(e) => postFonts(e.currentTarget)}
+            />
           </Match>
         </Switch>
       </div>

@@ -4,16 +4,20 @@ import CryptoKit
 import Observation
 import Security
 
-/// The account all of a user's devices share, backed by a passkey. A synced passkey's PRF output is the
-/// same on every device, so signing in with it is all a new device needs; the derived secret stays in the keychain.
+/// The account all of a user's devices share, backed by a passkey or an account key. A synced passkey's PRF output
+/// is the same on every device, so signing in with it is all a new device needs; an account key is copied over by hand.
+/// The secret stays in the keychain.
 @MainActor @Observable
 final class SyncIdentity: NSObject {
     static let shared = SyncIdentity()
+
+    enum Kind: String { case passkey, key }
 
     /// 32 bytes every key of the account derives from.
     private(set) var account: Data?
     /// The name the passkey was created with, as the Passwords app shows it.
     private(set) var name: String?
+    private(set) var kind: Kind?
     private(set) var isWorking = false
     private(set) var error: String?
 
@@ -46,12 +50,30 @@ final class SyncIdentity: NSObject {
     override private init() {
         super.init()
         account = Self.loadSecret()
-        // Passkeys are the only way in now; accounts from recovery keys sign out once.
-        if account != nil, UserDefaults.standard.string(forKey: Self.kindKey) != "passkey" {
-            SecItemDelete(Self.query as CFDictionary)
+        kind = account == nil ? nil : UserDefaults.standard.string(forKey: Self.kindKey).flatMap(Kind.init)
+        // Recovery keys of old builds had no kind; they sign out once.
+        if account != nil, kind == nil {
+            Self.deleteSecret()
             account = nil
         }
         name = account == nil ? nil : UserDefaults.standard.string(forKey: Self.nameKey)
+    }
+
+    /// The account's secret as text, to sign in on a device without the passkey.
+    var accountKey: String? { account.map(Self.hex) }
+
+    /// Creates an account without a passkey; its key is the only way to sign in elsewhere.
+    func createWithKey() {
+        adopt(Self.random(32), name: "", kind: .key)
+    }
+
+    func signIn(key text: String) {
+        let hex = text.filter(\.isHexDigit)
+        guard hex.count == 64, let key = Self.data(hex: hex) else {
+            error = "An account key has 64 hexadecimal digits."
+            return
+        }
+        adopt(key, name: "", kind: .key)
     }
 
     /// Creates the account's passkey, named `name` (like an email address) in the Passwords app.
@@ -80,11 +102,12 @@ final class SyncIdentity: NSObject {
     }
 
     func signOut() {
-        SecItemDelete(Self.query as CFDictionary)
+        Self.deleteSecret()
         UserDefaults.standard.removeObject(forKey: Self.kindKey)
         UserDefaults.standard.removeObject(forKey: Self.nameKey)
         account = nil
         name = nil
+        kind = nil
         SyncService.shared.restart()
     }
 
@@ -97,7 +120,7 @@ final class SyncIdentity: NSObject {
         do {
             let (prf, name) = try await body()
             let secret = HKDF<SHA256>.deriveKey(inputKeyMaterial: prf, info: Data("typewright account v0".utf8), outputByteCount: 32)
-            adopt(secret.withUnsafeBytes { Data($0) }, name: name)
+            adopt(secret.withUnsafeBytes { Data($0) }, name: name, kind: .passkey)
         } catch let error as ASAuthorizationError where error.code == .canceled {
             // Dismissed by the user.
         } catch {
@@ -134,35 +157,72 @@ final class SyncIdentity: NSObject {
         }
     }
 
-    private func adopt(_ secret: Data, name: String) {
-        SecItemDelete(Self.query as CFDictionary)
-        var item = Self.query
-        item[kSecValueData as String] = secret
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(item as CFDictionary, nil)
-        UserDefaults.standard.set("passkey", forKey: Self.kindKey)
+    private func adopt(_ secret: Data, name: String, kind: Kind) {
+        Self.deleteSecret()
+        guard Self.storeSecret(secret) else {
+            error = "The keychain didn't store the account."
+            return
+        }
+        UserDefaults.standard.set(kind.rawValue, forKey: Self.kindKey)
         UserDefaults.standard.set(name, forKey: Self.nameKey)
         account = secret
         self.name = name
+        self.kind = kind
         error = nil
         SyncService.shared.restart()
     }
 
     // MARK: - Keychain
 
-    private static var query: [String: Any] {
-        // The data protection keychain never prompts, unlike the file keychain after each re-signed build;
-        // it needs the signed app's identifier, which builds without passkeys lack anyway.
+    /// The data protection keychain never prompts, unlike the file keychain after each re-signed build, but it needs
+    /// the signed app's identifier; ad-hoc builds, which only have account keys, fall back to the file keychain.
+    private static func query(dataProtection: Bool) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "account",
-         kSecUseDataProtectionKeychain as String: true]
+         kSecUseDataProtectionKeychain as String: dataProtection]
     }
 
     private static func loadSecret() -> Data? {
-        var query = query
-        query[kSecReturnData as String] = true
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data,
-              data.count == 32 else { return nil }
+        for dataProtection in [true, false] {
+            var query = query(dataProtection: dataProtection)
+            query[kSecReturnData as String] = true
+            var result: AnyObject?
+            if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data, data.count == 32 {
+                return data
+            }
+        }
+        return nil
+    }
+
+    private static func storeSecret(_ secret: Data) -> Bool {
+        for dataProtection in [true, false] {
+            var item = query(dataProtection: dataProtection)
+            item[kSecValueData as String] = secret
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            let status = SecItemAdd(item as CFDictionary, nil)
+            if status == errSecSuccess { return true }
+            if status != errSecMissingEntitlement { return false }
+        }
+        return false
+    }
+
+    private static func deleteSecret() {
+        SecItemDelete(query(dataProtection: true) as CFDictionary)
+        SecItemDelete(query(dataProtection: false) as CFDictionary)
+    }
+
+    /// Eight groups of eight hexadecimal digits.
+    private static func hex(_ data: Data) -> String {
+        let hex = Array(data.map { String(format: "%02x", $0) }.joined())
+        return stride(from: 0, to: hex.count, by: 8).map { String(hex[$0..<min($0 + 8, hex.count)]) }.joined(separator: "-")
+    }
+
+    private static func data(hex: String) -> Data? {
+        let digits = Array(hex)
+        var data = Data()
+        for i in stride(from: 0, to: digits.count, by: 2) {
+            guard let byte = UInt8(String(digits[i..<i + 2]), radix: 16) else { return nil }
+            data.append(byte)
+        }
         return data
     }
 

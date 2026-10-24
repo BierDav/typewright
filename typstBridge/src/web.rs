@@ -65,6 +65,11 @@ fn package_id(spec: &str, path: &str) -> Option<FileId> {
     Some(RootedPath::new(VirtualRoot::Package(spec), VirtualPath::new(path).ok()?).intern())
 }
 
+/// Not cached, so each compile reports the package in `missing` again until it is added.
+fn missing_package<T>(result: &FileResult<T>) -> bool {
+    matches!(result, Err(FileError::Package(PackageError::NotFound(_))))
+}
+
 impl WebWorld {
     fn invalidate(&mut self, id: FileId) {
         if let Some(slot) = self.slots.get_mut().get_mut(&id) {
@@ -113,7 +118,9 @@ impl World for WebWorld {
             return result.clone();
         }
         let result = decode(id, self.load(id), slot.stale.take());
-        slot.source = Some(result.clone());
+        if !missing_package(&result) {
+            slot.source = Some(result.clone());
+        }
         result
     }
 
@@ -124,7 +131,9 @@ impl World for WebWorld {
             return result.clone();
         }
         let result = self.load(id);
-        slot.file = Some(result.clone());
+        if !missing_package(&result) {
+            slot.file = Some(result.clone());
+        }
         result
     }
 
@@ -163,6 +172,8 @@ pub struct CompileResult {
 #[wasm_bindgen]
 pub struct Compiler {
     world: WebWorld,
+    /// The file each extra font came from, by index into the last `setFonts` list.
+    font_files: Vec<usize>,
 }
 
 #[derive(Serialize)]
@@ -203,6 +214,7 @@ impl Compiler {
                 document: None,
                 solveng: "{}".into(),
             },
+            font_files: Vec::new(),
         }
     }
 
@@ -285,15 +297,42 @@ impl Compiler {
     /// Sets the space's font files (TTF, OTF, TTC); returns how many faces they hold.
     #[wasm_bindgen(js_name = setFonts)]
     pub fn set_fonts(&mut self, files: Vec<js_sys::Uint8Array>) -> usize {
-        let fonts: Vec<Font> =
-            files.iter().flat_map(|bytes| Font::iter(Bytes::new(bytes.to_vec())).collect::<Vec<_>>()).collect();
+        let (fonts, font_files): (Vec<Font>, Vec<usize>) = files
+            .iter()
+            .enumerate()
+            .flat_map(|(i, bytes)| Font::iter(Bytes::new(bytes.to_vec())).map(move |font| (font, i)).collect::<Vec<_>>())
+            .unzip();
         let same = fonts.len() == self.world.extra_fonts.len()
             && fonts.iter().zip(&self.world.extra_fonts).all(|(a, b)| a.data() == b.data() && a.index() == b.index());
         if !same {
             self.world.fonts = font_store(&fonts);
             self.world.extra_fonts = fonts;
+            self.font_files = font_files;
         }
         self.world.extra_fonts.len()
+    }
+
+    /// The faces of the `setFonts` files as JSON (`[{file, family, weight, italic}]`), for the HTML preview's
+    /// `@font-face` rules; faces after the first of a collection are left out, as CSS can't pick them.
+    #[wasm_bindgen(js_name = fontFaces)]
+    pub fn font_faces(&self) -> String {
+        let faces: Vec<_> = self
+            .world
+            .extra_fonts
+            .iter()
+            .zip(&self.font_files)
+            .filter(|(font, _)| font.index() == 0)
+            .map(|(font, file)| {
+                let info = font.info();
+                json!({
+                    "file": file,
+                    "family": info.family,
+                    "weight": info.variant.weight.to_number(),
+                    "italic": info.variant.style != typst::text::FontStyle::Normal,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(faces).to_string()
     }
 
     /// The families every font of the world offers, for font completions in the editor.

@@ -2023,6 +2023,188 @@ fieldset.plain:disabled {
   font-size: 12.5px;
 }
 
+/* MARK: File History */
+
+.settings.history {
+  width: min(980px, calc(100vw - 32px));
+  height: min(680px, calc(100vh - 80px));
+}
+
+.history-name {
+  font-weight: 600;
+}
+
+.history-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+
+.history-empty {
+  align-self: center;
+  text-align: center;
+  padding: 24px;
+}
+
+.history-list {
+  overflow: auto;
+  padding: 4px 8px 8px;
+  border-right: 0.5px solid var(--separator);
+  display: flex;
+  flex-direction: column;
+}
+
+.history-day {
+  padding: 10px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--secondary);
+}
+
+.history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  cursor: default;
+}
+
+.history-row:hover {
+  background: var(--hover);
+}
+
+.history-row.selected {
+  background: var(--selected);
+}
+
+.history-row-top {
+  display: flex;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-subtitle {
+  font-size: 11.5px;
+}
+
+.diff-count.added {
+  color: var(--green);
+}
+
+.diff-count.removed {
+  color: var(--red);
+}
+
+.history-detail {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 0.5px solid var(--separator);
+}
+
+.history-when {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-path {
+  font-size: 11.5px;
+}
+
+.history-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+}
+
+.history-content > .empty-state {
+  margin: auto;
+}
+
+.history-image {
+  max-width: calc(100% - 40px);
+  max-height: calc(100% - 40px);
+  margin: auto;
+  object-fit: contain;
+}
+
+.history-pdf {
+  flex: 1;
+  border: none;
+}
+
+.diff {
+  padding: 6px 0;
+  font: 12px/1.6 var(--mono);
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 4ch 4ch 2ch minmax(0, 1fr);
+  gap: 6px;
+  padding: 0 10px 0 6px;
+}
+
+.diff-line.added {
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+}
+
+.diff-line.removed {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+}
+
+.diff-num,
+.diff-mark {
+  text-align: right;
+  color: var(--tertiary);
+  user-select: none;
+}
+
+.diff-line.added .diff-mark {
+  color: var(--green);
+}
+
+.diff-line.removed .diff-mark {
+  color: var(--red);
+}
+
+.diff-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-fold {
+  display: block;
+  width: 100%;
+  padding: 2px 0 2px calc(10ch + 30px);
+  border: none;
+  text-align: left;
+  font: 11px var(--font);
+  color: var(--secondary);
+  background: color-mix(in srgb, var(--secondary) 8%, transparent);
+  cursor: pointer;
+}
+
+.diff-fold:hover {
+  color: var(--text);
+}
+
 .tree:focus {
   outline: none;
 }

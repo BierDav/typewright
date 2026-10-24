@@ -86,6 +86,12 @@ pub fn merge3(base: &str, local: &str, remote: &str) -> Js<Ts<MergeResult>> {
     Ok(crate::merge::merge3(base, local, remote).into_ts()?)
 }
 
+/// Line diff from `old` to `new`, as runs of same, added and removed lines.
+#[wasm_bindgen(js_name = lineDiff)]
+pub fn line_diff(old: &str, new: &str) -> Js<Vec<Ts<crate::diff::DiffHunk>>> {
+    crate::diff::line_diff(old, new).into_iter().map(|h| Ok(h.into_ts()?)).collect()
+}
+
 fn shares(shares: Vec<Ts<SharePath>>) -> Js<Vec<SharePath>> {
     shares.iter().map(|s| Ok(s.to_rust()?)).collect()
 }

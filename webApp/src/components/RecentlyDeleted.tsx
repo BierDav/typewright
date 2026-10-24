@@ -7,7 +7,7 @@ import { uniqueName, spacePath } from "~/lib/spaces";
 import * as fs from "~/lib/storage";
 import { File, Folder, X } from "./icons";
 
-function relative(time: number): string {
+export function relative(time: number): string {
   const minutes = Math.round((Date.now() - time) / 60_000);
   const format = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
   if (minutes < 60) return format.format(-minutes, "minute");

@@ -183,6 +183,8 @@ async function handle(request: Request): Promise<unknown> {
       return c.setFonts(r.files);
     case "fontFamilies":
       return c.fontFamilies();
+    case "fontFaces":
+      return JSON.parse(c.fontFaces());
     case "compile": {
       // One at a time: a compile waiting for packages would otherwise see another's main file.
       const run = compiles.then(() => compile(r.main, r.format));

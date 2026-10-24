@@ -96,7 +96,14 @@ struct FileHistoryView: View {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(version.time.formatted(date: .abbreviated, time: .shortened)).font(.headline)
+                        // Refreshes so "5 minutes ago" keeps counting while the sheet is open.
+                        TimelineView(.periodic(from: .now, by: 30)) { _ in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(version.time.formatted(date: .abbreviated, time: .shortened)).font(.headline)
+                                Text(version.time.formatted(.relative(presentation: .named)))
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                            }
+                        }
                         Text(model.path(of: version)).font(.caption).foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
                     }
@@ -264,86 +271,196 @@ private struct VersionRow: View {
     }
 }
 
-/// Unified line diff with line numbers in two gutters and folded unchanged runs.
-struct DiffView: View {
+/// Unified line diff in one read-only text view, so selections span lines; gutters, markers and tints are drawn around the text.
+struct DiffView: NSViewRepresentable {
     let rows: [FileDiffRow]
     let onExpand: (Int) -> Void
 
-    private var digits: Int {
-        let last = rows.reversed().lazy.compactMap { row -> Int? in
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let storage = NSTextStorage()
+        let layout = NSLayoutManager()
+        storage.addLayoutManager(layout)
+        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        layout.addTextContainer(container)
+
+        let tv = DiffTextView(frame: .zero, textContainer: container)
+        // Plain text so copies carry no colors or links.
+        tv.isRichText = false
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.usesFindBar = true
+        tv.isVerticallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainerInset = NSSize(width: 0, height: 6)
+        tv.drawsBackground = true
+        tv.backgroundColor = .textBackgroundColor
+        tv.linkTextAttributes = [.foregroundColor: NSColor.secondaryLabelColor, .cursor: NSCursor.pointingHand]
+        tv.delegate = context.coordinator
+
+        let scroll = NSScrollView()
+        scroll.documentView = tv
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        context.coordinator.textView = tv
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.onExpand = onExpand
+        guard context.coordinator.rows != rows else { return }
+        context.coordinator.rows = rows
+        context.coordinator.textView?.show(rows)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 500, height: proposal.height ?? 400)
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var rows: [FileDiffRow]?
+        var onExpand: (Int) -> Void = { _ in }
+        weak var textView: DiffTextView?
+
+        func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+            guard let id = link as? Int else { return false }
+            onExpand(id)
+            return true
+        }
+    }
+}
+
+/// Draws line numbers, markers and row tints in the space left of the text's indent.
+final class DiffTextView: NSTextView {
+    private struct Row {
+        /// The row's characters including its line break, so empty lines still have a glyph.
+        let range: NSRange
+        let old: Int?
+        let new: Int?
+        let kind: DiffKind?
+    }
+
+    private var rows: [Row] = []
+    private let font12 = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    private var digitWidth: CGFloat { ("0" as NSString).size(withAttributes: [.font: font12]).width }
+    private var numberWidth: CGFloat = 0
+    private let gap: CGFloat = 6
+
+    func show(_ diff: [FileDiffRow]) {
+        let last = diff.reversed().lazy.compactMap { row -> Int? in
             if case .line(let line) = row { return max(line.old ?? 0, line.new ?? 0) }
             return nil
         }.first ?? 1
-        return max(2, String(last).count)
+        numberWidth = CGFloat(max(2, String(last).count)) * digitWidth
+        let indent = gap + numberWidth + gap + numberWidth + gap + digitWidth + gap
+            - (textContainer?.lineFragmentPadding ?? 0)
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.firstLineHeadIndent = indent
+        paragraph.headIndent = indent
+        paragraph.lineSpacing = 2
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: font12, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph,
+        ]
+
+        let text = NSMutableAttributedString()
+        var built: [Row] = []
+        for (index, row) in diff.enumerated() {
+            let start = text.length
+            let isLast = index == diff.count - 1
+            switch row {
+            case .line(let line):
+                text.append(NSAttributedString(string: line.text, attributes: textAttributes))
+                if !isLast { text.append(NSAttributedString(string: "\n", attributes: textAttributes)) }
+                built.append(Row(range: NSRange(location: start, length: text.length - start),
+                                 old: line.old, new: line.new, kind: line.kind))
+            case .fold(let id, let count):
+                var attributes = textAttributes
+                attributes[.font] = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+                attributes[.link] = id
+                attributes[.toolTip] = String(localized: "Show the unchanged lines")
+                text.append(NSAttributedString(string: String(localized: "\(count) unchanged lines"), attributes: attributes))
+                if !isLast { text.append(NSAttributedString(string: "\n", attributes: textAttributes)) }
+                built.append(Row(range: NSRange(location: start, length: text.length - start), old: nil, new: nil, kind: nil))
+            }
+        }
+        rows = built
+        // Expanding a fold shouldn't jump back to the top.
+        let origin = enclosingScrollView?.contentView.bounds.origin
+        textStorage?.setAttributedString(text)
+        setSelectedRange(NSRange(location: 0, length: 0))
+        if let origin, let clip = enclosingScrollView?.contentView {
+            layoutManager?.ensureLayout(for: textContainer!)
+            clip.scroll(to: origin)
+            enclosingScrollView?.reflectScrolledClipView(clip)
+        }
+        needsDisplay = true
     }
 
-    var body: some View {
-        let width = CGFloat(digits) * 7.5 + 10
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(rows) { row in
-                    switch row {
-                    case .line(let line): LineRow(line: line, gutter: width)
-                    case .fold(let id, let count):
-                        Button { onExpand(id) } label: {
-                            Label("\(count) unchanged lines", systemImage: "arrow.up.and.down")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.leading, width * 2 + 12)
-                                .padding(.vertical, 4)
-                                .background(Color.secondary.opacity(0.08))
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Show the unchanged lines")
-                    }
-                }
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard let layout = layoutManager, let container = textContainer, !rows.isEmpty else { return }
+        let origin = textContainerOrigin
+        let glyphs = layout.glyphRange(forBoundingRect: rect.offsetBy(dx: -origin.x, dy: -origin.y), in: container)
+        let chars = layout.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+
+        // First row ending after the visible start.
+        var low = 0, high = rows.count
+        while low < high {
+            let mid = (low + high) / 2
+            if NSMaxRange(rows[mid].range) <= chars.location { low = mid + 1 } else { high = mid }
+        }
+        let numberAttributes: [NSAttributedString.Key: Any] = [.font: font12, .foregroundColor: NSColor.tertiaryLabelColor]
+        for row in rows[min(low, rows.count - 1)...] {
+            if row.range.location > NSMaxRange(chars) { break }
+            let rowGlyphs = layout.glyphRange(forCharacterRange: row.range, actualCharacterRange: nil)
+            var first: NSRect
+            var frame: NSRect
+            var baseline: CGFloat
+            if rowGlyphs.length == 0 {
+                first = layout.extraLineFragmentRect
+                frame = first
+                baseline = font12.ascender
+            } else {
+                first = layout.lineFragmentRect(forGlyphAt: rowGlyphs.location, effectiveRange: nil)
+                frame = first.union(layout.lineFragmentRect(forGlyphAt: NSMaxRange(rowGlyphs) - 1, effectiveRange: nil))
+                baseline = layout.location(forGlyphAt: rowGlyphs.location).y
             }
-            .padding(.vertical, 6)
-        }
-        .background(Color(nsColor: .textBackgroundColor))
-    }
+            frame.origin.x = 0
+            frame.size.width = bounds.width
+            frame.origin.y += origin.y
+            let top = first.minY + origin.y + baseline - font12.ascender
 
-    private struct LineRow: View {
-        let line: FileDiffRow.Line
-        let gutter: CGFloat
-
-        var body: some View {
-            HStack(alignment: .firstTextBaseline, spacing: 0) {
-                number(line.old)
-                number(line.new)
-                Text(marker).foregroundStyle(tint ?? .secondary).frame(width: 14)
-                Text(line.text.isEmpty ? " " : line.text)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            switch row.kind {
+            case .added?: NSColor.systemGreen.withAlphaComponent(0.14).setFill()
+            case .removed?: NSColor.systemRed.withAlphaComponent(0.14).setFill()
+            case .same?: NSColor.clear.setFill()
+            case nil: NSColor.secondaryLabelColor.withAlphaComponent(0.08).setFill()
             }
-            .font(.system(size: 12, design: .monospaced))
-            .padding(.vertical, 1)
-            .padding(.trailing, 8)
-            .background(tint.map { $0.opacity(0.14) } ?? .clear)
-        }
+            frame.fill(using: .sourceOver)
 
-        private func number(_ n: Int?) -> some View {
-            Text(n.map(String.init) ?? "")
-                .foregroundStyle(.tertiary)
-                .frame(width: gutter, alignment: .trailing)
-                .padding(.trailing, 4)
-        }
-
-        private var marker: String {
-            switch line.kind {
-            case .added: "+"
-            case .removed: "−"
-            case .same: ""
+            func number(_ n: Int?, right: CGFloat) {
+                guard let n else { return }
+                let string = String(n) as NSString
+                let width = string.size(withAttributes: numberAttributes).width
+                string.draw(at: NSPoint(x: right - width, y: top), withAttributes: numberAttributes)
             }
-        }
-
-        private var tint: Color? {
-            switch line.kind {
-            case .added: .green
-            case .removed: .red
-            case .same: nil
+            let oldRight = gap + numberWidth
+            let newRight = oldRight + gap + numberWidth
+            number(row.old, right: oldRight)
+            number(row.new, right: newRight)
+            let marker: (String, NSColor)? = switch row.kind {
+            case .added?: ("+", .systemGreen)
+            case .removed?: ("−", .systemRed)
+            default: nil
+            }
+            if let (symbol, color) = marker {
+                (symbol as NSString).draw(at: NSPoint(x: newRight + gap, y: top),
+                                          withAttributes: [.font: font12, .foregroundColor: color])
             }
         }
     }

@@ -1,5 +1,5 @@
 import { createSignal, For, type JSX, Match, Show, Switch } from "solid-js";
-import { alert, copyText, isMac, openSpace, prompt, setOverlay, showRecentlyDeleted } from "~/lib/app";
+import { alert, copyText, isMac, openSpace, prompt, setOverlay, showHistory, showRecentlyDeleted } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { pickFiles, readDrop } from "~/lib/drop";
 import { isPreviewable, mimeType } from "~/lib/kinds";
@@ -113,6 +113,7 @@ export default function FileSidebar(props: { workspace: Workspace }) {
       items.push({ label: ws.state.preview === node.path ? "Hide Preview" : "Preview", action: () => ws.togglePreview(node.path) });
     }
     if (node.kind === "typst") items.push({ label: "Find Usages", action: () => setOverlay({ type: "palette", page: `usages:${node.path}` }) });
+    if (!node.children) items.push({ label: "Show History…", action: () => showHistory(ws.repoPath(node.path)) });
     items.push(
       { separator: true },
       { label: "New File Here…", action: () => void newFile(dir) },

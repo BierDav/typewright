@@ -6,6 +6,7 @@ struct DeviceSettings: View {
     @Bindable private var identity = SyncIdentity.shared
     @Bindable private var sync = SyncService.shared
     @State private var accountName = ""
+    @State private var keyInput = ""
 
     var body: some View {
         Form {
@@ -13,6 +14,14 @@ struct DeviceSettings: View {
                 if let fingerprint = identity.fingerprint {
                     if let name = identity.name, !name.isEmpty { LabeledContent("Passkey", value: name) }
                     LabeledContent("Account", value: fingerprint)
+                    if let key = identity.accountKey {
+                        LabeledContent("Account Key") {
+                            Button("Copy") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(key, forType: .string)
+                            }
+                        }
+                    }
                     LabeledContent("") {
                         Button("Sign Out", role: .destructive) { identity.signOut() }
                     }
@@ -26,6 +35,17 @@ struct DeviceSettings: View {
                         }
                     }
                     .disabled(SyncIdentity.passkeyDomain == nil || identity.isWorking)
+                    LabeledContent("Account Key") {
+                        HStack {
+                            TextField("Account Key", text: $keyInput, prompt: Text("Key from another device"))
+                                .labelsHidden()
+                                .font(.system(.body, design: .monospaced))
+                            Button("Sign In") { identity.signIn(key: keyInput) }
+                                .disabled(keyInput.isEmpty)
+                            Button("Create") { identity.createWithKey() }
+                        }
+                    }
+                    .disabled(identity.isWorking)
                 }
             } header: {
                 Text("Account")
@@ -33,10 +53,13 @@ struct DeviceSettings: View {
                 if let error = identity.error {
                     Text(error).foregroundStyle(.red)
                 } else if identity.account == nil, SyncIdentity.passkeyDomain == nil {
-                    Text("This build can't use passkeys, so syncing is off. Release builds signed by the developer can.")
+                    Text("This build can't use passkeys. Create an account key instead, then sign in with it on your other devices; any signed-in device can copy its key.")
                         .foregroundStyle(.secondary)
                 } else if identity.account == nil {
-                    Text("The name only labels the passkey in Passwords; no email or other account is needed. Create a passkey once, then sign in with it on each Mac; iCloud Keychain brings it along. Synced spaces then show up on all of them, with nothing to exchange.")
+                    Text("The name only labels the passkey in Passwords; no email or other account is needed. Create a passkey once, then sign in with it on each Mac; iCloud Keychain brings it along. Synced spaces then show up on all of them, with nothing to exchange. Without a passkey, create an account key and paste it on your other devices.")
+                        .foregroundStyle(.secondary)
+                } else if identity.account != nil {
+                    Text("Anyone with the account key can sign in to your account; keep it like a password.")
                         .foregroundStyle(.secondary)
                 }
             }

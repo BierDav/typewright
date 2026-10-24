@@ -13,6 +13,9 @@ export type CompileOutput = {
   solveng: string;
 };
 
+/** A font face the HTML preview registers, as browsers only know installed fonts. */
+export type FontFaceData = { family: string; weight: number; italic: boolean; data: Uint8Array };
+
 export type Completion = { kind: string; label: string; apply?: string | null; detail?: string | null };
 export type Location = { path: string; package?: boolean; from: number; to: number } | { std: string | null };
 export type Jump = { path: string; offset: number } | { url: string } | { page: number; x: number; y: number };
@@ -110,6 +113,11 @@ class CompilerClient {
 
   fontFamilies(): Promise<string[]> {
     return this.post({ op: "fontFamilies" });
+  }
+
+  /** The faces of the files given to `setFonts`, by index into them. */
+  fontFaces(): Promise<{ file: number; family: string; weight: number; italic: boolean }[]> {
+    return this.post({ op: "fontFaces" });
   }
 
   async compile(main: string, format: number): Promise<CompileOutput> {

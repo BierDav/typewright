@@ -1,6 +1,6 @@
 // The account all of a user's devices share, backed by a passkey whose PRF output every key derives
-// from. It matches the Mac app's `SyncIdentity` (relying party, salt and derivation), so the same
-// passkey signs in to the same account in both, as long as the page runs on the relying party's domain.
+// from, or by an account key copied over by hand. It matches the Mac app's `SyncIdentity` (relying party,
+// salt, derivation and key format), so the same passkey or key signs in to the same account in both.
 import { createStore } from "solid-js/store";
 
 /** The Mac app's relying party; set `VITE_PASSKEY_DOMAIN` for other deployments. */
@@ -8,11 +8,14 @@ const PASSKEY_DOMAIN: string = import.meta.env.VITE_PASSKEY_DOMAIN || "bierdav.g
 const KEY = "typewright.account";
 const encoder = new TextEncoder();
 
-type Stored = { secret: string; name: string };
+export type Kind = "passkey" | "key";
+
+type Stored = { secret: string; name: string; kind?: Kind };
 
 export const [identity, setIdentity] = createStore({
   account: null as Uint8Array | null,
   name: null as string | null,
+  kind: null as Kind | null,
   fingerprint: null as string | null,
   working: false,
   error: null as string | null,
@@ -47,9 +50,28 @@ async function fingerprintOf(account: Uint8Array): Promise<string> {
   return `${text.slice(0, 4)}-${text.slice(4)}`;
 }
 
-async function adopt(secret: Uint8Array, name: string) {
-  localStorage.setItem(KEY, JSON.stringify({ secret: hex(secret), name } satisfies Stored));
-  setIdentity({ account: secret, name, fingerprint: await fingerprintOf(secret), error: null });
+async function adopt(secret: Uint8Array, name: string, kind: Kind) {
+  localStorage.setItem(KEY, JSON.stringify({ secret: hex(secret), name, kind } satisfies Stored));
+  setIdentity({ account: secret, name, kind, fingerprint: await fingerprintOf(secret), error: null });
+}
+
+/** The account's secret as eight groups of eight hexadecimal digits, to sign in on a device without the passkey. */
+export function accountKey(): string | null {
+  return identity.account ? (hex(identity.account).match(/.{8}/g) ?? []).join("-") : null;
+}
+
+/** Creates an account without a passkey; its key is the only way to sign in elsewhere. */
+export function createWithKey() {
+  return adopt(random(32), "", "key");
+}
+
+export async function signInWithKey(text: string) {
+  const digits = text.replace(/[^0-9a-fA-F]/g, "");
+  if (digits.length !== 64) {
+    setIdentity("error", "An account key has 64 hexadecimal digits.");
+    return;
+  }
+  await adopt(unhex(digits.toLowerCase()), "", "key");
 }
 
 export async function loadIdentity() {
@@ -57,14 +79,15 @@ export async function loadIdentity() {
     const stored = JSON.parse(localStorage.getItem(KEY) ?? "null") as Stored | null;
     if (stored?.secret?.length === 64) {
       const account = unhex(stored.secret);
-      setIdentity({ account, name: stored.name, fingerprint: await fingerprintOf(account) });
+      // Accounts from before account keys were all passkeys.
+      setIdentity({ account, name: stored.name, kind: stored.kind ?? "passkey", fingerprint: await fingerprintOf(account) });
     }
   } catch {}
 }
 
 export function signOut() {
   localStorage.removeItem(KEY);
-  setIdentity({ account: null, name: null, fingerprint: null });
+  setIdentity({ account: null, name: null, kind: null, fingerprint: null });
 }
 
 /** Fixed so every device gets the same PRF output from the passkey. */
@@ -93,7 +116,7 @@ async function run(body: () => Promise<{ prf: ArrayBuffer; name: string }>) {
   setIdentity({ working: true, error: null });
   try {
     const { prf, name } = await body();
-    await adopt(await deriveAccount(prf), name);
+    await adopt(await deriveAccount(prf), name, "passkey");
   } catch (err) {
     // Dismissing the sheet isn't an error worth showing.
     if ((err as DOMException)?.name !== "NotAllowedError") setIdentity("error", (err as Error).message);

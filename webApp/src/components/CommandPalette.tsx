@@ -1,5 +1,5 @@
-import { createEffect, createMemo, createResource, createSignal, For, type JSX, on, onCleanup, onMount, Show } from "solid-js";
-import { editorView, openSpace, setOverlay, shortcut, showRecentlyDeleted, workspace } from "~/lib/app";
+import { createEffect, createMemo, createSignal, For, type JSX, on, onCleanup, onMount, Show, untrack } from "solid-js";
+import { editorView, openSpace, overlay, setOverlay, shortcut, showHistory, showRecentlyDeleted, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { fuzzyScore } from "~/lib/core";
 import { symbolAt } from "~/lib/editor/refactor";
@@ -257,6 +257,7 @@ async function rootItems(): Promise<Item[]> {
           action: { run: async () => { const bytes = await fs.readFile(fs.join(ws.root, file)); if (bytes) download(name, bytes); } },
         },
         { id: "file.rel", title: `Copy Relative Path of ${name}`, section: "File", action: { run: () => void navigator.clipboard.writeText(file) } },
+        { id: "file.history", title: `Show History of ${name}…`, section: "File", keywords: ["versions", "restore", "diff"], action: { run: () => showHistory(ws.repoPath(file)) } },
       );
     }
     items.push({ id: "space.search", title: `Find in ${ws.name}`, section: "Space", shortcut: shortcut("⇧⌘F"), action: { run: () => setOverlay({ type: "search", allSpaces: false }) } });
@@ -413,6 +414,16 @@ function startPage(name: string | undefined): Page | null {
   return null;
 }
 
+let dismissOpen: (() => void) | null = null;
+
+/** Closes the open palette with its animation (⌘K while it's open). */
+export function closePalette() {
+  if (dismissOpen) dismissOpen();
+  else setOverlay(null);
+}
+
+const EASE = "cubic-bezier(0.2, 0.9, 0.3, 1)";
+
 export default function CommandPalette(props: { page?: string }) {
   let input!: HTMLInputElement;
   let list!: HTMLDivElement;
@@ -423,19 +434,61 @@ export default function CommandPalette(props: { page?: string }) {
   const base = stack().length;
   const nested = () => stack().length > base;
   const page = () => stack().at(-1);
-  const [source] = createResource(
-    () => ({ page: page(), revision: fonts.fonts.revision + fonts.fonts.catalog.length }),
-    async ({ page }) => (page ? (page.kind === "list" ? page.items() : []) : rootItems()),
-  );
-  const close = () => setOverlay(null);
+  // Plain signals rather than a resource: reading a pending resource suspends the whole page for a frame.
+  const [items, setItems] = createSignal<Item[]>([]);
+  const [loading, setLoading] = createSignal(true);
+  const [slow, setSlow] = createSignal(false);
+  let shownPage: Page | undefined | null = null;
+  createEffect(() => {
+    const current = page();
+    void (fonts.fonts.revision + fonts.fonts.catalog.length);
+    // A new page starts empty; a refresh of the same one keeps its rows until the new ones are in.
+    if (current !== shownPage) setItems([]);
+    shownPage = current;
+    let live = true;
+    setLoading(true);
+    const timer = setTimeout(() => live && setSlow(true), 150);
+    untrack(async () => (current ? (current.kind === "list" ? current.items() : []) : rootItems()))
+      .then((list) => live && setItems(list))
+      .catch((err) => console.error("palette:", err))
+      .finally(() => {
+        if (!live) return;
+        clearTimeout(timer);
+        setLoading(false);
+        setSlow(false);
+      });
+    onCleanup(() => {
+      live = false;
+      clearTimeout(timer);
+    });
+  });
+
+  let panel!: HTMLDivElement;
+  let backdrop!: HTMLDivElement;
+  let closing = false;
+  const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+  /** Fades out, then removes the palette unless something else took its place meanwhile. */
+  const close = () => {
+    if (closing) return;
+    closing = true;
+    const mine = untrack(overlay);
+    const done = () => untrack(overlay) === mine && setOverlay(null);
+    if (reduced()) return done();
+    backdrop.style.pointerEvents = "none";
+    backdrop.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: "ease-in", fill: "forwards" });
+    panel.animate([{ transform: "none" }, { transform: "scale(0.97) translateY(-4px)" }], { duration: 140, easing: "ease-in", fill: "forwards" });
+    // A timer rather than the animation's end, which background tabs hold back.
+    setTimeout(done, 140);
+  };
+  dismissOpen = close;
+  onCleanup(() => dismissOpen === close && (dismissOpen = null));
   // A destination page closed without a choice answers "none".
   onCleanup(() => commands.settleDestination(null));
 
   const results = createMemo(() => {
-    const items = source() ?? source.latest ?? [];
     const q = query().trim();
-    if (!q) return items.filter((i) => !i.searchOnly).slice(0, 400);
-    return items
+    if (!q) return items().filter((i) => !i.searchOnly).slice(0, 400);
+    return items()
       .map((item) => ({ item, s: score(q, item) }))
       .filter((r): r is { item: Item; s: number } => r.s !== null)
       .sort((a, b) => a.s - b.s)
@@ -444,10 +497,43 @@ export default function CommandPalette(props: { page?: string }) {
   });
 
   createEffect(on(results, () => setSelected(0)));
-  onMount(() => input.focus());
+  onMount(() => {
+    input.focus();
+    if (!reduced()) panel.style.opacity = backdrop.style.opacity = "0";
+  });
+  // Appears once its rows are in (or loading takes a while), so it doesn't grow while scaling in.
+  let shown = false;
+  createEffect(() => {
+    if (shown || (loading() && !slow())) return;
+    shown = true;
+    if (reduced()) return;
+    panel.style.opacity = backdrop.style.opacity = "";
+    backdrop.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
+    panel.animate(
+      [{ opacity: 0, transform: "scale(0.96) translateY(-8px)" }, { opacity: 1, transform: "none" }],
+      { duration: 220, easing: EASE },
+    );
+  });
+
+  /** Slides the list in from the side the page came from. */
+  function slide(forward: boolean) {
+    if (reduced()) return;
+    const from = forward ? 14 : -14;
+    panel.querySelector(".palette-body")?.animate(
+      [{ opacity: 0, transform: `translateX(${from}px)` }, { opacity: 1, transform: "none" }],
+      { duration: 200, easing: EASE },
+    );
+  }
+
+  function back() {
+    setStack(stack().slice(0, -1));
+    setQuery("");
+    slide(false);
+  }
 
   function push(next: Page) {
     setStack([...stack(), next]);
+    slide(true);
     setQuery(next.kind === "input" ? next.initial : "");
     requestAnimationFrame(() => input?.select());
   }
@@ -473,17 +559,16 @@ export default function CommandPalette(props: { page?: string }) {
   }
 
   function onKey(event: KeyboardEvent) {
+    if (closing) return event.preventDefault();
     if (event.key === "ArrowDown" || (event.ctrlKey && event.key === "n")) (event.preventDefault(), move(1));
     else if (event.key === "ArrowUp" || (event.ctrlKey && event.key === "p")) (event.preventDefault(), move(-1));
     else if (event.key === "Enter") (event.preventDefault(), run(results()[selected()]));
     else if (event.key === "Escape") {
       event.preventDefault();
-      if (nested()) {
-        setStack(stack().slice(0, -1));
-        setQuery("");
-      } else close();
+      if (nested()) back();
+      else close();
     } else if (event.key === "Backspace" && !query() && nested()) {
-      setStack(stack().slice(0, -1));
+      back();
     }
   }
 
@@ -505,8 +590,8 @@ export default function CommandPalette(props: { page?: string }) {
   };
 
   return (
-    <div class="overlay-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div class="palette glass" role="dialog" aria-label="Command palette">
+    <div class="overlay-backdrop" ref={backdrop} onMouseDown={(e) => e.target === e.currentTarget && close()}>
+      <div class="palette glass" ref={panel} role="dialog" aria-label="Command palette">
         <div class="palette-field">
           <Show when={page()}>
             <span class="palette-page">{page()!.title}</span>
@@ -521,8 +606,8 @@ export default function CommandPalette(props: { page?: string }) {
           />
         </div>
         <Show when={page()?.kind !== "input"}>
-          <div class="palette-list" ref={list}>
-            <Show when={!source.loading || results().length} fallback={<p class="secondary palette-empty">Loading…</p>}>
+          <div class="palette-list palette-body" ref={list}>
+            <Show when={!loading() || results().length} fallback={<Show when={slow()}><p class="secondary palette-empty">Loading…</p></Show>}>
               <For each={results()} fallback={<p class="secondary palette-empty">No results</p>}>
                 {(item, index) => (
                   <>

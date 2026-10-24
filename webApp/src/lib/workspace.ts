@@ -1,7 +1,7 @@
 // One open space: its files, buffers, autosave, compilation and previews, like the Mac app's `Workspace`.
 import { batch, createRoot, createSignal, type Accessor } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
-import { compiler, Format, type CompileOutput, type DiagnosticJSON } from "./compiler";
+import { compiler, Format, type CompileOutput, type DiagnosticJSON, type FontFaceData } from "./compiler";
 import { spaceRelativePath } from "./core";
 import { Solveng } from "./editor/solveng";
 import { sharedFontFiles } from "./fonts";
@@ -55,6 +55,9 @@ export class Workspace {
   /** Bumped when the selected file changed outside its editor, so the editor reloads it. */
   readonly external: Accessor<number>;
   private setExternal: (v: number) => void;
+  /** The fonts typst gets, for the HTML preview's `@font-face` rules. */
+  readonly htmlFonts: Accessor<FontFaceData[]>;
+  private setHtmlFonts: (v: FontFaceData[]) => void;
   /** Set by the editor; the selected text and selection. */
   currentText: () => string = () => this.state.text;
   /** Settles once the space's files are listed and its first file is selected. */
@@ -102,6 +105,9 @@ export class Workspace {
     const [external, setExternal] = createRoot(() => createSignal(0));
     this.external = external;
     this.setExternal = setExternal;
+    const [htmlFonts, setHtmlFonts] = createRoot(() => createSignal<FontFaceData[]>([]));
+    this.htmlFonts = htmlFonts;
+    this.setHtmlFonts = setHtmlFonts;
     this.disposers.push(
       fs.onChange(({ paths }) => {
         const mine = paths.filter((p) => p === this.root || p.startsWith(`${this.root}/`));
@@ -204,8 +210,11 @@ export class Workspace {
         }
       }
     }
-    await compiler.setFonts([...own, ...(await sharedFontFiles())]);
+    const files = [...own, ...(await sharedFontFiles())];
+    await compiler.setFonts(files);
     this.setState("fontFamilies", await compiler.fontFamilies());
+    const faces = await compiler.fontFaces().catch(() => []);
+    this.setHtmlFonts(faces.map(({ file, ...face }) => ({ ...face, data: files[file] })));
     this.scheduleCompile(0);
   }
 

@@ -54,8 +54,8 @@ enum Invites {
             let alert = NSAlert()
             alert.messageText = "Sign in to join “\(invite.name)”"
             alert.informativeText = SyncIdentity.passkeyDomain == nil
-                ? "Shared spaces sync through a Typewright account, which this build can't use. Release builds can."
-                : "Shared spaces sync through a Typewright account. Create a passkey or sign in with yours in the Devices settings, then open the link again."
+                ? "Shared spaces sync through a Typewright account. Create an account key or sign in with yours in the Devices settings, then open the link again."
+                : "Shared spaces sync through a Typewright account. Create a passkey or account key, or sign in with yours, in the Devices settings, then open the link again."
             alert.addButton(withTitle: "Open Devices Settings")
             alert.addButton(withTitle: "Cancel")
             if alert.runModal() == .alertFirstButtonReturn { SettingsWindowController.shared.show(tab: 4) }

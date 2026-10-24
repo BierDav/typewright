@@ -3,7 +3,7 @@ import { confirm, openSpace, overlay, prompt, setOverlay, type SettingsTab, show
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import * as fontLib from "~/lib/fonts";
-import { createPasskey, identity, passkeysSupported, relyingParty, sharesMacPasskeys, signInWithPasskey, signOut } from "~/lib/identity";
+import { accountKey, createPasskey, createWithKey, identity, passkeysSupported, relyingParty, sharesMacPasskeys, signInWithKey, signInWithPasskey, signOut } from "~/lib/identity";
 import { DEFAULT_RETENTION, type RetentionPolicy, setSettings, settings } from "~/lib/settings";
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
@@ -415,6 +415,8 @@ function Packages() {
                 await fs.writeFile(fs.join("packages", namespace, rel), new Uint8Array(await file.arrayBuffer()), true);
               }
               void refetch();
+              await compiler.retryPackages();
+              workspace()?.scheduleCompile(0);
             }}
           >
             Add Local Packages…
@@ -448,6 +450,7 @@ function short(id: string | null): string {
 
 function Devices() {
   const [name, setName] = createSignal("");
+  const [key, setKey] = createSignal("");
   const synced = createMemo(() =>
     Object.entries(sync.shares)
       .filter(([, share]) => share)
@@ -459,29 +462,45 @@ function Devices() {
       <Section
         title="Account"
         footer={
-          sharesMacPasskeys()
-            ? "Create a passkey once, then sign in with it on each device, here and in the Mac app; your password manager brings it along. Synced spaces then show up on all of them, with nothing to exchange."
-            : `Passkeys here belong to ${relyingParty()}, so they don't sign in to the Mac app's account. The app at bierdav.github.io shares them.`
+          identity.account
+            ? "Anyone with the account key can sign in to your account; keep it like a password."
+            : (sharesMacPasskeys()
+                ? "Create a passkey once, then sign in with it on each device, here and in the Mac app; your password manager brings it along. Synced spaces then show up on all of them, with nothing to exchange."
+                : `Passkeys here belong to ${relyingParty()}, so they don't sign in to the Mac app's account. The app at bierdav.github.io shares them.`) +
+              " Without a passkey, create an account key and paste it on your other devices."
         }
       >
         <Show
           when={identity.account}
           fallback={
-            <Show when={passkeysSupported()} fallback={<div class="form-row secondary">This browser can't use passkeys here (it needs a secure context).</div>}>
-              <Row label="Name">
-                <input class="text-field" value={name()} placeholder="you@example.com" onInput={(e) => setName(e.currentTarget.value)} />
-              </Row>
-              <Row label="Passkey">
+            <>
+              <Show when={passkeysSupported()} fallback={<div class="form-row secondary">This browser can't use passkeys here (it needs a secure context).</div>}>
+                <Row label="Name">
+                  <input class="text-field" value={name()} placeholder="you@example.com" onInput={(e) => setName(e.currentTarget.value)} />
+                </Row>
+                <Row label="Passkey">
+                  <div class="button-row">
+                    <button class="button small" disabled={identity.working} onClick={() => void createPasskey(name()).then(syncService.restart)}>
+                      <KeyRound size={13} /> Create…
+                    </button>
+                    <button class="button small" disabled={identity.working} onClick={() => void signInWithPasskey().then(syncService.restart)}>
+                      Sign In…
+                    </button>
+                  </div>
+                </Row>
+              </Show>
+              <Row label="Account Key">
                 <div class="button-row">
-                  <button class="button small" disabled={identity.working} onClick={() => void createPasskey(name()).then(syncService.restart)}>
-                    <KeyRound size={13} /> Create…
+                  <input class="text-field mono" value={key()} placeholder="Key from another device" onInput={(e) => setKey(e.currentTarget.value)} />
+                  <button class="button small" disabled={identity.working || !key().trim()} onClick={() => void signInWithKey(key()).then(syncService.restart)}>
+                    Sign In
                   </button>
-                  <button class="button small" disabled={identity.working} onClick={() => void signInWithPasskey().then(syncService.restart)}>
-                    Sign In…
+                  <button class="button small" disabled={identity.working} onClick={() => void createWithKey().then(syncService.restart)}>
+                    Create
                   </button>
                 </div>
               </Row>
-            </Show>
+            </>
           }
         >
           <Show when={identity.name}>
@@ -491,6 +510,11 @@ function Devices() {
           </Show>
           <Row label="Account">
             <span class="mono">{identity.fingerprint}</span>
+          </Row>
+          <Row label="Account Key">
+            <button class="button small" onClick={() => void navigator.clipboard.writeText(accountKey() ?? "")}>
+              Copy
+            </button>
           </Row>
           <Row label="">
             <button
