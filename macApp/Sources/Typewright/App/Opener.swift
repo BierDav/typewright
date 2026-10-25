@@ -361,7 +361,7 @@ final class Opener {
             SpaceList.add(url)
             return url
         } catch {
-            NSAlert(error: error).runModal()
+            PaletteDialog.error(error, title: "Couldn't create a new space")
             return nil
         }
     }
@@ -432,7 +432,7 @@ final class Opener {
         let resolved = source.resolvingSymlinksInPath().path
         let base = SpaceList.repository.resolvingSymlinksInPath().path
         if resolved == base || base.hasPrefix(resolved + "/") {
-            NSAlert(error: SpaceFolders.ImportError.containsRepository).runModal()
+            PaletteDialog.error(SpaceFolders.ImportError.containsRepository, title: "Can't add that folder")
             return nil
         }
         SpaceList.add(source)
@@ -449,7 +449,7 @@ final class Opener {
         let result = await Task.detached { Result(catching: { try SpaceFolders.importFolder(source, into: root, mode: mode) }) }.value
         switch result {
         case .failure(let error):
-            NSAlert(error: error).runModal()
+            PaletteDialog.error(error, title: "Couldn't import “\(source.lastPathComponent)”")
             return nil
         case .success(let target):
             if mode == .replaceWithLink { SpaceLinks.shared.record(source, to: target) }
@@ -470,9 +470,9 @@ final class Opener {
         let state = promptState(state)
         state.ask(PalettePage(title: "Delete “\(name)”?", placeholder: "Delete “\(name)”?", kind: .list {[
             PaletteItem(id: "delete.confirm", title: "Delete Space “\(name)”", subtitle: detail, icon: "trash",
-                        section: "Delete “\(name)”", action: .run { [weak state] in
+                        section: "Delete “\(name)”", action: .run {
                 FileOperations.spaces.perform(.deleteSpace(url), name: "Delete “\(name)”",
-                                              message: "Delete space \(name)", undoManager: state?.undoManager)
+                                              message: "Delete space \(name)", undoManager: state.undoManager)
             }),
             PaletteItem(id: "delete.cancel", title: "Cancel", icon: "xmark", section: "Delete “\(name)”", action: .run {}),
         ]}))
@@ -484,16 +484,31 @@ final class Opener {
         windows.forEach { $0.state.workspace?.flushSaves() }
         // Its shares, nested ones too, stop through `SpaceRepository.didDelete`; undo brings them back.
         guard let item = await SpaceRepository.shared.delete([url], message: message)?.first else {
-            let alert = NSAlert()
-            alert.messageText = "Couldn't delete “\(url.lastPathComponent)”"
-            alert.informativeText = SpaceRepository.shared.lastError ?? ""
-            alert.runModal()
+            PaletteDialog.message("Couldn't delete “\(url.lastPathComponent)”", detail: SpaceRepository.shared.lastError)
             return nil
         }
         windows.forEach { $0.state.space = nil }
         // The list keeps its entry, so the space returns to its place when restored.
         NotificationCenter.default.post(name: SpaceList.didChange, object: nil)
         return item
+    }
+
+    /// Removes a folder outside the library from the spaces list after asking; the folder stays where it is.
+    func forgetSpace(_ url: URL, in state: WindowState? = nil) {
+        let url = url.standardizedFileURL
+        let name = url.lastPathComponent
+        let state = promptState(state)
+        state.ask(PalettePage(title: "Remove “\(name)” from Spaces?", placeholder: "Remove “\(name)” from Spaces?",
+                              kind: .list {[
+            PaletteItem(id: "forget.confirm", title: "Remove “\(name)” from Spaces",
+                        subtitle: "The folder stays where it is; it's no longer listed here", icon: "minus.circle",
+                        section: "Remove “\(name)”", action: .run {
+                self.windows(showing: url).forEach { $0.state.space = nil }
+                SpaceList.remove(url)
+            }),
+            PaletteItem(id: "forget.cancel", title: "Cancel", icon: "xmark", section: "Remove “\(name)”",
+                        action: .run {}),
+        ]}))
     }
 
     /// Asks where to put a link to a space or an item in one, ~/Documents first.
@@ -512,7 +527,7 @@ final class Opener {
             }
             try SpaceLinks.shared.create(to: item, at: location)
         } catch {
-            NSAlert(error: error).runModal()
+            PaletteDialog.error(error, title: "Couldn't create the link")
         }
     }
 
@@ -526,10 +541,7 @@ final class Opener {
         // Case-only renames hit the same folder on case-insensitive volumes.
         let caseOnly = target.path.lowercased() == old.path.lowercased()
         guard caseOnly || !FileManager.default.fileExists(atPath: target.path) else {
-            let alert = NSAlert()
-            alert.messageText = "“\(name)” already exists."
-            alert.informativeText = "Choose a different name for the space."
-            alert.runModal()
+            PaletteDialog.message("“\(name)” already exists.", detail: "Choose a different name for the space.")
             return nil
         }
         let windows = windows(showing: old)
@@ -537,7 +549,7 @@ final class Opener {
         do {
             try FileManager.default.moveItem(at: old, to: target)
         } catch {
-            NSAlert(error: error).runModal()
+            PaletteDialog.error(error, title: "Couldn't rename “\(old.lastPathComponent)”")
             return nil
         }
         SpaceLinks.shared.moved(from: old, to: target)

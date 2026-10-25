@@ -259,12 +259,13 @@ struct SpaceSearchView: View {
     /// Replaces every match in every listed file after asking once.
     private func replaceAll() {
         guard let expression = expression(), !results.isEmpty else { return }
-        let alert = NSAlert()
-        alert.messageText = "Replace \(hits.count) matches in \(results.count) files?"
-        alert.informativeText = "Files outside the open space are saved right away. This can't be undone in one step."
-        alert.addButton(withTitle: "Replace All")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let choice = PaletteDialog.choose("Replace \(hits.count) matches in \(results.count) files?",
+            detail: "Files outside the open space are saved right away. This can't be undone in one step.",
+            choices: [
+                PaletteDialog.Choice(id: "replace", title: "Replace All", icon: "arrow.left.arrow.right"),
+                PaletteDialog.Choice(id: "cancel", title: "Cancel", icon: "xmark"),
+            ], over: state.window)
+        guard choice == "replace" else { return }
         preview?.flush()
         for result in results {
             let inSpace = workspace?.isInSpace(result.file) == true

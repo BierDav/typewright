@@ -273,7 +273,7 @@ struct Shortcuts: Equatable {
     var previewCurrentFile = KeyBinding(.character("-"), [.command, .shift])
     var findInSpace = KeyBinding(.character("f"), [.command, .shift])
     var palette = KeyBinding(.character("k"), .command)
-    var showSpaces = KeyBinding(.character("s"), [.command, .option])
+    var showSpaces = KeyBinding(.character("s"), [.command, .shift])
     var sidebar = KeyBinding(.character("s"), .command)
     var back = KeyBinding(.leftArrow, [.command, .control])
     var forward = KeyBinding(.rightArrow, [.command, .control])

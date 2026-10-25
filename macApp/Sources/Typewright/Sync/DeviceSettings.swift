@@ -104,17 +104,6 @@ struct DeviceSettings: View {
                             Text(Self.detail(sync, id: id, share: share))
                         }
                     }
-                    ForEach(sync.unmigrated.sorted { $0.value.path < $1.value.path }, id: \.key) { id, url in
-                        LabeledContent {
-                            HStack {
-                                Button("Import…") { Opener.shared.askToImport(url, external: false) }
-                                Button("Stop Syncing") { sync.forgetUnmigrated(id) }
-                            }
-                        } label: {
-                            Text(url.lastPathComponent)
-                            Text("Not syncing until it's in Typewright's library · " + url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
-                        }
-                    }
                     ForEach(sync.parked.sorted { $0.value.share.path.localizedStandardCompare($1.value.share.path) == .orderedAscending }, id: \.key) { id, entry in
                         LabeledContent {
                             Button("Forget") { sync.forgetParked(id) }
@@ -125,7 +114,7 @@ struct DeviceSettings: View {
                                 : "Stopped since it was deleted · Restore it from Recently Deleted to sync it again")
                         }
                     }
-                    if sync.shares.isEmpty && sync.unmigrated.isEmpty && sync.parked.isEmpty {
+                    if sync.shares.isEmpty && sync.parked.isEmpty {
                         Text("Share a space, folder or file from its context menu to sync it.")
                             .font(.caption)
                             .foregroundStyle(.secondary)

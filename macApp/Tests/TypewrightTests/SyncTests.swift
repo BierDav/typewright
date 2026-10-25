@@ -30,22 +30,17 @@ final class SyncTests: XCTestCase {
         let store = defaults()
         store.set(["thesis-id": thesis.path, "paper-id": outside.path], forKey: "syncedSpaces")
 
+        // Only library spaces carry over; external ones no longer sync.
         let sync = SyncService(defaults: store, repository: repository, deviceName: "Test")
         XCTAssertEqual(sync.shares["thesis-id"], LocalShare(path: "Thesis", kind: .space))
-        XCTAssertEqual(sync.unmigrated["paper-id"]?.path, outside.standardizedFileURL.path)
         XCTAssertEqual(sync.shareID(for: thesis), "thesis-id")
+        XCTAssertNil(sync.shareID(for: outside))
+        XCTAssertNil(store.dictionary(forKey: "syncedSpaces"))
 
-        // Importing the outside space into the library picks its sync back up.
-        let imported = repository.url(of: "Paper")
-        try FileManager.default.createDirectory(at: imported, withIntermediateDirectories: true)
-        sync.moved(from: outside, to: imported)
-        XCTAssertEqual(sync.shares["paper-id"], LocalShare(path: "Paper", kind: .space))
-        XCTAssertTrue(sync.unmigrated.isEmpty)
-
-        // Both survive a relaunch, and the old list holds nothing anymore.
+        // It survives a relaunch.
         let again = SyncService(defaults: store, repository: repository, deviceName: "Test")
-        XCTAssertEqual(again.shares.count, 2)
-        XCTAssertEqual(store.dictionary(forKey: "syncedSpaces")?.count, 0)
+        XCTAssertEqual(again.shares.count, 1)
+        XCTAssertEqual(again.shares["thesis-id"], LocalShare(path: "Thesis", kind: .space))
     }
 
     func testSharePathsFollowRenames() throws {

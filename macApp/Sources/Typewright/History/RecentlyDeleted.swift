@@ -239,12 +239,13 @@ struct RecentlyDeletedView: View {
         case .restored(let url):
             if revealAfterRestore { Opener.shared.open(url) }
         case .exists:
-            let alert = NSAlert()
-            alert.messageText = "“\(item.name)” already exists"
-            alert.informativeText = "Something else is at its place now. Keep both, with a number added to the restored one?"
-            alert.addButton(withTitle: "Keep Both")
-            alert.addButton(withTitle: "Cancel")
-            if alert.runModal() == .alertFirstButtonReturn { await restore(item, keepBoth: true) }
+            let choice = PaletteDialog.choose("“\(item.name)” already exists",
+                detail: "Something else is at its place now. Keep both, with a number added to the restored one?",
+                choices: [
+                    PaletteDialog.Choice(id: "both", title: "Keep Both", icon: "plus.square.on.square"),
+                    PaletteDialog.Choice(id: "cancel", title: "Cancel", icon: "xmark"),
+                ])
+            if choice == "both" { await restore(item, keepBoth: true) }
         case .failed:
             failure = SpaceRepository.shared.lastError ?? "The history doesn't have “\(item.name)” anymore."
         }

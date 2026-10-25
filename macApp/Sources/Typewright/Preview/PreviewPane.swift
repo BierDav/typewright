@@ -217,10 +217,7 @@ struct PreviewPane: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task {
             guard let error = await workspace.exportPDF(to: url) else { return }
-            let alert = NSAlert()
-            alert.messageText = "Export failed"
-            alert.informativeText = error
-            alert.runModal()
+            PaletteDialog.message("Export failed", detail: error)
         }
     }
 }

@@ -424,6 +424,13 @@ struct CommandPalette: View {
                                icon: "square.stack", shortcut: index < 9 ? "⌘\(index + 1)" : nil, section: "Spaces",
                                action: .run { Opener.shared.switchToSpace(at: index, in: state) })
         }
+        // From the overview every space can be deleted; an open space has its own command further down.
+        if inOverview, !all.isEmpty {
+            items.append(PaletteItem(id: "spaces.delete", title: "Delete Space…", icon: "trash", section: "Spaces",
+                                     keywords: ["delete space", "remove space", "trash space", "forget space"],
+                                     action: .page(PalettePage(title: "Delete Space", placeholder: "Choose a space…",
+                                                               kind: .list { all.map(deleteSpaceItem) }))))
+        }
         items = Self.emphasizingNames(items, names: [workspace?.selectedFile?.lastPathComponent,
                                                      workspace?.selectedFile?.deletingLastPathComponent().lastPathComponent,
                                                      workspace?.name] + spaces.map(\.lastPathComponent))
@@ -463,6 +470,20 @@ struct CommandPalette: View {
                         action: .run { Opener.shared.newWindow() }),
         ]
         return items
+    }
+
+    /// A space on the way to its confirmation; external ones leave the list instead of the library.
+    private func deleteSpaceItem(_ url: URL) -> PaletteItem {
+        let inLibrary = SpaceList.isInRepository(url)
+        return PaletteItem(id: "deleteSpace:\(url.path)",
+                           title: "\(inLibrary ? "Delete" : "Remove") \(url.lastPathComponent)…",
+                           subtitle: inLibrary ? "Stays in Recently Deleted, undo brings it back"
+                               : "Stays in Finder, out of the spaces list",
+                           icon: "trash", section: "Delete Space", action: .run { [state] in
+            DispatchQueue.main.async {
+                if inLibrary { Opener.shared.deleteSpace(url, in: state) } else { Opener.shared.forgetSpace(url, in: state) }
+            }
+        })
     }
 
     private func spaceItems(_ ws: Workspace) -> [PaletteItem] {
@@ -579,6 +600,10 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "space.deleted", title: "Recently Deleted in \(ws.name)…", icon: "trash", section: "Space",
                                      keywords: ["trash", "restore", "undelete"],
                                      action: .run { DispatchQueue.main.async { RecentlyDeleted.show(in: ws.root) } }))
+        } else {
+            items.append(PaletteItem(id: "space.forget", title: "Remove \(ws.name) from Spaces…", icon: "trash", section: "Space",
+                                     keywords: ["delete space", "remove space", "forget space"],
+                                     action: .run { DispatchQueue.main.async { Opener.shared.forgetSpace(ws.root, in: state) } }))
         }
         if SpaceList.isInRepository(ws.root) {
             // The alert waits until the palette is gone.

@@ -250,44 +250,32 @@ struct LayoutEditorView: View {
 
     private func fork() {
         stopRecording()
-        let alert = NSAlert()
-        alert.messageText = "Fork \(layout.name)"
-        alert.informativeText = "The fork follows \(layout.name) until you change a shortcut."
-        let field = NSTextField(string: "\(layout.name) Copy")
-        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Create")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let fork = layouts.fork(layout, named: field.stringValue)
+        guard let name = PaletteDialog.input("Fork \(layout.name)",
+                                             detail: "The fork follows \(layout.name) until you change a shortcut.",
+                                             initial: "\(layout.name) Copy", placeholder: "Layout name",
+                                             button: "Create") else { return }
+        let fork = layouts.fork(layout, named: name)
         chosenID = fork.id
         selectedID = fork.id
     }
 
     private func rename() {
         stopRecording()
-        let alert = NSAlert()
-        alert.messageText = "Rename Layout"
-        let field = NSTextField(string: layout.name)
-        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        layouts.rename(layout.id, to: field.stringValue)
+        guard let name = PaletteDialog.input("Rename Layout", initial: layout.name,
+                                             placeholder: "Layout name", button: "Rename") else { return }
+        layouts.rename(layout.id, to: name)
     }
 
     private func delete() {
         stopRecording()
-        let alert = NSAlert()
-        alert.messageText = "Delete “\(layout.name)”?"
-        alert.informativeText = "Its shortcuts go away. \(layout.base.title) stays."
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let choice = PaletteDialog.choose("Delete “\(layout.name)”?",
+                                          detail: "Its shortcuts go away. \(layout.base.title) stays.",
+                                          choices: [
+                                            PaletteDialog.Choice(id: "delete", title: "Delete", icon: "trash",
+                                                                 destructive: true),
+                                            PaletteDialog.Choice(id: "cancel", title: "Cancel", icon: "xmark"),
+                                          ])
+        guard choice == "delete" else { return }
         let base = layout.base.rawValue
         let wasActive = selectedID == layout.id
         layouts.delete(layout.id)

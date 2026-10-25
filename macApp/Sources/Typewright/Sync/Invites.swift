@@ -17,18 +17,22 @@ enum Invites {
                            "Only spaces in the library sync. Import the space from its menu in the spaces overview first.")
         }
         let synced = sync.isSynced(url)
-        let alert = NSAlert()
-        alert.messageText = "Share “\(url.lastPathComponent)”"
-        alert.informativeText = (synced ? "It syncs across your devices. " : "")
-            + "Anyone with an invite link can download it and edit it, so only send links to people you trust. They need a Typewright account to join, in the app or with the web link in their browser."
-        alert.addButton(withTitle: "Copy Invite Link")
-        alert.addButton(withTitle: "Copy Web Link")
-        alert.addButton(withTitle: synced ? "Stop Syncing on This Mac" : "Sync to My Devices")
-        alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: copyLink(url, web: false)
-        case .alertSecondButtonReturn: copyLink(url, web: true)
-        case .alertThirdButtonReturn: if synced { sync.stopSyncing(url) } else { sync.share(url) }
+        let choice = PaletteDialog.choose("Share “\(url.lastPathComponent)”", detail:
+            (synced ? "It syncs across your devices. " : "")
+            + "Anyone with an invite link can download it and edit it, so only send links to people you trust. They need a Typewright account to join, in the app or with the web link in their browser.",
+            choices: [
+                PaletteDialog.Choice(id: "invite", title: "Copy Invite Link", subtitle: "Others can join from Typewright",
+                                     icon: "link"),
+                PaletteDialog.Choice(id: "web", title: "Copy Web Link", subtitle: "Opens the share in a browser",
+                                     icon: "globe"),
+                PaletteDialog.Choice(id: "sync", title: synced ? "Stop Syncing on This Mac" : "Sync to My Devices",
+                                     icon: synced ? "xmark.icloud" : "arrow.triangle.2.circlepath"),
+                PaletteDialog.Choice(id: "cancel", title: "Cancel", icon: "xmark"),
+            ])
+        switch choice {
+        case "invite": copyLink(url, web: false)
+        case "web": copyLink(url, web: true)
+        case "sync": if synced { sync.stopSyncing(url) } else { sync.share(url) }
         default: break
         }
     }
@@ -51,14 +55,15 @@ enum Invites {
             return message("This invite link isn't valid.", "It may have been cut off when it was sent; ask for a new one.")
         }
         guard SyncIdentity.shared.account != nil else {
-            let alert = NSAlert()
-            alert.messageText = "Sign in to join “\(invite.name)”"
-            alert.informativeText = SyncIdentity.passkeyDomain == nil
+            let choice = PaletteDialog.choose("Sign in to join “\(invite.name)”", detail:
+                SyncIdentity.passkeyDomain == nil
                 ? "Shared spaces sync through a Typewright account. Create an account key or sign in with yours in the Devices settings, then open the link again."
-                : "Shared spaces sync through a Typewright account. Create a passkey or account key, or sign in with yours, in the Devices settings, then open the link again."
-            alert.addButton(withTitle: "Open Devices Settings")
-            alert.addButton(withTitle: "Cancel")
-            if alert.runModal() == .alertFirstButtonReturn { SettingsWindowController.shared.show(tab: 4) }
+                : "Shared spaces sync through a Typewright account. Create a passkey or account key, or sign in with yours, in the Devices settings, then open the link again.",
+                choices: [
+                    PaletteDialog.Choice(id: "settings", title: "Open Devices Settings", icon: "gearshape"),
+                    PaletteDialog.Choice(id: "cancel", title: "Cancel", icon: "xmark"),
+                ])
+            if choice == "settings" { SettingsWindowController.shared.show(tab: 4) }
             return
         }
         Task { await join(invite) }
@@ -87,10 +92,7 @@ enum Invites {
     }
 
     private static func message(_ text: String, _ detail: String) {
-        let alert = NSAlert()
-        alert.messageText = text
-        alert.informativeText = detail
-        alert.runModal()
+        PaletteDialog.message(text, detail: detail)
     }
 }
 

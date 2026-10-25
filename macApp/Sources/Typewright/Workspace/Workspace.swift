@@ -718,7 +718,7 @@ final class Workspace: EditorLanguage {
         do {
             try FileManager.default.copyItem(at: url, to: target)
         } catch {
-            NSAlert(error: error).runModal()
+            PaletteDialog.error(error)
             return nil
         }
         reloadTree()
@@ -796,7 +796,7 @@ final class Workspace: EditorLanguage {
                 // Undo takes copies away and puts moved items back where they came from.
                 inverses.append(copy ? .delete([target]) : .moveExternal([FileOp.Move(from: target, to: url)]))
             } catch {
-                NSAlert(error: error).runModal()
+                PaletteDialog.error(error)
             }
         }
         if dir.path != root.path, !inverses.isEmpty { expanded.insert(dir.standardizedFileURL) }
@@ -825,13 +825,13 @@ final class Workspace: EditorLanguage {
         if !files.isEmpty {
             for url in files {
                 let target = Self.unique(in: dir, name: url.deletingPathExtension().lastPathComponent, ext: url.pathExtension)
-                do { try fm.copyItem(at: url, to: target); saved.append(target) } catch { NSAlert(error: error).runModal() }
+                do { try fm.copyItem(at: url, to: target); saved.append(target) } catch { PaletteDialog.error(error) }
             }
         } else if pasteboard.string(forType: .string) == nil, let (data, ext) = Self.imageData(on: pasteboard) {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd-HHmmss"
             let target = Self.unique(in: dir, name: "image-\(formatter.string(from: Date()))", ext: ext)
-            do { try data.write(to: target); saved.append(target) } catch { NSAlert(error: error).runModal() }
+            do { try data.write(to: target); saved.append(target) } catch { PaletteDialog.error(error) }
         }
         guard !saved.isEmpty else { return nil }
         reloadTree()
@@ -869,7 +869,7 @@ final class Workspace: EditorLanguage {
         flushSaves()
         guard SpaceList.isInRepository(root) else {
             for url in urls {
-                do { try FileManager.default.trashItem(at: url, resultingItemURL: nil) } catch { NSAlert(error: error).runModal() }
+                do { try FileManager.default.trashItem(at: url, resultingItemURL: nil) } catch { PaletteDialog.error(error) }
             }
             forgetRemoved(urls)
             return
@@ -926,7 +926,7 @@ final class Workspace: EditorLanguage {
         do {
             try FileManager.default.moveItem(at: url, to: target)
         } catch {
-            NSAlert(error: error).runModal()
+            PaletteDialog.error(error)
             return false
         }
         // Shares at or inside the moved item follow it instead of losing their folder.
@@ -1030,36 +1030,18 @@ final class Workspace: EditorLanguage {
 
     /// Asks which of the uncertain references to update; nil cancels the move.
     private func confirmReferences(_ items: [(file: URL, text: String, reference: PathReference)], moving url: URL) -> Set<Int>? {
-        let alert = NSAlert()
-        alert.messageText = items.count == 1 ? "Update this path to “\(url.lastPathComponent)”?"
-            : "Update these paths to “\(url.lastPathComponent)”?"
-        alert.informativeText = "They look like paths to it, but sit in comments, raw text or calls to functions that may "
-            + "resolve paths differently, like ones from packages. Imports, includes and images are updated either way."
-        let boxes = items.map { item in
+        let choices = items.enumerated().map { index, item in
             let line = Self.lineText(Int(item.reference.line), in: item.text as NSString).trimmingCharacters(in: .whitespaces)
-            let title = "\(relative(item.file) ?? item.file.lastPathComponent):\(item.reference.line + 1)  \(line)"
-            let box = NSButton(checkboxWithTitle: title, target: nil, action: nil)
-            box.state = item.reference.inComment ? .off : .on
-            box.lineBreakMode = .byTruncatingTail
-            box.toolTip = "\(item.reference.oldPath) → \(item.reference.newPath)"
-            return box
+            return PaletteDialog.Choice(id: "reference.\(index)",
+                                        title: "\(relative(item.file) ?? item.file.lastPathComponent):\(item.reference.line + 1)",
+                                        subtitle: line, icon: "doc.text", checked: !item.reference.inComment)
         }
-        let stack = NSStackView(views: boxes)
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
-        stack.frame.size = stack.fittingSize
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: min(stack.fittingSize.height, 220)))
-        scroll.documentView = stack
-        scroll.hasVerticalScroller = stack.fittingSize.height > 220
-        scroll.drawsBackground = false
-        boxes.forEach { $0.widthAnchor.constraint(lessThanOrEqualToConstant: 370).isActive = true }
-        alert.accessoryView = scroll
-        alert.addButton(withTitle: "Move")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return Set(boxes.indices.filter { boxes[$0].state == .on })
+        return PaletteDialog.checklist(
+            items.count == 1 ? "Update this path to “\(url.lastPathComponent)”?"
+                : "Update these paths to “\(url.lastPathComponent)”?",
+            detail: "They look like paths to it, but sit in comments, raw text or calls to functions that may resolve "
+                + "paths differently, like ones from packages. Imports, includes and images are updated either way.",
+            items: choices, button: "Move")
     }
 
     private static func unique(in dir: URL, name: String, ext: String?) -> URL {

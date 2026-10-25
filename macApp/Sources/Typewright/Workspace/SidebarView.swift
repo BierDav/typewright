@@ -582,7 +582,7 @@ private struct SpaceHeader: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(ZenPressStyle())
-            .help("Spaces (⌥⌘S)")
+            .help("Spaces (\(KeyLayout.current.shortcuts.showSpaces.display))")
             if renaming {
                 RenameField(name: name, base: name, weight: .semibold) { new in
                     guard renaming else { return }

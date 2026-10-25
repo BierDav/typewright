@@ -128,7 +128,7 @@ final class FileOperations {
                     repository.noteMoved(from: move.from, to: move.to)
                     done.append(move)
                 } catch {
-                    NSAlert(error: error).runModal()
+                    PaletteDialog.error(error)
                 }
             }
             guard !done.isEmpty else { return nil }
@@ -197,12 +197,7 @@ final class FileOperations {
     }
 
     private func alert(_ title: String, _ text: String?) {
-        // Tests run without anyone to click.
-        guard !SpaceRepository.isTestHost else { return NSLog("%@: %@", title, text ?? "") }
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text ?? ""
-        alert.runModal()
+        PaletteDialog.message(title, detail: text)
     }
 }
 

@@ -180,7 +180,7 @@ export default function Home() {
     } else if (key === "KeyP" && !event.altKey && !event.shiftKey) setOverlay({ type: "palette" });
     else if (key === "Comma") setOverlay({ type: "settings" });
     else if (key === "KeyF" && event.shiftKey && !event.altKey) setOverlay({ type: "search", allSpaces: false });
-    else if (key === "KeyS" && event.altKey) setSettings("spacesVisible", (v) => !v);
+    else if (key === "KeyS" && event.shiftKey && !event.altKey) setSettings("spacesVisible", (v) => !v);
     // Edits save on their own, so ⌘S toggles the sidebar like in the Mac app.
     else if (key === "KeyS" && !event.shiftKey) setSettings("sidebarVisible", (v) => !v);
     else if (key === "KeyI" && event.altKey && workspace()?.state.selected) setOverlay({ type: "palette", page: `move:${workspace()!.state.selected}` });

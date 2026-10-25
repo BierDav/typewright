@@ -309,7 +309,7 @@ async function rootItems(): Promise<Item[]> {
     items.push({ id: `space:${folder}`, title: `Open ${folder}`, section: "Spaces", icon: "space", action: { run: () => openSpace(folder) } });
   }
   items.push(
-    { id: "spaces.toggle", title: settings.spacesVisible ? "Hide Spaces" : "Show Spaces", section: "Spaces", shortcut: shortcut("⌥⌘S"), action: { run: () => setSettings("spacesVisible", (v) => !v) } },
+    { id: "spaces.toggle", title: settings.spacesVisible ? "Hide Spaces" : "Show Spaces", section: "Spaces", shortcut: shortcut("⇧⌘S"), action: { run: () => setSettings("spacesVisible", (v) => !v) } },
     { id: "spaces.new", title: "New Space…", section: "Spaces", action: { run: () => void newSpace() } },
     { id: "spaces.folder", title: "Import Folder as Space…", section: "Spaces", keywords: ["open", "upload"], action: { run: () => void importFolder() } },
     { id: "spaces.zip", title: "Import Zip as Space…", section: "Spaces", keywords: ["open", "upload"], action: { run: () => void importZip() } },

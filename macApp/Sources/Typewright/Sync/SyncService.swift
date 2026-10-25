@@ -94,8 +94,6 @@ final class SyncService {
     private(set) var accountShares: [AccountShare] = []
     /// Shares synced on this device by id.
     private(set) var shares: [String: LocalShare] = [:]
-    /// Spaces that synced before shares existed and lie outside the library; they sync again once imported.
-    private(set) var unmigrated: [String: URL] = [:]
     private(set) var statuses: [String: ShareStatus] = [:]
     /// Why a share isn't syncing, like its folder having moved away.
     private(set) var problems: [String: String] = [:]
@@ -153,7 +151,7 @@ final class SyncService {
     private static let sharesKey = "syncedShares"
     private static let parkedKey = "syncParkedShares"
     private static let rejoiningKey = "syncRejoiningShares"
-    /// Spaces synced path by path before shares; what's left are folders outside the library.
+    /// Spaces synced path by path before shares; only their entries inside the library still count.
     private static let spacesKey = "syncedSpaces"
     private static let thresholdKey = "syncLFSThresholdMB"
 
@@ -180,8 +178,10 @@ final class SyncService {
         }
         let spaces = defaults.dictionary(forKey: Self.spacesKey) as? [String: String] ?? [:]
         for (id, path) in spaces where shares[id] == nil {
-            migrate(id, from: URL(fileURLWithPath: path))
+            guard let path = repository.relativePath(of: URL(fileURLWithPath: path)) else { continue }
+            shares[id] = LocalShare(path: path, kind: path.contains("/") ? .folder : .space)
         }
+        defaults.removeObject(forKey: Self.spacesKey)
         persist()
         observers = [
             NotificationCenter.default.addObserver(forName: SpaceRepository.didCommit, object: repository, queue: .main) { [weak self] note in
@@ -206,21 +206,10 @@ final class SyncService {
         ]
     }
 
-    /// A space synced before shares keeps its id; it syncs as a share once it's in the library.
-    private func migrate(_ id: String, from url: URL) {
-        if let path = repository.relativePath(of: url) {
-            shares[id] = LocalShare(path: path, kind: path.contains("/") ? .folder : .space)
-            unmigrated[id] = nil
-        } else {
-            unmigrated[id] = url.standardizedFileURL
-        }
-    }
-
     private func persist() {
         if let data = try? JSONEncoder().encode(shares) { defaults.set(data, forKey: Self.sharesKey) }
         if let data = try? JSONEncoder().encode(parked) { defaults.set(data, forKey: Self.parkedKey) }
         if let data = try? JSONEncoder().encode(rejoining) { defaults.set(data, forKey: Self.rejoiningKey) }
-        defaults.set(unmigrated.mapValues(\.path), forKey: Self.spacesKey)
     }
 
     // MARK: - Lookups
@@ -366,13 +355,6 @@ final class SyncService {
         forget(id)
     }
 
-    /// Stops a space that hasn't moved into the library yet.
-    func forgetUnmigrated(_ id: String) {
-        if let node { tws_close_share(node, id) }
-        unmigrated[id] = nil
-        persist()
-    }
-
     /// Drops a share stopped by a deletion, so restoring the item no longer resumes it.
     func forgetParked(_ id: String) {
         parked[id] = nil
@@ -390,13 +372,6 @@ final class SyncService {
 
     /// Follows a space folder renamed, or imported into the library, here; nothing syncs for the move itself.
     func moved(from old: URL, to new: URL) {
-        if let id = unmigrated.first(where: { $0.value.path == old.standardizedFileURL.path })?.key {
-            migrate(id, from: new)
-            persist()
-            if shares[id] != nil { open(id) }
-            NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
-            return
-        }
         let from = repository.relativePath(of: old), to = repository.relativePath(of: new)
         // Leaving the library stops its shares like a deletion; coming back resumes them.
         if let from, to == nil { return deleted([from], movedTo: new) }

@@ -311,7 +311,7 @@ struct SpacesPane: View {
                             Opener.shared.deleteSpace(url, in: state)
                             withAnimation(.smooth(duration: 0.3)) { onChange() }
                         } else {
-                            forget(url)
+                            Opener.shared.forgetSpace(url, in: state)
                         }
                     } onToggleSync: {
                         toggleSync(url)
@@ -477,25 +477,13 @@ struct SpacesPane: View {
         }
     }
 
-    /// The open space closes first, so any space can be forgotten.
-    private func forget(_ url: URL) {
-        if url.path == current { state.space = nil }
-        SpaceList.remove(url)
-        withAnimation(.smooth(duration: 0.3)) { onChange() }
-    }
-
-    /// Without an account, syncing starts in the Devices settings; only spaces in the library sync.
+    /// Without an account, syncing starts in the Devices settings. Only spaces in the library sync.
     private func toggleSync(_ url: URL) {
+        guard SpaceList.isInRepository(url) else { return }
         if sync.isSynced(url) {
             sync.stopSyncing(url)
         } else if !sync.isRunning {
             SettingsWindowController.shared.show(tab: 4)
-        } else if !SpaceList.isInRepository(url) {
-            // Spaces sync from the library only.
-            Opener.shared.askToImport(url, in: state, external: false) { imported in
-                sync.share(imported)
-                onChange()
-            }
         } else {
             sync.share(url)
         }
@@ -503,16 +491,15 @@ struct SpacesPane: View {
 
     /// Every device stops syncing the space; their files stay where they are.
     private func removeEverywhere(_ id: String, name: String) {
-        let alert = NSAlert()
-        alert.messageText = "Remove “\(name)” from all devices?"
-        alert.informativeText = "Your devices stop syncing this space. Their copies of the files stay where they are."
+        var detail = "Your devices stop syncing this space. Their copies of the files stay where they are."
         if sync.accountShares.contains(where: { $0.id == id && $0.shared }) {
-            alert.informativeText += " Others it's shared with keep syncing it among themselves."
+            detail += " Others it's shared with keep syncing it among themselves."
         }
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let choice = PaletteDialog.choose("Remove “\(name)” from all devices?", detail: detail, choices: [
+            PaletteDialog.Choice(id: "remove", title: "Remove", icon: "trash", destructive: true),
+            PaletteDialog.Choice(id: "cancel", title: "Cancel", icon: "xmark"),
+        ], over: state.window)
+        guard choice == "remove" else { return }
         withAnimation(.smooth(duration: 0.2)) { sync.removeEverywhere(id) }
     }
 
@@ -524,10 +511,7 @@ struct SpacesPane: View {
             : LibraryPanel.destination(for: share.name, file: share.kind == .file, in: sync.repository)
         guard let destination else { return }
         guard let joined = sync.join(share, at: destination) else {
-            let alert = NSAlert()
-            alert.messageText = "Couldn't download “\(share.name)”."
-            alert.informativeText = sync.lastError ?? ""
-            alert.runModal()
+            PaletteDialog.message("Couldn't download “\(share.name)”.", detail: sync.lastError, over: state.window)
             return
         }
         onChange()
@@ -648,15 +632,13 @@ private struct SpaceRow: View {
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             Button("Copy Path") { copyPath(url) }
             Divider()
-            Button(isSynced ? "Stop Syncing on This Mac" : "Sync Across Devices", action: onToggleSync)
-            if isSynced {
-                Button("Remove From All Devices…", action: onRemoveEverywhere)
-            }
             if inRepository {
+                Button(isSynced ? "Stop Syncing on This Mac" : "Sync Across Devices", action: onToggleSync)
+                if isSynced {
+                    Button("Remove From All Devices…", action: onRemoveEverywhere)
+                }
                 Button("Share…", action: onInvite)
-            }
-            Divider()
-            if inRepository {
+                Divider()
                 Button("Link to…") { Opener.shared.link(url) }
                 Button("Show Recently Deleted") { RecentlyDeleted.show(in: url) }
                 Divider()
@@ -664,7 +646,7 @@ private struct SpaceRow: View {
             } else {
                 Button("Import Into Typewright…") { Opener.shared.askToImport(url, external: false) }
                 Divider()
-                Button("Forget Space", action: onForget)
+                Button("Remove From Spaces…", action: onForget)
             }
         }
         .help("Drag to reorder")
