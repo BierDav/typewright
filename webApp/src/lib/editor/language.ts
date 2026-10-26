@@ -4,6 +4,7 @@ import { autocompletion, type Completion, type CompletionContext, type Completio
 import { StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, showTooltip, type Tooltip, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { compiler, type Completion as TypstCompletion } from "../compiler";
+import { highlightCode } from "./highlight";
 import { Solveng, type SolvengEdit } from "./solveng";
 import { settings } from "../settings";
 import { fenceClosing } from "./solveng";
@@ -36,16 +37,69 @@ const KIND: Record<string, Completion["type"]> = {
 
 let indexRequested = false;
 
-function toCompletion(item: TypstCompletion): Completion {
+/** Named arguments of the call at the caret, for any function (`parameters.rs` in the typst bridge). */
+type Parameters = {
+  from: number;
+  to: number;
+  items: { label: string; insert: string; detail: string; documentation: string }[];
+  /** Whether a positional argument fits too, so other values belong in the list. */
+  values: boolean;
+  /** Whether arguments follow, so accepted names get a comma. */
+  comma: boolean;
+};
+
+const parameters = (document: string, context: string, offset: number) => compiler.solveng<Parameters | null>("parameters", document, context, offset);
+
+/** Docs of the function or argument name at `offset` as the Mac's hovers show them: signature, docs, parameters. */
+const typstDocs = (document: string, context: string, offset: number) => compiler.solveng<string | null>("typstHover", document, context, offset);
+
+/** Snippets that are statements, out of place in an argument list. */
+const STATEMENT = /^(let|for|while|if|import|include|set|show|break|continue|return|function call)\b/;
+
+/** Markdown docs, rendered when the list shows them. */
+function markdownInfo(markdown: string | null | undefined): Completion["info"] {
+  return markdown ? () => docsElement({ kind: "text", value: markdown }) : undefined;
+}
+
+function toCompletion(item: TypstCompletion, context: () => Promise<string>): Completion {
   const apply = item.apply ?? item.label;
+  // A function's whole docs, like its hover; the item only carries the first sentence.
+  const name = item.label.replace(/\.(bracket|paren)$/, "");
+  const info: Completion["info"] =
+    item.kind === "func"
+      ? async () => {
+          const docs = await typstDocs(`#${name}`, await context(), 2).catch(() => null);
+          return docsElement({ kind: "text", value: docs ?? item.detail ?? "" });
+        }
+      : markdownInfo(item.detail);
   return {
     label: item.label,
     type: KIND[item.kind] ?? "text",
     detail: item.kind === "symbol" ? apply : undefined,
-    info: item.detail ?? undefined,
+    info,
     // typst-ide writes snippets as `${name}` placeholders, as CodeMirror's snippets do.
     apply: apply.includes("${") ? snippet(apply) : apply,
   };
+}
+
+/** The call's parameters first, statements out, other values only where a positional argument fits. */
+function withParameters(params: Parameters, items: TypstCompletion[], context: () => Promise<string>): Completion[] {
+  const own: Completion[] = params.items.map((item, i) => ({
+    label: item.label,
+    type: "property",
+    detail: item.detail || undefined,
+    info: markdownInfo(item.documentation),
+    boost: 99 - i / params.items.length,
+    apply: snippet(item.insert.replace("$0", "${}")),
+  }));
+  const known = new Set(own.map((o) => o.label));
+  const rest = items.flatMap((item): Completion[] => {
+    // typst-ide's own names, for calls the bridge can't resolve.
+    if (item.kind === "param") return known.has(item.label) ? [] : [toCompletion({ ...item, apply: (item.apply ?? item.label) + (params.comma ? ", " : "") }, context)];
+    if (own.length && !params.values) return [];
+    return item.kind === "syntax" && STATEMENT.test(item.label) ? [] : [toCompletion(item, context)];
+  });
+  return [...own, ...rest];
 }
 
 type Apply = string | ((view: EditorView, completion: Completion, from: number, to: number) => void);
@@ -91,7 +145,8 @@ async function solvengCompletions(ctx: CompletionContext, around: string): Promi
 function completionSource(context: LanguageContext) {
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
     if (!settings.language) return null;
-    const solveng = await solvengCompletions(ctx, await context.solvengContext());
+    const around = await context.solvengContext();
+    const solveng = await solvengCompletions(ctx, around);
     if (ctx.aborted) return null;
     if (solveng?.exclusive) return solveng.options.length || ctx.explicit ? solveng : null;
     const before = ctx.state.sliceDoc(Math.max(0, ctx.pos - 64), ctx.pos);
@@ -100,18 +155,25 @@ function completionSource(context: LanguageContext) {
       indexRequested = true;
       await compiler.packageIndex().catch(() => (indexRequested = false));
     }
-    if (!ctx.explicit && !/[\w#.@"<(:/]$/.test(before)) return solveng;
+    const params = await parameters(ctx.state.doc.toString(), around, ctx.pos).catch(() => null);
+    if (ctx.aborted) return null;
+    if (!ctx.explicit && !params && !/[\w#.@"<(:/]$/.test(before)) return solveng;
     const result = await compiler.complete(context.path(), ctx.pos, ctx.explicit).catch(() => null);
     if (ctx.aborted) return null;
+    const validFor = /^[\p{L}\p{N}_-]*$/u;
+    if (params) {
+      const options = withParameters(params, result?.from === params.from ? result.items : [], context.solvengContext);
+      return options.length ? { from: params.from, to: params.to, options, validFor } : solveng;
+    }
     if (!result) return solveng;
     if (solveng?.options.length && (solveng.from !== result.from || (solveng.to ?? ctx.pos) > ctx.pos)) return solveng;
-    const options = result.items.map(toCompletion);
+    const options = result.items.map((i) => toCompletion(i, context.solvengContext));
     // In math the calculation's names come before Typst's symbols.
     if (solveng && solveng.from === result.from) {
       const named = new Set(solveng.options.map((o) => o.label));
       return { from: result.from, to: solveng.to, options: [...solveng.options.map((o) => ({ ...o, boost: 50 + (o.boost ?? 0) })), ...options.filter((o) => !named.has(o.label))] };
     }
-    return { from: result.from, options, validFor: /^[\p{L}\p{N}_-]*$/u };
+    return { from: result.from, options, validFor };
   };
 }
 
@@ -126,6 +188,14 @@ async function docsElement(value: { kind: "text" | "code"; value: string }): Pro
     // Typst's docs are Markdown.
     dom.innerHTML = await compiler.markdown(value.value).catch(() => "");
     if (!dom.innerHTML) dom.textContent = value.value;
+    // Signatures and examples in the editor's colours.
+    const blocks = [...dom.querySelectorAll("pre > code")] as HTMLElement[];
+    await Promise.all(
+      blocks.map((code) => {
+        const language = /language-(\w+)/.exec(code.className)?.[1] ?? "typc";
+        return ["typc", "typ", "typst", "example"].includes(language) ? highlightCode(code, language === "typc") : undefined;
+      }),
+    );
   }
   return dom;
 }
@@ -133,8 +203,12 @@ async function docsElement(value: { kind: "text" | "code"; value: string }): Pro
 /** solveng's docs for a name or unit of a calculation, else typst's. */
 async function docsAt(view: EditorView, context: LanguageContext, pos: number): Promise<{ kind: "text" | "code"; value: string } | null> {
   const around = await context.solvengContext().catch(() => "");
-  const solveng = await Solveng.hover(view.state.doc.toString(), around, pos).catch(() => null);
+  const text = view.state.doc.toString();
+  const solveng = await Solveng.hover(text, around, pos).catch(() => null);
   if (solveng) return { kind: "text", value: solveng.markdown };
+  // Functions and argument names from the source itself; typst-ide only knows them when the last compile got there.
+  const docs = await typstDocs(text, around, pos).catch(() => null);
+  if (docs) return { kind: "text", value: docs };
   return compiler.tooltip(context.path(), pos).catch(() => null);
 }
 

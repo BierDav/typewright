@@ -80,6 +80,9 @@ pub(crate) fn call(op: &str, document: &str, raw_context: &str, offset: u32) -> 
         // the document is the function's name
         "function" => json!(solveng_ide::params::functions().iter().find(|f| f.name == document)),
         "version" => json!(solveng_ide::VERSION),
+        // Not solveng's: named arguments of any call, see `parameters`.
+        "parameters" => json!(crate::parameters::complete(document, raw_context, offset)),
+        "typstHover" => json!(crate::parameters::hover(document, raw_context, offset)),
         _ => {
             let c = context(raw_context);
             match op {

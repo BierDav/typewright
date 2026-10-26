@@ -165,3 +165,26 @@ export function typstHighlighting(code = false, solvengContext: () => Promise<st
   );
   return [highlights, plugin];
 }
+
+/** Colours a docs code block like the editor: `typc` and signatures as code, `typ` as markup. */
+export async function highlightCode(element: HTMLElement, code: boolean): Promise<void> {
+  const text = element.textContent ?? "";
+  const runs = await compiler.highlight(text, code).catch(() => null);
+  if (!runs) return;
+  const parts: Node[] = [];
+  let at = 0;
+  for (let i = 0; i + 2 < runs.length; i += 3) {
+    const from = runs[i];
+    const to = from + runs[i + 1];
+    const cls = classes(runs[i + 2] & 0xff, runs[i + 2] >> 8);
+    if (from < at || !cls) continue;
+    if (from > at) parts.push(document.createTextNode(text.slice(at, from)));
+    const span = document.createElement("span");
+    span.className = cls;
+    span.textContent = text.slice(from, to);
+    parts.push(span);
+    at = to;
+  }
+  parts.push(document.createTextNode(text.slice(at)));
+  element.replaceChildren(...parts);
+}

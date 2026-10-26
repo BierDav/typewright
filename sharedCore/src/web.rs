@@ -1,5 +1,6 @@
 //! The web app's API (wasm-bindgen); the Mac app's comes from UniFFI.
 use crate::invites::SpaceInvite;
+use crate::line_editing::{LineChange, LineSelection};
 use crate::merge::MergeResult;
 use crate::shares::{PeerHead, SharePath, SharePlace, ShareStatus};
 use tsify::{Ts, Tsify};
@@ -145,4 +146,49 @@ pub fn namespace_packages(paths: Vec<String>) -> Vec<String> {
 #[wasm_bindgen(js_name = packageManifest)]
 pub fn package_manifest(toml: &str) -> Js<Option<Ts<crate::packages::PackageManifest>>> {
     Ok(crate::packages::package_manifest(toml).map(|m| m.into_ts()).transpose()?)
+}
+
+/// Enter with `from..to` selected, in `"typst"`, `"markdown"` or plain text: indentation, brackets and list items.
+#[wasm_bindgen]
+pub fn newline(text: &str, from: i32, to: i32, syntax: &str) -> Js<Ts<crate::typing::Typing>> {
+    Ok(Ts::from_rust(&crate::typing::newline(text, from, to, syntax))?)
+}
+
+/// Backspace at `caret`: empty pairs of `pairs` go together, indentation back to where it belongs and the line break.
+#[wasm_bindgen]
+pub fn backspace(text: &str, caret: i32, pairs: &str) -> Js<Option<Ts<crate::typing::Typing>>> {
+    Ok(crate::typing::backspace(text, caret, pairs).map(|t| Ts::from_rust(&t)).transpose()?)
+}
+
+fn selections(list: Vec<Ts<LineSelection>>) -> Js<Vec<LineSelection>> {
+    list.iter().map(|s| Ok(s.to_rust()?)).collect()
+}
+
+fn line_change(change: LineChange) -> Js<Ts<LineChange>> {
+    Ok(Ts::from_rust(&change)?)
+}
+
+#[wasm_bindgen(js_name = copyCurrentLines)]
+pub fn copy_current_lines(offsets: Vec<i32>, text: &str) -> String {
+    crate::line_editing::copy_current_lines(offsets, text)
+}
+
+#[wasm_bindgen(js_name = cutCurrentLines)]
+pub fn cut_current_lines(offsets: Vec<i32>, text: &str) -> Js<Ts<LineChange>> {
+    line_change(crate::line_editing::cut_current_lines(offsets, text))
+}
+
+#[wasm_bindgen(js_name = moveSelectedLines)]
+pub fn move_selected_lines(list: Vec<Ts<LineSelection>>, up: bool, text: &str) -> Js<Ts<LineChange>> {
+    line_change(crate::line_editing::move_selected_lines(selections(list)?, up, text))
+}
+
+#[wasm_bindgen(js_name = deleteSelectedLines)]
+pub fn delete_selected_lines(list: Vec<Ts<LineSelection>>, text: &str) -> Js<Ts<LineChange>> {
+    line_change(crate::line_editing::delete_selected_lines(selections(list)?, text))
+}
+
+#[wasm_bindgen(js_name = duplicateSelectedLines)]
+pub fn duplicate_selected_lines(list: Vec<Ts<LineSelection>>, text: &str) -> Js<Ts<LineChange>> {
+    line_change(crate::line_editing::duplicate_selected_lines(selections(list)?, text))
 }

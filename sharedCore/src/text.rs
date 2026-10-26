@@ -3,6 +3,8 @@ use crate::utf16::Utf16;
 /// A UTF-16 range, the unit of NSString, JavaScript strings and LSP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
+#[cfg_attr(target_arch = "wasm32", serde(rename_all = "camelCase"))]
 pub struct TextRange {
     pub location: i32,
     pub length: i32,
@@ -26,6 +28,8 @@ pub struct TextPosition {
 /// A replacement of a UTF-16 range, from formatting or renaming.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
+#[cfg_attr(target_arch = "wasm32", serde(rename_all = "camelCase"))]
 pub struct TextEdit {
     pub range: TextRange,
     pub new_text: String,

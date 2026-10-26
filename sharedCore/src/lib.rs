@@ -22,6 +22,7 @@ pub mod shares;
 pub mod spaces;
 pub mod sync;
 pub mod text;
+pub mod typing;
 mod utf16;
 
 #[cfg(not(target_arch = "wasm32"))]

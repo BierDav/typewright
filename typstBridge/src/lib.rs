@@ -6,6 +6,7 @@ use std::sync::{Arc, LazyLock};
 
 mod diagnostics;
 mod markdown;
+mod parameters;
 mod refactor;
 mod solveng;
 

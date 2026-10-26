@@ -1247,7 +1247,37 @@ final class Workspace: EditorLanguage {
         // In math the calculation's names come before Typst's symbols.
         let names = solveng?.items ?? []
         let named = Set(names.map(\.label))
-        return names + items.filter { !named.contains($0.label) } + packages.filter { !labels.contains($0.label) }
+        let all = names + items.filter { !named.contains($0.label) } + packages.filter { !labels.contains($0.label) }
+        guard let parameters = SolvengSupport.parameters(text, context: solvengContext(), offset: offset) else { return all }
+        return Self.withParameters(parameters, all)
+    }
+
+    /// In an argument list the call's parameters come first, statements go, and other values only where a positional
+    /// argument fits. Names get a comma when arguments follow.
+    private static func withParameters(_ parameters: SolvengSupport.Parameters, _ items: [CompletionItem]) -> [CompletionItem] {
+        let range = NSRange(location: parameters.from, length: parameters.to - parameters.from)
+        let own = parameters.items.enumerated().map { index, item in
+            CompletionItem(label: item.label, detail: item.detail.isEmpty ? nil : item.detail, kind: .field, filterText: item.label,
+                           sortText: String(format: "!%04d", index), newText: item.insert, isSnippet: true, range: range,
+                           documentation: item.documentation.isEmpty ? nil : item.documentation, showsDetailAsSignature: false)
+        }
+        let known = Set(own.map(\.label))
+        let statements = ["let", "for", "while", "if", "import", "include", "set", "show", "break", "continue", "return", "function call"]
+        let rest = items.compactMap { item -> CompletionItem? in
+            if item.kind == .field {
+                guard !known.contains(item.label) else { return nil }
+                // tinymist's own names, for calls the bridge can't resolve, like a package's.
+                guard parameters.comma, item.isSnippet, item.newText.hasSuffix(": ${1:}") else { return item }
+                return CompletionItem(label: item.label, detail: item.detail, kind: item.kind, filterText: item.filterText,
+                                      sortText: "!" + item.sortText, newText: item.newText + ", ", isSnippet: true, range: item.range,
+                                      documentation: item.documentation, raw: item.raw)
+            }
+            guard parameters.values || own.isEmpty, item.kind != .snippet || !statements.contains(where: { item.label.hasPrefix($0) }) else {
+                return nil
+            }
+            return item
+        }
+        return own + rest
     }
 
     /// Inside solveng code and its calls' strings tinymist has nothing to offer; names, units and option values come

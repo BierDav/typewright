@@ -26,6 +26,7 @@ import { colorSwatches } from "~/lib/editor/colors";
 import { refreshHighlights, typstHighlighting } from "~/lib/editor/highlight";
 import { typstLanguage } from "~/lib/editor/language";
 import { liveEditing } from "~/lib/editor/live";
+import { typing } from "~/lib/editor/typing";
 import { download as downloadFont, googleFont, loadCatalog } from "~/lib/fonts";
 import { isEditable, isMarkdown } from "~/lib/kinds";
 import { settings } from "~/lib/settings";
@@ -58,10 +59,10 @@ const markdownStyle = HighlightStyle.define([
 function languageFor(path: string): Extension {
   const ext = extension(path);
   if (ext === "typ" || ext === "typc") {
-    return [typstSyntax, typstHighlighting(ext === "typc", commands.languageContext().solvengContext), typstLanguage(commands.languageContext()), colorSwatches];
+    return [typing("typst"), typstSyntax, typstHighlighting(ext === "typc", commands.languageContext().solvengContext), typstLanguage(commands.languageContext()), colorSwatches];
   }
-  if (isMarkdown(path)) return [markdown(), syntaxHighlighting(markdownStyle)];
-  return [];
+  if (isMarkdown(path)) return [typing("markdown"), markdown(), syntaxHighlighting(markdownStyle)];
+  return [typing("")];
 }
 
 function theme(): Extension {

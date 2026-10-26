@@ -1,4 +1,4 @@
-/* Native macOS look in the browser: system font and colours, translucent glass for sidebars and popovers. */
+/* Native macOS look in the browser: system font and colours, opaque popovers with a hairline border and shadow. */
 
 :root {
   color-scheme: light dark;
@@ -20,8 +20,8 @@
   --separator: rgba(0, 0, 0, 0.1);
   --hover: rgba(0, 0, 0, 0.05);
   --selected: rgba(0, 0, 0, 0.08);
-  --glass: rgba(246, 246, 248, 0.72);
-  --glass-border: rgba(255, 255, 255, 0.6);
+  --popover: #fbfbfc;
+  --popover-border: rgba(0, 0, 0, 0.14);
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.18), 0 0 0 0.5px rgba(0, 0, 0, 0.12);
   --page-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
 
@@ -50,8 +50,8 @@
     --separator: rgba(255, 255, 255, 0.1);
     --hover: rgba(255, 255, 255, 0.06);
     --selected: rgba(255, 255, 255, 0.1);
-    --glass: rgba(40, 40, 44, 0.72);
-    --glass-border: rgba(255, 255, 255, 0.08);
+    --popover: #2b2b2e;
+    --popover-border: rgba(255, 255, 255, 0.14);
     --shadow: 0 16px 48px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.12);
     --page-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
     --hl-keyword: #cf8e6d;
@@ -80,8 +80,8 @@
   --separator: rgba(255, 255, 255, 0.1);
   --hover: rgba(255, 255, 255, 0.06);
   --selected: rgba(255, 255, 255, 0.1);
-  --glass: rgba(40, 40, 44, 0.72);
-  --glass-border: rgba(255, 255, 255, 0.08);
+  --popover: #2b2b2e;
+  --popover-border: rgba(255, 255, 255, 0.14);
   --shadow: 0 16px 48px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.12);
   --page-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
   --hl-keyword: #cf8e6d;
@@ -165,10 +165,8 @@ textarea {
 }
 
 .glass {
-  background: var(--glass);
-  backdrop-filter: blur(30px) saturate(1.8);
-  -webkit-backdrop-filter: blur(30px) saturate(1.8);
-  border: 0.5px solid var(--glass-border);
+  background: var(--popover);
+  border: 0.5px solid var(--popover-border);
   box-shadow: var(--shadow);
 }
 
@@ -438,7 +436,7 @@ select {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: color-mix(in srgb, var(--window) 70%, transparent);
+  background: var(--window);
   border-right: 0.5px solid var(--separator);
 }
 
@@ -546,7 +544,7 @@ select {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: color-mix(in srgb, var(--window) 82%, transparent);
+  background: var(--window);
   border-right: 0.5px solid var(--separator);
 }
 
@@ -938,64 +936,258 @@ button.issue:hover:not(:disabled) {
 }
 
 .cm-tooltip {
-  background: var(--glass) !important;
-  backdrop-filter: blur(30px) saturate(1.8);
-  -webkit-backdrop-filter: blur(30px) saturate(1.8);
-  border: 0.5px solid var(--glass-border) !important;
-  border-radius: 10px;
+  background: var(--popover) !important;
+  border: 0.5px solid var(--popover-border) !important;
+  border-radius: 8px;
   box-shadow: var(--shadow);
   color: var(--text);
   overflow: hidden;
 }
 
-.cm-tooltip-autocomplete > ul {
-  font-family: var(--font) !important;
-  max-height: 18em !important;
+/* Completions look like the Mac app's list: icon, monospaced name, type on the right. */
+.cm-tooltip.cm-tooltip-autocomplete {
+  width: 380px;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul {
+  font-family: var(--mono) !important;
+  font-size: 12px;
+  max-height: calc(9 * 22px + 8px) !important;
+  max-width: none !important;
+  min-width: 0 !important;
   padding: 4px !important;
 }
 
-.cm-tooltip-autocomplete > ul > li {
-  padding: 3px 8px !important;
-  border-radius: 6px;
-  line-height: 1.5;
+.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px 0 4px !important;
+  border-radius: 5px;
+  line-height: 22px;
 }
 
-.cm-tooltip-autocomplete > ul > li[aria-selected] {
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
   background: var(--accent) !important;
   color: white !important;
 }
 
-.cm-completionDetail {
-  color: var(--secondary);
-  font-style: normal !important;
+.cm-completionLabel {
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
 }
 
-.cm-completionInfo {
-  max-width: 360px !important;
-  padding: 8px 10px !important;
+.cm-completionMatchedText {
+  text-decoration: none !important;
+  font-weight: 600;
+}
+
+.cm-completionDetail {
+  flex: 1;
+  margin-left: auto !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-family: var(--font);
+  font-size: 11px;
+  font-style: normal !important;
+  color: var(--secondary);
+}
+
+li[aria-selected] .cm-completionDetail {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.cm-completionIcon {
+  flex-shrink: 0;
+  width: 16px !important;
+  height: 16px;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 4px;
+  font-family: var(--font);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  opacity: 1 !important;
+  color: white;
+  background: var(--tertiary);
+}
+
+.cm-completionIcon::after {
+  content: "•" !important;
+}
+
+.cm-completionIcon-function::after,
+.cm-completionIcon-method::after {
+  content: "f" !important;
+  font-style: italic;
+}
+
+.cm-completionIcon-function,
+.cm-completionIcon-method {
+  background: #0a84ff;
+}
+
+.cm-completionIcon-variable::after {
+  content: "x" !important;
+}
+
+.cm-completionIcon-variable {
+  background: #30b0c7;
+}
+
+.cm-completionIcon-constant::after {
+  content: "#" !important;
+}
+
+.cm-completionIcon-constant {
+  background: #ff9f0a;
+}
+
+.cm-completionIcon-keyword::after {
+  content: "K" !important;
+}
+
+.cm-completionIcon-keyword {
+  background: #ff375f;
+}
+
+.cm-completionIcon-property::after {
+  content: "P" !important;
+}
+
+.cm-completionIcon-property {
+  background: #30a14e;
+}
+
+.cm-completionIcon-type::after,
+.cm-completionIcon-class::after {
+  content: "T" !important;
+}
+
+.cm-completionIcon-type,
+.cm-completionIcon-class {
+  background: #8e5bd8;
+}
+
+.cm-completionIcon-namespace::after {
+  content: "{}" !important;
+  font-size: 9px;
+}
+
+.cm-completionIcon-text::after {
+  content: "a" !important;
+}
+
+li[aria-selected] .cm-completionIcon {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+
+/* The selected item's docs beside the list, like F1 on the Mac. */
+.cm-tooltip.cm-completionInfo {
+  width: 420px;
+  max-width: 420px !important;
+  padding: 0 !important;
+  margin-left: 4px;
+}
+
+.cm-tooltip.cm-completionInfo.cm-completionInfo-left {
+  margin-left: -4px;
 }
 
 .tw-docs {
   max-width: 480px;
-  max-height: 320px;
+  max-height: 360px;
   overflow: auto;
-  padding: 8px 12px;
+  padding: 10px 12px;
   font-family: var(--font);
   font-size: 12.5px;
   line-height: 1.5;
 }
 
-.tw-docs pre {
-  margin: 0;
-  font-family: var(--mono);
-  white-space: pre-wrap;
+.cm-completionInfo .tw-docs {
+  max-width: none;
 }
 
-.tw-docs p:first-child {
+.tw-docs pre,
+.tw-docs code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.tw-docs pre {
+  margin: 8px 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The signature heads the docs, set off as on the Mac. */
+.tw-docs > pre:first-child {
+  margin: -10px -12px 10px;
+  padding: 8px 12px;
+  border-radius: 0;
+  border-bottom: 0.5px solid var(--separator);
+}
+
+.tw-docs > pre:only-child {
+  margin-bottom: -10px;
+  border-bottom: none;
+}
+
+.tw-docs :not(pre) > code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.tw-docs h1,
+.tw-docs h2,
+.tw-docs h3 {
+  margin: 12px 0 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.tw-docs h2 {
+  padding-top: 8px;
+  border-top: 0.5px solid var(--separator);
+  color: var(--secondary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.tw-docs a {
+  color: var(--hl-link);
+  text-decoration: none;
+}
+
+.tw-docs p,
+.tw-docs ul,
+.tw-docs ol {
+  margin: 6px 0;
+}
+
+.tw-docs ul,
+.tw-docs ol {
+  padding-left: 18px;
+}
+
+.tw-docs > :first-child {
   margin-top: 0;
 }
 
-.tw-docs p:last-child {
+.tw-docs > :last-child {
   margin-bottom: 0;
 }
 
@@ -1237,8 +1429,8 @@ button.issue:hover:not(:disabled) {
   transform: translateX(-50%);
   padding: 3px 10px;
   border-radius: 10px;
-  background: var(--glass);
-  backdrop-filter: blur(20px);
+  background: var(--popover);
+  border: 0.5px solid var(--popover-border);
   font-size: 11px;
   color: var(--secondary);
   pointer-events: none;
@@ -1661,7 +1853,7 @@ button.issue:hover:not(:disabled) {
   flex: 1;
   overflow: auto;
   padding: 16px 24px 32px;
-  background: color-mix(in srgb, var(--window) 50%, transparent);
+  background: var(--window);
 }
 
 .form-section {
@@ -1999,7 +2191,7 @@ fieldset.plain:disabled {
   overflow: auto;
   border-top: 0.5px solid var(--separator);
   padding: 10px 16px;
-  background: color-mix(in srgb, var(--window) 50%, transparent);
+  background: var(--window);
 }
 
 .deleted-preview pre {

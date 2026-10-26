@@ -254,24 +254,29 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         autoPairs["$"] != nil && Highlighter.gluesNames(in: string, at: location)
     }
 
-    /// Backspace in an empty pair takes the closer along.
+    /// Backspace in an empty pair takes the closer along; in the indentation it goes back to where the line belongs,
+    /// then onto the line above, like IntelliJ.
     override func deleteBackward(_ sender: Any?) {
-        let s = string as NSString
         let selection = selectedRange()
-        if !autoPairs.isEmpty, selection.length == 0, selection.location > 0, selection.location < s.length,
-           let open = UnicodeScalar(s.character(at: selection.location - 1)).map(Character.init),
-           let close = UnicodeScalar(s.character(at: selection.location)).map(Character.init),
-           autoPairs[open] == close {
-            let pair = NSRange(location: selection.location - 1, length: 2)
-            if shouldChangeText(in: pair, replacementString: "") {
-                replaceCharacters(in: pair, with: "")
-                didChangeText()
-                setSelectedRange(NSRange(location: pair.location, length: 0))
-            }
-            return
-        }
-        super.deleteBackward(sender)
+        guard selection.length == 0, !isColumnMode, isEditable,
+              let change = TypewrightCore.backspace(text: string, caret: Int32(selection.location),
+                                                    pairs: autoPairs.map { String($0.key) + String($0.value) }.joined())
+        else { return super.deleteBackward(sender) }
+        apply(change, action: "Typing")
     }
+
+    /// Replaces as the core's `Typing` says and puts the caret where it says.
+    private func apply(_ change: Typing, action: String) {
+        let range = NSRange(location: Int(change.from), length: Int(change.to - change.from))
+        guard shouldChangeText(in: range, replacementString: change.insert) else { return }
+        replaceCharacters(in: range, with: change.insert)
+        didChangeText()
+        setSelectedRange(NSRange(location: Int(change.caret), length: 0))
+        scrollRangeToVisible(selectedRange())
+    }
+
+    /// `"typst"`, `"markdown"` or plain text, for what Enter continues.
+    var syntax = ""
 
     // MARK: Hidden syntax
 
@@ -1366,20 +1371,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// Duplicates the selection, or the caret's line when nothing is selected.
     func duplicateLine() {
-        let s = string as NSString
-        let sel = selectedRange()
-        if sel.length > 0 {
-            let copy = s.substring(with: sel)
-            replace(NSRange(location: NSMaxRange(sel), length: 0), with: copy,
-                    select: NSRange(location: NSMaxRange(sel), length: sel.length), action: "Duplicate")
-            return
-        }
-        var line = s.lineRange(for: sel)
-        let hasBreak = line.length > 0 && s.character(at: NSMaxRange(line) - 1) == 10
-        if hasBreak { line.length -= 1 }
-        let text = s.substring(with: line)
-        replace(NSRange(location: NSMaxRange(line), length: 0), with: "\n" + text,
-                select: NSRange(location: sel.location + line.length + 1, length: 0), action: "Duplicate Line")
+        let selections = currentCarets.map { LineSelection(anchor: Int32($0.anchor), head: Int32($0.head)) }
+        applyLineChange(duplicateSelectedLines(selections: selections, text: string), action: "Duplicate Line")
     }
 
     /// Swaps the lines the selection touches with the line above or below; the selection moves along.
@@ -1391,25 +1384,8 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// Deletes the lines the selection touches, keeping the caret's column on the next line.
     func deleteLine() {
-        let s = string as NSString
-        let sel = selectedRange()
-        // A selection ending at a line start leaves that line alone.
-        let trimmed = sel.length > 0 && s.character(at: NSMaxRange(sel) - 1) == 10
-        var range = s.lineRange(for: trimmed ? NSRange(location: sel.location, length: sel.length - 1) : sel)
-        guard range.length > 0 || range.location > 0 else { return }
-        let column = sel.location - range.location
-        // The last line takes the break before it, so no empty line is left behind.
-        if NSMaxRange(range) == s.length, s.character(at: NSMaxRange(range) - 1) != 10 || range.length == 0, range.location > 0 {
-            range.location -= 1
-            range.length += 1
-        }
-        let rest = s.replacingCharacters(in: range, with: "") as NSString
-        let start = NSMaxRange(range) == s.length && range.location > 0
-            ? rest.lineRange(for: NSRange(location: min(range.location, rest.length), length: 0)).location
-            : range.location
-        var next = rest.lineRange(for: NSRange(location: min(start, rest.length), length: 0))
-        if next.length > 0, rest.character(at: NSMaxRange(next) - 1) == 10 { next.length -= 1 }
-        replace(range, with: "", select: NSRange(location: start + min(column, next.length), length: 0), action: "Delete Line")
+        let selections = currentCarets.map { LineSelection(anchor: Int32($0.anchor), head: Int32($0.head)) }
+        applyLineChange(deleteSelectedLines(selections: selections, text: string), action: "Delete Line")
     }
 
     // MARK: Comments
@@ -1675,13 +1651,12 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         insertText("  ", replacementRange: selectedRange())
     }
 
-    /// Keeps the indentation of the current line.
+    /// Keeps the indentation, indents after an opener and continues list items.
     override func insertNewline(_ sender: Any?) {
-        let s = string as NSString
-        let line = s.substring(with: s.lineRange(for: NSRange(location: selectedRange().location, length: 0)))
-        let indent = line.prefix { $0 == " " || $0 == "\t" }
-        super.insertNewline(sender)
-        if !indent.isEmpty { insertText(String(indent), replacementRange: selectedRange()) }
+        let selection = selectedRange()
+        guard !isColumnMode, isEditable else { return super.insertNewline(sender) }
+        apply(TypewrightCore.newline(text: string, from: Int32(selection.location), to: Int32(NSMaxRange(selection)), syntax: syntax),
+              action: "Typing")
     }
 }
 
@@ -1813,6 +1788,7 @@ struct CodeEditor: NSViewRepresentable {
         tv.comments = comments
         tv.glidingCaret = glidingCursor
         tv.concealsMath = concealsMath && highlights
+        tv.syntax = highlights ? "typst" : markdown ? "markdown" : ""
         tv.autoPairs = !autoClose ? [:] : highlights ? ["(": ")", "[": "]", "{": "}", "\"": "\"", "$": "$", "`": "`"]
             : markdown ? ["(": ")", "[": "]", "{": "}", "\"": "\"", "`": "`"] : [:]
         tv.wrapColumn = wrapColumn
@@ -2056,7 +2032,9 @@ struct CodeEditor: NSViewRepresentable {
             let event = NSApp.currentEvent
             let typing = event?.type == .keyDown && event?.modifierFlags.contains(.command) == false
                 && (textView as? TypstTextView)?.isColumnMode != true
-            lastTyped = typing && !isApplyingColor && completion?.isEditing != true && (text?.utf16.count ?? 2) <= 1 ? text : nil
+            // A typed opener comes with its closer; the opener counts, so `(` still asks for the parameters.
+            let typed = text.map { $0.utf16.count == 2 && "([{\"".contains($0.prefix(1)) ? String($0.prefix(1)) : $0 }
+            lastTyped = typing && !isApplyingColor && completion?.isEditing != true && (typed?.utf16.count ?? 2) <= 1 ? typed : nil
             return true
         }
 

@@ -158,6 +158,29 @@ enum SolvengSupport {
 
     static func function(_ name: String) -> Function? { decode(call("function", name)) }
 
+    /// Named arguments of the call at the caret, for any function (`parameters.rs` in the typst bridge).
+    struct Parameters: Decodable {
+        struct Item: Decodable {
+            let label: String
+            /// `$0` marks the caret.
+            let insert: String
+            let detail: String
+            let documentation: String
+        }
+        /// `items` replace `from..<to`.
+        let from: Int
+        let to: Int
+        let items: [Item]
+        /// Whether a positional argument fits too, so other values belong in the list.
+        let values: Bool
+        /// Whether arguments follow, so accepted names get a comma.
+        let comma: Bool
+    }
+
+    static func parameters(_ document: String, context: String, offset: Int) -> Parameters? {
+        decode(call("parameters", document, context: context, offset: offset))
+    }
+
     static func hover(_ document: String, context: String, offset: Int) -> Hover? {
         decode(call("hover", document, context: context, offset: offset))
     }

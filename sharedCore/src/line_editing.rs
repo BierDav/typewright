@@ -2,6 +2,7 @@ use crate::text::{text_difference, TextEdit};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
 pub struct LineSelection {
     pub anchor: i32,
     pub head: i32,
@@ -9,6 +10,7 @@ pub struct LineSelection {
 
 #[derive(Debug)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize, tsify::Tsify))]
 pub struct LineChange {
     pub edit: TextEdit,
     pub selections: Vec<LineSelection>,
@@ -109,18 +111,63 @@ pub fn copy_current_lines(offsets: Vec<i32>, text: &str) -> String {
 
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
 pub fn cut_current_lines(offsets: Vec<i32>, text: &str) -> LineChange {
+    delete_selected_lines(offsets.iter().map(|&at| LineSelection { anchor: at, head: at }).collect(), text)
+}
+
+/// Deletes the lines the selections touch; each caret keeps its column on the line that follows.
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn delete_selected_lines(selections: Vec<LineSelection>, text: &str) -> LineChange {
     let lines = Lines::new(text);
-    let selections: Vec<_> = offsets.iter().map(|&at| LineSelection { anchor: at, head: at }).collect();
     let selected = lines.selected(&selections);
     let kept: Vec<_> = (0..selected.len()).filter(|&row| !selected[row]).collect();
     let (changed, starts) = lines.assemble(&kept);
-    let selections = offsets.iter().map(|&at| {
+    let selections = selections.iter().map(|selection| {
+        let at = selection.head;
         let row = lines.row(at);
         let next = kept.partition_point(|&kept| kept < row).min(kept.len().saturating_sub(1));
         let caret = if kept.is_empty() { 0 } else {
             starts[next] + (at - lines.starts[row]).max(0).min(lines.length(kept[next]))
         };
         LineSelection { anchor: caret, head: caret }
+    }).collect();
+    LineChange { edit: text_difference(text, &changed), selections }
+}
+
+/// Duplicates each selection after itself, selecting the copy, or the line of each caret, which moves to the copy.
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn duplicate_selected_lines(selections: Vec<LineSelection>, text: &str) -> LineChange {
+    let lines = Lines::new(text);
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let separator = lines.breaks.iter().find(|s| !s.is_empty()).copied().unwrap_or("\n");
+    // Where each selection's copy goes and what it is.
+    let inserts: Vec<(i32, String)> = selections.iter().map(|selection| {
+        let (start, end) = (selection.anchor.min(selection.head), selection.anchor.max(selection.head));
+        if start < end {
+            return (end, String::from_utf16_lossy(&units[start as usize..end as usize]));
+        }
+        let row = lines.row(start);
+        (lines.starts[row] + lines.length(row), format!("{separator}{}", lines.bodies[row]))
+    }).collect();
+    let mut unique = inserts.clone();
+    unique.sort();
+    unique.dedup();
+    let shift = |at: i32| unique.iter().filter(|(p, _)| *p < at).map(|(_, t)| crate::utf16::len(t)).sum::<i32>();
+    let mut changed = String::new();
+    let mut last = 0;
+    for (at, insert) in &unique {
+        changed.push_str(&String::from_utf16_lossy(&units[last..*at as usize]));
+        changed.push_str(insert);
+        last = *at as usize;
+    }
+    changed.push_str(&String::from_utf16_lossy(&units[last..]));
+    let selections = selections.iter().zip(&inserts).map(|(selection, (at, insert))| {
+        let length = crate::utf16::len(insert);
+        if selection.anchor == selection.head {
+            let caret = selection.head + shift(selection.head) + length;
+            return LineSelection { anchor: caret, head: caret };
+        }
+        let start = at + shift(*at);
+        if selection.anchor < selection.head { LineSelection { anchor: start, head: start + length } } else { LineSelection { anchor: start + length, head: start } }
     }).collect();
     LineChange { edit: text_difference(text, &changed), selections }
 }
@@ -188,6 +235,23 @@ mod tests {
         assert_eq!(change.selections, vec![caret(1), caret(3)]);
         assert_eq!(result(&cut_current_lines(vec![10], text), text), "abc\nx\ndef");
         assert_eq!(result(&cut_current_lines(vec![0, 2], "a\nb"), "a\nb"), "");
+    }
+
+    #[test]
+    fn deletes_and_duplicates_lines() {
+        let text = "ab\ncd\nef";
+        let change = delete_selected_lines(vec![LineSelection { anchor: 1, head: 4 }], text);
+        assert_eq!(result(&change, text), "ef");
+        assert_eq!(change.selections, vec![caret(1)]);
+        let change = delete_selected_lines(vec![caret(8)], text);
+        assert_eq!(result(&change, text), "ab\ncd");
+        assert_eq!(change.selections, vec![caret(5)]);
+        let change = duplicate_selected_lines(vec![caret(1), caret(7)], text);
+        assert_eq!(result(&change, text), "ab\nab\ncd\nef\nef");
+        assert_eq!(change.selections, vec![caret(4), caret(13)]);
+        let change = duplicate_selected_lines(vec![LineSelection { anchor: 4, head: 3 }], text);
+        assert_eq!(result(&change, text), "ab\ncc\nd\nef".replace("cc\nd", "ccd"));
+        assert_eq!(change.selections, vec![LineSelection { anchor: 5, head: 4 }]);
     }
 
     #[test]
