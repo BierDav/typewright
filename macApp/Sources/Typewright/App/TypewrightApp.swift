@@ -1,6 +1,15 @@
 import SwiftUI
 
 @main
+enum TypewrightMain {
+    static func main() {
+        if CommandLine.arguments.dropFirst().first == "--cli" {
+            exit(TypewrightCLI.run(Array(CommandLine.arguments.dropFirst(2))))
+        }
+        TypewrightApp.main()
+    }
+}
+
 struct TypewrightApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 

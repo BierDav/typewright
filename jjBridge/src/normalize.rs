@@ -47,8 +47,12 @@ impl Repo {
     pub(crate) fn prepare(&mut self) -> Result<Arc<ReadonlyRepo>> {
         self.stale_workspaces.clear();
         self.wrote_files = false;
+        #[cfg(target_os = "macos")]
+        crate::colocation::ensure_layout(self.root())?;
         wait_for_lock(self.root())?;
         let mut repo = self.head()?;
+        #[cfg(target_os = "macos")]
+        { repo = self.import_git(repo)?; }
         let name = self.workspace.workspace_name().to_owned();
         let inputs = self.snapshot_inputs()?;
         let sig = self.signature();
@@ -133,8 +137,17 @@ impl Repo {
                 repo = new_repo;
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            let mut tx = repo.start_transaction();
+            let _git_lock = crate::colocation::export_git(&mut tx, &name, &workspace_root)?;
+            if tx.repo().has_changes() {
+                repo = tx.commit("typewright: export git").block_on()?;
+            }
+        }
         locked.finish(repo.op_id().clone()).block_on()?;
         self.after_transaction(&before, &repo)?;
+        crate::agents::ensure(self.root());
         Ok(repo)
     }
 

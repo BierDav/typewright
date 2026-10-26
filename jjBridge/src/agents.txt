@@ -1,0 +1,62 @@
+# Working in Typewright
+
+This folder is Typewright's document library. Each top-level folder is a space (a project).
+Work in the space relevant to the request and read any instructions inside it first.
+Typewright recreates this file when missing and preserves existing contents, including user edits.
+This root file is local guidance, excluded from history; instructions inside spaces are unaffected.
+
+## Compile and check
+
+On macOS, use the library-local Typewright CLI. From this library root:
+
+```sh
+./.jj/typewright/bin/typewright --help
+./.jj/typewright/bin/typewright info "Space/document.typ" --json
+./.jj/typewright/bin/typewright check "Space/document.typ" --json
+./.jj/typewright/bin/typewright check "Space/document.typ" --format html --json
+./.jj/typewright/bin/typewright compile "Space/document.typ" /tmp/document.pdf
+./.jj/typewright/bin/typewright compile "Space/document.typ" /tmp/document.html --dark
+```
+
+Replace the example paths with the requested space and actual main document. Imported fragments may not compile
+independently. The wrapper invokes the installed app's bundled compiler with Typewright's font folders and package
+cache; no separate Typst CLI, Homebrew or Xcode installation is needed. It reads saved files from disk, so save
+in the app first. It always uses the bundled compiler even if the app's preview selects an external compiler.
+`info` reports the compiler version, inferred project root and resolved font folders. Use `--root DIR` to override
+the inferred root, especially for projects outside this library. Run `--help` for available commands and options.
+
+Keep generated output outside the library so it does not become history or sync content. `check` writes no output;
+`compile` requires an output path and supports PDF and HTML. `--dark` forces the exported HTML's browser color
+preference to dark, including adaptive CSS, regardless of the OS theme; fixed document colors remain the author's.
+Read diagnostics and check the exit status: 0 success, 1 compilation or I/O failure, 2 invalid usage.
+Inspect rendered output for overflow, page breaks, missing glyphs and font substitution; compilation alone does
+not verify appearance. Run existing project checks and report what was checked and anything left unverified.
+If the wrapper is missing or points to an app that moved, reopen Typewright so it recreates the wrapper.
+
+## Find documentation
+
+Start with project instructions, imports, manifests and examples. Identify exact dependency versions and read
+the matching local source or bundled documentation. For packages, follow the official documentation or source
+linked from their manifests or registry entries at https://typst.app/universe/; do not assume the latest API matches.
+Typst's language reference is https://typst.app/docs/reference/. On macOS, local packages normally live under
+`~/Library/Application Support/typst/packages` and downloaded ones under `~/Library/Caches/typst/packages`, with
+`<namespace>/<name>/<version>` beneath them. Read shared caches without modifying them. Report unavailable
+documentation instead of guessing APIs. The CLI may download missing packages during compilation.
+
+## Repository and app coordination
+
+Typewright commits automatically and may update files through sync while you work. Re-read changed files before
+editing and preserve concurrent user changes. Prefer small edits within the requested space. Move and rename
+synced items through the app so share paths follow them.
+
+On macOS, `.git` and `.jj` share the working folder. Prefer jj for history and inspect `jj status`, `jj diff`,
+`jj log` and `jj tw-help` when available. Resolve conflicts by editing their contents or using `jj resolve`;
+the app records and syncs the resolution. Binary and large files may deliberately be untracked; do not force-track them.
+
+If you only have Git, be careful: jj owns the working copy and history. Detached HEAD is normal, not damage.
+Use Git for inspection (`git status`, `git diff`, `git log`, `git show`) and edit document files normally;
+Typewright records those edits. Git's index and conflict display do not represent jj's state.
+Do not run `git init`, `git add`, `git commit`, `git switch`, `git checkout`, `git reset`, `git restore`,
+`git clean`, `git rebase`, `git merge`, `git gc` or `git prune` to fix or tidy this library.
+Do not delete or edit `.jj` or `.git`, change colocation, rewrite refs (especially `refs/typewright/shares/*`),
+or push the library to a Git remote. Use the app or jj for history operations; report when jj is unavailable.

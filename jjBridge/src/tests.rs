@@ -504,7 +504,7 @@ fn ffi_json_and_git_validity() {
     assert!(resolved["error"].as_str().unwrap().contains("no conflict"));
     unsafe { crate::twj_close(repo) };
     // The node is a valid git commit, reachable from its ref.
-    let git = dir.path().join(".jj/repo/store/git");
+    let git = dir.path().join(if cfg!(target_os = "macos") { ".git" } else { ".jj/repo/store/git" });
     if let Ok(out) = std::process::Command::new("git").arg("-C").arg(&git).args(["fsck", "--strict"]).output() {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let show = std::process::Command::new("git")

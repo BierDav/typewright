@@ -1,4 +1,4 @@
-# typewright-config-version: 4
+# typewright-config-version: 5
 #
 # Managed by Typewright. This is the jj repo config of Typewright's library:
 #   {{ROOT}}
@@ -12,6 +12,10 @@
 # What this repository is
 # - Typewright's library: every top-level folder is one space (a Typst project). Folders elsewhere on disk may be
 #   symlinks into it. It has no remote; Typewright syncs between devices on its own.
+# - On macOS, `.git` is colocated with `.jj`. Detached HEAD is normal. If you only have Git, use it for
+#   inspection (`status`, `diff`, `log`, `show`) and edit files normally; Typewright records those edits.
+#   Do not use Git to stage, commit, switch, reset, restore, clean, merge, rebase, prune or repair this library:
+#   jj owns its working copy and history, and Git's index and conflict display do not represent jj's state.
 # - Typewright commits by itself: after 5 s without changes, or every 60 s while changes keep coming. The working
 #   copy changes under you, and Typewright's operations run concurrently with yours. That's expected: jj merges
 #   concurrent operations automatically. Its commits end in the trailer `Typewright-Commit: auto`.
@@ -42,9 +46,9 @@
 #
 # Never touch
 # - `refs/typewright/shares/*` in the backing git repo: sync state. Don't delete or rewrite them, and don't run
-#   `git gc --prune=now` or similar on `.jj/repo/store/git`.
+#   `git gc --prune=now` or similar on the backing Git repo (`.git` on macOS).
 # - `.jj/typewright/`: Typewright's own state (LFS file list, sync heads).
-# - Deleting `.jj`, adding a `.git` at the root or colocating (`jj git init --colocate`, `jj git colocation`),
+# - Deleting `.jj` or `.git`, replacing the Git repo, changing colocation (`jj git colocation`),
 #   `jj sparse set` (Typewright resets sparse patterns to everything), `jj workspace forget default`.
 #
 # LFS files

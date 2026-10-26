@@ -58,6 +58,73 @@ fn read(root: &Path, path: &str) -> String { fs::read_to_string(root.join(path))
 
 fn tracked(root: &Path) -> Vec<String> { jj_ok(root, &["file", "list"]).lines().map(str::to_owned).collect() }
 
+#[cfg(target_os = "macos")]
+fn git_ok(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("/usr/bin/git").current_dir(root).args(args).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn colocated_git_tracks_app_commits_and_imports_git_changes() {
+    require_jj!();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut repo = Repo::open(root).unwrap();
+    assert!(root.join(".git").is_dir());
+    assert_eq!(git_ok(root, &["rev-parse", "--is-inside-work-tree"]).trim(), "true");
+    write(root, "S/a.typ", "one\n");
+    let first = repo.commit("First").unwrap().commit.unwrap();
+    assert_eq!(git_ok(root, &["rev-parse", "HEAD"]).trim(), first);
+    assert!(git_ok(root, &["status", "--porcelain"]).is_empty());
+    write(root, "S/a.typ", "two\n");
+    repo.working_copy_changes().unwrap();
+    assert!(git_ok(root, &["diff", "--", "S/a.typ"]).contains("+two"));
+
+    // Even accidental Git commits must survive the app's next snapshot.
+    git_ok(root, &["add", "S/a.typ"]);
+    git_ok(root, &["-c", "user.name=Tester", "-c", "user.email=test@example.com", "commit", "-m", "From Git"]);
+    let external = git_ok(root, &["rev-parse", "HEAD"]).trim().to_owned();
+    write(root, "S/a.typ", "two\nthree\n");
+    repo.commit("After Git").unwrap();
+    assert_eq!(repo.file_at(&external, "S/a.typ").unwrap()["text"], "two\n");
+    assert_eq!(read(root, "S/a.typ"), "two\nthree\n");
+    assert!(git_ok(root, &["log", "--format=%s"]).contains("From Git"));
+    jj_ok(root, &["st"]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn opening_migrates_internal_git_without_losing_history_or_sync_refs() {
+    require_jj!();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let other = tempfile::tempdir().unwrap();
+    let mut repo = Repo::open(root).unwrap();
+    write(root, "S/a.typ", "one\n");
+    let first = repo.commit("First").unwrap().commit.unwrap();
+    let manifest = repo.export_node("share", "S").unwrap();
+    jj_ok(root, &["workspace", "add", other.path().join("workspace").to_str().unwrap()]);
+    drop(repo);
+    jj_ok(root, &["git", "colocation", "disable"]);
+    assert!(root.join(".jj/repo/store/git").is_dir());
+
+    write(root, "S/a.typ", "one\nunsaved\n");
+    let mut repo = Repo::open(root).unwrap();
+    assert!(root.join(".git").is_dir());
+    assert_eq!(read(root, "S/a.typ"), "one\nunsaved\n");
+    assert_eq!(repo.file_at(&first, "S/a.typ").unwrap()["text"], "one\n");
+    assert!(git_ok(root, &["show-ref"]).contains(manifest["node"].as_str().unwrap()));
+    repo.commit("After migration").unwrap();
+    jj_ok(root, &["st"]);
+    jj_ok(&other.path().join("workspace"), &["st"]);
+    jj_ok(root, &["git", "colocation", "disable"]);
+    repo.working_copy_changes().unwrap();
+    assert!(root.join(".git").is_dir());
+    jj_ok(root, &["st"]);
+}
+
 #[test]
 fn cli_reads_managed_config_and_ignores_lfs() {
     require_jj!();
@@ -305,7 +372,8 @@ fn undo_keeps_sync_state() {
     jj_ok(root, &["undo"]);
     jj_ok(root, &["op", "restore", "@--"]);
     assert_eq!(repo.node("share", &node).unwrap()["node"], node.as_str());
-    let refs = Command::new("git").arg("-C").arg(root.join(".jj/repo/store/git")).args(["show-ref"]).output();
+    let git_dir = root.join(if cfg!(target_os = "macos") { ".git" } else { ".jj/repo/store/git" });
+    let refs = Command::new("git").arg("-C").arg(git_dir).args(["show-ref"]).output();
     if let Ok(refs) = refs {
         assert!(String::from_utf8_lossy(&refs.stdout).contains("refs/typewright/shares/share/head"));
     }
@@ -347,7 +415,7 @@ fn nested_repos_colocation_missing_and_corrupt_jj() {
     let mut repo = Repo::open(root).unwrap();
     write(root, "S/a.typ", "a\n");
     repo.commit("One").unwrap();
-    // A workspace inside the library, and a plain git repo at its root: neither gets tracked.
+    // Nested workspaces and Git metadata never become document history.
     jj_ok(root, &["workspace", "add", "Inner"]);
     let git = Command::new("git").arg("-C").arg(root).args(["init", "-q"]).status();
     write(root, "S/b.typ", "b\n");
@@ -359,6 +427,7 @@ fn nested_repos_colocation_missing_and_corrupt_jj() {
         jj_ok(root, &["st"]);
     }
     drop(repo);
+    // Remove both stores to simulate a completely deleted repository.
     let _ = fs::remove_dir_all(root.join(".git"));
     let _ = fs::remove_dir_all(root.join("Inner"));
 
@@ -376,7 +445,13 @@ fn nested_repos_colocation_missing_and_corrupt_jj() {
     assert!(aside.file_name().unwrap().to_string_lossy().starts_with(".jj.broken-"));
     assert!(aside.join("repo").is_dir());
     assert_eq!(read(root, "S/a.typ"), "a\n");
-    assert_eq!(repo.commit("Edit").unwrap().changed, ["S/a.typ", "S/b.typ"]);
+    let changed = repo.commit("Edit").unwrap().changed;
+    if cfg!(target_os = "macos") {
+        assert!(changed.is_empty());
+    } else {
+        assert_eq!(changed, ["S/a.typ", "S/b.typ"]);
+    }
+    assert_eq!(tracked(root), ["S/a.typ", "S/b.typ"]);
     jj_ok(root, &["st"]);
 }
 

@@ -216,7 +216,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     private func loadFonts() {
         let dirs = fontDirectories
         Task {
-            let faces = await Task.detached { FontFace.scan(dirs) }.value
+            let faces = await Task.detached { HTMLFontFace.scan(dirs) }.value
             guard dirs == fontDirectories else { return }
             fontHandler.files = faces.map(\.url)
             fontCSS = faces.enumerated().map { i, face in
@@ -529,7 +529,7 @@ extension NSScroller {
 }
 
 /// One face of a font file, described for `@font-face`.
-private struct FontFace: Sendable {
+struct HTMLFontFace: Sendable {
     let url: URL
     let family: String
     let weight: Int
@@ -537,24 +537,24 @@ private struct FontFace: Sendable {
 
     private static let extensions: Set<String> = ["ttf", "otf", "ttc", "otc", "woff", "woff2"]
 
-    static func scan(_ dirs: [URL]) -> [FontFace] {
-        dirs.flatMap { dir -> [FontFace] in
+    static func scan(_ dirs: [URL]) -> [HTMLFontFace] {
+        dirs.flatMap { dir -> [HTMLFontFace] in
             let files = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil)?
                 .compactMap { $0 as? URL }
                 .filter { extensions.contains($0.pathExtension.lowercased()) } ?? []
-            return files.flatMap { url -> [FontFace] in
+            return files.flatMap { url -> [HTMLFontFace] in
                 let descriptors = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor] ?? []
                 return descriptors.compactMap { face(url, $0) }
             }
         }
     }
 
-    private static func face(_ url: URL, _ descriptor: CTFontDescriptor) -> FontFace? {
+    private static func face(_ url: URL, _ descriptor: CTFontDescriptor) -> HTMLFontFace? {
         guard let family = CTFontDescriptorCopyAttribute(descriptor, kCTFontFamilyNameAttribute) as? String else { return nil }
         let traits = CTFontDescriptorCopyAttribute(descriptor, kCTFontTraitsAttribute) as? [CFString: Any] ?? [:]
         let weight = (traits[kCTFontWeightTrait] as? Double) ?? 0
         let symbolic = (traits[kCTFontSymbolicTrait] as? UInt32) ?? 0
-        return FontFace(url: url, family: family, weight: cssWeight(weight),
+        return HTMLFontFace(url: url, family: family, weight: cssWeight(weight),
                         italic: symbolic & CTFontSymbolicTraits.traitItalic.rawValue != 0)
     }
 

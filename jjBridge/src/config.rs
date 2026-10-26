@@ -176,6 +176,8 @@ fn pattern(path: &str) -> String {
 impl Repo {
     /// Rewrites our block of `info/exclude`: Finder litter and every LFS file, so the CLI never tracks them either.
     pub(crate) fn write_excludes(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        crate::colocation::ensure_layout(self.root())?;
         let Some(path) = exclude_path(self) else { return Ok(()) };
         let existing = fs::read_to_string(&path).unwrap_or_default();
         let mut kept = String::new();

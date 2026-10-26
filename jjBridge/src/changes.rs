@@ -20,6 +20,10 @@ impl Repo {
         let repo = self.prepare()?;
         let wc = self.wc_commit(&repo)?;
         let before = self.watched_commit.clone().unwrap_or_else(|| wc.clone());
+        #[cfg(target_os = "macos")]
+        let name = self.workspace.workspace_name().to_owned();
+        #[cfg(target_os = "macos")]
+        let root = self.root().to_owned();
         let inputs = self.snapshot_inputs()?;
         let mut locked = self.workspace.start_working_copy_mutation().block_on()?;
         let (tree, new_lfs) = snapshot_into(&inputs, locked.locked_wc(), &wc.tree())?;
@@ -31,6 +35,8 @@ impl Repo {
             tx.repo_mut().rebase_descendants().block_on()?;
             current
         };
+        #[cfg(target_os = "macos")]
+        let _git_lock = crate::colocation::export_git(&mut tx, &name, &root)?;
         let new_repo = if tx.repo().has_changes() { tx.commit("snapshot external changes").block_on()? } else { repo.clone() };
         locked.locked_wc().reset(&current).block_on()?;
         locked.finish(new_repo.op_id().clone()).block_on()?;

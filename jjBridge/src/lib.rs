@@ -1,7 +1,10 @@
 //! The internal jj repository: spaces as top-level folders, local history, conflicts and sync nodes.
 //! The C interface (`ffi.rs`, `include/JJBridge.h`) serves the Mac app and, built for wasm32-wasip1, the web app.
 
+mod agents;
 mod changes;
+#[cfg(target_os = "macos")]
+mod colocation;
 mod config;
 mod conflicts;
 mod deleted;

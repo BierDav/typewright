@@ -186,6 +186,8 @@ impl Repo {
         }
         // Side branches off rewritten commits; their trees stay the same since no tree changed.
         mut_repo.rebase_descendants().block_on()?;
+        #[cfg(target_os = "macos")]
+        let _git_lock = self.export_git(&mut tx)?;
         let new_repo = tx.commit("typewright: squash history").block_on()?;
         let new_wc = self.wc_commit(&new_repo)?;
         let mut locked = self.workspace.start_working_copy_mutation().block_on()?;

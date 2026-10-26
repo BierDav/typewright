@@ -26,9 +26,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::lfs::LfsFile;
 
-/// Names the Finder, editors and our own atomic writes leave behind; never tracked.
+/// Local library guidance and files left by Finder, editors and our atomic writes; never tracked.
 pub(crate) const BASE_IGNORES: &str = ".DS_Store\n._*\nIcon\r\n.Trashes\n.fseventsd\n.Spotlight-V100\n\
-.TemporaryItems\n.DocumentRevisions-V100\n.twj-tmp-*\n~$*\n.~lock.*\n*.swp\n/.jj.broken-*/\n";
+.TemporaryItems\n.DocumentRevisions-V100\n.twj-tmp-*\n~$*\n.~lock.*\n*.swp\n/.jj/\n/.jj.broken-*/\n/AGENTS.md\n";
 pub(crate) const TEMP_PREFIX: &str = ".twj-tmp-";
 
 pub(crate) const USER_NAME: &str = "Typewright";
@@ -148,6 +148,8 @@ impl Repo {
     pub fn open(root: &Path) -> Result<Repo> {
         fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
         let base = settings_with(None)?;
+        #[cfg(target_os = "macos")]
+        crate::colocation::ensure_layout(root)?;
         let mut recovered_from = None;
         if root.join(".jj").exists() && load_workspace(&base, root).is_err() {
             // One retry: a CLI writing its state at this moment isn't corruption.
@@ -161,6 +163,13 @@ impl Repo {
             }
         }
         if !root.join(".jj").exists() {
+            #[cfg(target_os = "macos")]
+            if root.join(".git").exists() {
+                Workspace::init_external_git(&base, root, &root.join(".git")).block_on()?;
+            } else {
+                Workspace::init_colocated_git(&base, root, gix::hash::Kind::Sha1).block_on()?;
+            }
+            #[cfg(not(target_os = "macos"))]
             Workspace::init_internal_git(&base, root, gix::hash::Kind::Sha1).block_on()?;
         }
         let mut state = State::default();
@@ -328,6 +337,8 @@ impl Repo {
             mut_repo.rewrite_commit(&wc).set_tree(tree).write().block_on()?;
             mut_repo.rebase_descendants().block_on()?;
         }
+        #[cfg(target_os = "macos")]
+        let _git_lock = crate::colocation::export_git(&mut tx, &name, &inputs.root)?;
         let new_repo = if tx.repo().has_changes() { tx.commit("typewright: commit").block_on()? } else { repo.clone() };
         let id = new_repo.view().get_wc_commit_id(&name).ok_or_else(|| anyhow!("no working-copy commit"))?;
         locked.locked_wc().reset(&new_repo.store().get_commit(id)?).block_on()?;
@@ -380,6 +391,8 @@ impl Repo {
             mut_repo.set_wc_commit(name.clone(), next.id().clone())?;
             committed = Some(done.id().hex());
         }
+        #[cfg(target_os = "macos")]
+        let _git_lock = self.export_git(&mut tx)?;
         let new_repo = if tx.repo().has_changes() { tx.commit("typewright: sync").block_on()? } else { repo.clone() };
         let id = new_repo.view().get_wc_commit_id(&name).ok_or_else(|| anyhow!("no working-copy commit"))?;
         let new_wc = new_repo.store().get_commit(id)?;
