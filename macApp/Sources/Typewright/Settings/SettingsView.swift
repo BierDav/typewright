@@ -393,13 +393,8 @@ struct FontSettings: View {
     }
 
     private func chooseMachineFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        panel.prompt = "Add"
-        guard panel.runModal() == .OK else { return }
-        fonts.machinePaths += panel.urls.map(\.path).filter { !fonts.machinePaths.contains($0) }
+        guard let folder = PaletteFiles.folder("Add Font Folder") else { return }
+        if !fonts.machinePaths.contains(folder.path) { fonts.machinePaths.append(folder.path) }
     }
 }
 
@@ -517,12 +512,7 @@ struct PackageSettings: View {
     }
 
     private func linkFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.prompt = "Link"
-        panel.message = "Choose a folder with packages as <name>/<version>/"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let url = PaletteFiles.folder("Link Package Folder") else { return }
         let name = namespace.trimmingCharacters(in: .whitespaces)
         packages.link(url, as: name.isEmpty ? url.lastPathComponent : name)
         if packages.linkError == nil { namespace = "" }

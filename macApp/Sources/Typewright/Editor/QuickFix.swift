@@ -100,13 +100,6 @@ enum QuickFixes {
     }
 
     private static func chooseFolder(in directory: URL?, message: String) -> URL? {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        panel.message = message
-        if let directory { panel.directoryURL = directory }
-        return panel.runModal() == .OK ? panel.url?.standardizedFileURL : nil
+        PaletteFiles.folder(message, initial: directory)
     }
 }

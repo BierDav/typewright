@@ -38,6 +38,28 @@ final class WindowState {
     }
     /// The window showing this state, whose popups close when something covers its content.
     @ObservationIgnored weak var window: NSWindow?
+    /// Recovery stays visible even after its space closes.
+    var deletionNotice: FileNotice?
+    @ObservationIgnored private var deletionUndo: (() -> Void)?
+
+    func showDeletion(_ notice: FileNotice, undo: (() -> Void)? = nil) {
+        deletionNotice = notice
+        deletionUndo = undo ?? { [weak self] in self?.undoManager.undo() }
+    }
+
+    @discardableResult
+    func undoDeletion() -> Bool {
+        guard deletionNotice != nil, let undo = deletionUndo else { return false }
+        dismissDeletion()
+        undo()
+        return true
+    }
+
+    func dismissDeletion() {
+        deletionNotice = nil
+        deletionUndo = nil
+    }
+
     /// A file and line to show once the window switched to its space.
     var pendingReveal: SourceLocation?
     /// A file to select once the window opened its space, keeping its saved caret.
@@ -138,6 +160,7 @@ final class WindowState {
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let state: WindowState
     var onClose: (() -> Void)?
+    private var deletionKeys: Any?
 
     init(space: URL?, file: URL? = nil, copying source: WindowState? = nil,
          restoring session: WindowSession? = nil, renameNewSpace: Bool = false) {
@@ -157,6 +180,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         state.window = window
         window.delegate = self
+        deletionKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window === self.window, self.state.deletionNotice != nil else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function])
+            if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "z", self.state.undoDeletion() { return nil }
+            if !flags.contains(.command) { self.state.dismissDeletion() }
+            return event
+        }
         if !window.setFrameUsingName("MainWindow") { window.center() }
         window.setFrameAutosaveName("MainWindow")
     }
@@ -164,6 +194,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func windowWillClose(_ notification: Notification) {
+        if let deletionKeys { NSEvent.removeMonitor(deletionKeys) }
+        deletionKeys = nil
         onClose?()
     }
 
@@ -225,6 +257,12 @@ struct MainWindow: View {
             if state.sidebarVisible || workspace == nil { SpacesOverlay(state: state, workspace: workspace) }
         }
         .overlay { WindowOverlayView(state: state, workspace: workspace) }
+        .overlay(alignment: .bottom) {
+            if let notice = state.deletionNotice {
+                FileNoticeBar(notice: notice, state: state)
+                    .padding(16)
+            }
+        }
         // The whole window moves below the menu bar instead of hiding under it.
         .padding(.top, state.menuBarInset)
         .background(HiddenTitleBar(state: state,
@@ -242,6 +280,7 @@ struct MainWindow: View {
             if let next, let file = state.pendingFile, file.path.hasPrefix(next.root.path + "/") { next.select(file) }
             state.pendingFile = nil
             next?.fileOps.undoManager = state.undoManager
+            next?.onNotice = { [weak state] notice in state?.showDeletion(notice) }
             next?.renamingSpace = state.renameNewSpace
             state.renameNewSpace = false
             // File changes undo within their space only.

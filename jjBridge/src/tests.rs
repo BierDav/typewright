@@ -149,6 +149,18 @@ fn live_files_keep_their_local_content() {
 }
 
 #[test]
+fn deleting_a_live_file_reaches_the_other_editor() {
+    let (_da, mut a, _db, mut b) = synced_pair("original\n");
+    write(&b, "Joined/main.typ", "still typing\n");
+    std::fs::remove_file(a.root().join("S/main.typ")).unwrap();
+    let node = a.export_node("share", "S").unwrap();
+    let merged = deliver(&a, "S", &node, &mut b, "Joined", "A", &["Joined/main.typ".to_owned()]).unwrap();
+    assert!(strs(&merged["conflicts"]).is_empty(), "{merged}");
+    assert!(!b.root().join("Joined/main.typ").exists());
+    assert!(strs(&merged["changed"]).contains(&"Joined/main.typ".to_owned()));
+}
+
+#[test]
 fn commit_and_noop() {
     let dir = tempfile::tempdir().unwrap();
     let mut repo = open(dir.path());

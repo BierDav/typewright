@@ -16,25 +16,25 @@ enum Invites {
             return message("“\(url.lastPathComponent)” isn't in Typewright's library.",
                            "Only spaces in the library sync. Import the space from its menu in the spaces overview first.")
         }
-        let synced = sync.isSynced(url)
-        let choice = PaletteDialog.choose("Share “\(url.lastPathComponent)”", detail:
-            (synced ? "It syncs across your devices. " : "")
-            + "Anyone with an invite link can download it and edit it, so only send links to people you trust. They need a Typewright account to join, in the app or with the web link in their browser.",
-            choices: [
-                PaletteDialog.Choice(id: "invite", title: "Copy Invite Link", subtitle: "Others can join from Typewright",
-                                     icon: "link"),
-                PaletteDialog.Choice(id: "web", title: "Copy Web Link", subtitle: "Opens the share in a browser",
-                                     icon: "globe"),
-                PaletteDialog.Choice(id: "sync", title: synced ? "Stop Syncing on This Mac" : "Sync to My Devices",
-                                     icon: synced ? "xmark.icloud" : "arrow.triangle.2.circlepath"),
-                PaletteDialog.Choice(id: "cancel", title: "Cancel", icon: "xmark"),
-            ])
-        switch choice {
-        case "invite": copyLink(url, web: false)
-        case "web": copyLink(url, web: true)
-        case "sync": if synced { sync.stopSyncing(url) } else { sync.share(url) }
-        default: break
-        }
+        let state = Opener.shared.promptState(nil)
+        state.ask(sharePage(url))
+    }
+
+    static func sharePage(_ url: URL) -> PalettePage {
+        PalettePage(title: "Share “\(url.lastPathComponent)”", placeholder: "Choose how to share…", kind: .list {
+            let sync = SyncService.shared
+            let synced = sync.isSynced(url)
+            return [
+                PaletteItem(id: "share.invite", title: "Copy Invite Link", subtitle: "Anyone with the link can join and edit",
+                            icon: "link", section: "Share", action: .run { copyLink(url, web: false) }),
+                PaletteItem(id: "share.web", title: "Copy Web Link", subtitle: "Anyone with the link can join in their browser and edit",
+                            icon: "globe", section: "Share", action: .run { copyLink(url, web: true) }),
+                PaletteItem(id: "share.sync", title: synced ? "Stop Syncing on This Mac" : "Sync to My Devices",
+                            icon: synced ? "xmark.icloud" : "arrow.triangle.2.circlepath", section: "Share", action: .run {
+                    if synced { sync.stopSyncing(url) } else { sync.share(url) }
+                }),
+            ]
+        })
     }
 
     /// Asks first, since the link lets anyone holding it edit the share.
@@ -77,11 +77,12 @@ enum Invites {
             return message("Syncing isn't running.", sync.lastError ?? "Check the Devices settings, then open the link again.")
         }
         if let existing = sync.url(of: invite.id) { return reveal(existing) }
-        guard let destination = LibraryPanel.destination(for: invite.name, file: invite.file, in: sync.repository) else { return }
-        guard let joined = sync.join(invite, at: destination) else {
-            return message("Couldn't join “\(invite.name)”.", sync.lastError ?? "")
+        LibraryDestination.choose(name: invite.name, file: invite.file, in: sync.repository) { destination in
+            guard let joined = sync.join(invite, at: destination) else {
+                return message("Couldn't join “\(invite.name)”.", sync.lastError ?? "")
+            }
+            reveal(joined)
         }
-        reveal(joined)
     }
 
     /// Opens the space a share lives in.
@@ -96,52 +97,53 @@ enum Invites {
     }
 }
 
-/// A save panel that only picks places in the library: the root for a new space, or a folder in a space.
+/// Shared items only join into folders inside the library.
 @MainActor
-final class LibraryPanel: NSObject, NSOpenSavePanelDelegate {
-    private let root: URL
-    private let file: Bool
-
-    private init(root: URL, file: Bool) {
-        self.root = root.resolvingSymlinksInPath().standardizedFileURL
-        self.file = file
+enum LibraryDestination {
+    static func choose(name: String, file: Bool, in repository: SpaceRepository, state: WindowState? = nil,
+                       done: @escaping (URL) -> Void) {
+        let state = Opener.shared.promptState(state)
+        state.ask(page(at: repository.root, name: name, file: file, root: repository.root, done: done))
     }
 
-    /// Where a share named `name` goes; nil if cancelled.
-    static func destination(for name: String, file: Bool, in repository: SpaceRepository) -> URL? {
-        let delegate = LibraryPanel(root: repository.root, file: file)
-        let panel = NSSavePanel()
-        panel.delegate = delegate
-        panel.directoryURL = repository.root
-        panel.nameFieldStringValue = name
-        panel.canCreateDirectories = true
-        panel.prompt = "Join Here"
-        panel.message = file
-            ? "Choose a folder in one of your spaces for “\(name)”. It stays in sync with everyone it's shared with."
-            : "Keep the library to make “\(name)” a new space, or choose a folder in one of your spaces. It stays in sync with everyone it's shared with."
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return withExtendedLifetime(delegate) { url }
-    }
-
-    private func inside(_ url: URL) -> Bool {
-        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
-        return path == root.path || path.hasPrefix(root.path + "/")
-    }
-
-    func panel(_ sender: Any, shouldEnable url: URL) -> Bool { inside(url) }
-
-    func panel(_ sender: Any, didChangeToDirectoryURL url: URL?) {
-        // Wandering out of the library leads back into it.
-        if let url, !inside(url), let panel = sender as? NSSavePanel { panel.directoryURL = root }
-    }
-
-    func panel(_ sender: Any, validate url: URL) throws {
-        let parent = url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
-        guard inside(parent) else {
-            throw NSError(domain: "Typewright", code: 1, userInfo: [NSLocalizedDescriptionKey: "Shares sync into Typewright's library."])
-        }
-        if file && parent.path == root.path {
-            throw NSError(domain: "Typewright", code: 2, userInfo: [NSLocalizedDescriptionKey: "Choose a folder in one of your spaces for a shared file."])
-        }
+    static func page(at folder: URL, name: String, file: Bool, root: URL, done: @escaping (URL) -> Void) -> PalettePage {
+        PalettePage(title: folder == root ? "Join “\(name)”" : folder.lastPathComponent,
+                    placeholder: "Choose a folder in the library…", kind: .list {
+            var items: [PaletteItem] = []
+            if !file || folder != root {
+                items.append(PaletteItem(id: "join.here", title: "Join Here", subtitle: folder.path, icon: "arrow.down.to.line",
+                                         section: "Destination", action: .page(PalettePage(title: "Name", placeholder: "Name for the shared item",
+                                                                                           kind: .input(initial: name) { typed in
+                    let name = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else { return }
+                    done(folder.appendingPathComponent(name).standardizedFileURL)
+                }))))
+            }
+            items.append(PaletteItem(id: "join.newFolder", title: "New Folder…", icon: "folder.badge.plus", section: "Destination",
+                                     action: .page(PalettePage(title: "New Folder", placeholder: "Folder name",
+                                                               kind: .input(initial: "") { typed in
+                let folderName = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !folderName.isEmpty, folderName != ".", folderName != "..", !folderName.contains("/"), !folderName.contains("\0") else { return }
+                let child = folder.appendingPathComponent(folderName)
+                do {
+                    try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+                    DispatchQueue.main.async {
+                        Opener.shared.promptState(nil).ask(page(at: child, name: name, file: file, root: root, done: done))
+                    }
+                } catch { PaletteDialog.error(error) }
+            }))))
+            let folders = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+                                                                        options: [.skipsHiddenFiles])) ?? []
+            items += folders.filter {
+                let path = $0.resolvingSymlinksInPath().standardizedFileURL.path
+                return path.hasPrefix(root.resolvingSymlinksInPath().path + "/")
+                    && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                    && !FileManager.default.fileExists(atPath: $0.appendingPathComponent(".jj").path)
+            }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }.map { child in
+                PaletteItem(id: child.path, title: child.lastPathComponent, icon: "folder", section: "Folders",
+                            action: .page(page(at: child, name: name, file: file, root: root, done: done)))
+            }
+            return items
+        })
     }
 }

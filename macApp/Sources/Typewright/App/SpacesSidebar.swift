@@ -506,10 +506,16 @@ struct SpacesPane: View {
     /// Spaces come back as spaces; a folder or file shared on another device asks where it goes. Opens it while its
     /// files arrive.
     private func download(_ share: AccountShare) {
-        let destination = share.kind == .space
-            ? sync.suggestedDestination(for: share)
-            : LibraryPanel.destination(for: share.name, file: share.kind == .file, in: sync.repository)
-        guard let destination else { return }
+        if share.kind == .space {
+            join(share, at: sync.suggestedDestination(for: share))
+        } else {
+            LibraryDestination.choose(name: share.name, file: share.kind == .file, in: sync.repository, state: state) { destination in
+                join(share, at: destination)
+            }
+        }
+    }
+
+    private func join(_ share: AccountShare, at destination: URL) {
         guard let joined = sync.join(share, at: destination) else {
             PaletteDialog.message("Couldn't download “\(share.name)”.", detail: sync.lastError, over: state.window)
             return
@@ -642,7 +648,7 @@ private struct SpaceRow: View {
                 Button("Link to…") { Opener.shared.link(url) }
                 Button("Show Recently Deleted") { RecentlyDeleted.show(in: url) }
                 Divider()
-                Button("Delete Space…", action: onForget)
+                Button("Delete Space", action: onForget)
             } else {
                 Button("Import Into Typewright…") { Opener.shared.askToImport(url, external: false) }
                 Divider()

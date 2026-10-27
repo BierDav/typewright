@@ -210,11 +210,8 @@ struct PreviewPane: View {
     }
 
     private func exportPDF() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.nameFieldStringValue = (workspace.previewFile?.deletingPathExtension().lastPathComponent ?? workspace.name) + ".pdf"
-        panel.directoryURL = workspace.root
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let name = (workspace.previewFile?.deletingPathExtension().lastPathComponent ?? workspace.name) + ".pdf"
+        guard let url = PaletteFiles.save("Export PDF", name: name, directory: workspace.root) else { return }
         Task {
             guard let error = await workspace.exportPDF(to: url) else { return }
             PaletteDialog.message("Export failed", detail: error)

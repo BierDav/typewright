@@ -426,7 +426,7 @@ struct CommandPalette: View {
         }
         // From the overview every space can be deleted; an open space has its own command further down.
         if inOverview, !all.isEmpty {
-            items.append(PaletteItem(id: "spaces.delete", title: "Delete Space…", icon: "trash", section: "Spaces",
+            items.append(PaletteItem(id: "spaces.delete", title: "Delete Space", icon: "trash", section: "Spaces",
                                      keywords: ["delete space", "remove space", "trash space", "forget space"],
                                      action: .page(PalettePage(title: "Delete Space", placeholder: "Choose a space…",
                                                                kind: .list { all.map(deleteSpaceItem) }))))
@@ -436,11 +436,12 @@ struct CommandPalette: View {
                                                      workspace?.name] + spaces.map(\.lastPathComponent))
         let editor = inOverview ? nil : workspace?.find.textView
         let editorUndo = editor?.undoManager
-        let undoInEditor = editor?.isRenaming == true || editorUndo?.canUndo == true
+        let undoInEditor = state.deletionNotice == nil && (editor?.isRenaming == true || editorUndo?.canUndo == true)
         let undo = undoInEditor ? editorUndo : state.undoManager
         items.append(PaletteItem(id: "edit.undo", title: undo?.undoMenuItemTitle ?? "Undo", icon: "arrow.uturn.backward",
                                  shortcut: "⌘Z", section: "Edit", keywords: ["undo"],
                                  action: .run {
+                                     if state.undoDeletion() { return }
                                      if undoInEditor { editor?.undo(nil) } else { undo?.undo() }
                                  }))
         let redoInEditor = editor?.isRenaming == true || editorUndo?.canRedo == true
@@ -547,6 +548,12 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "file.move", title: "Move \(name) to…", icon: "folder.badge.gearshape", shortcut: keys.moveFile.display, section: "File",
                                      action: .page(PalettePage(title: "Move \(name)", placeholder: "Choose a folder…",
                                                                kind: .list { moveTargets(file, ws) }))))
+            if SpaceList.isInRepository(ws.root) {
+                items.append(PaletteItem(id: "file.invite", title: "Share Current File…", subtitle: name,
+                                         icon: "person.badge.plus", section: "File", keywords: ["share", "invite", "collaborate", "link", "sync"],
+                                         action: .run { DispatchQueue.main.async { Invites.share(file) } }))
+
+            }
             let inLibrary = SpaceList.isInRepository(ws.root)
             items.append(PaletteItem(id: "file.delete", title: inLibrary ? "Delete \(name)" : "Move \(name) to Trash", icon: "trash",
                                      section: "File", keywords: ["delete", "remove", "trash"],
@@ -561,6 +568,12 @@ struct CommandPalette: View {
                                      action: .run { copyPath(file) }))
             items.append(PaletteItem(id: "file.rel", title: "Copy Relative Path of \(name)", icon: "doc.on.doc", section: "File",
                                      action: .run { copyPath(ws.relativePath(of: file)) }))
+        }
+        if SpaceList.isInRepository(ws.root) {
+            let folder = ws.selectedFile?.deletingLastPathComponent() ?? ws.root
+            items.append(PaletteItem(id: "folder.invite", title: "Share Current Folder…", subtitle: folder.lastPathComponent,
+                                     icon: "folder.badge.person.crop", section: "Space", keywords: ["share", "invite", "directory", "link", "sync"],
+                                     action: .run { DispatchQueue.main.async { Invites.share(folder) } }))
         }
         items.append(PaletteItem(id: "space.search", title: "Find in \(ws.name)", icon: "text.magnifyingglass", shortcut: keys.findInSpace.display,
                                  section: "Space", action: .run { DispatchQueue.main.async { state.overlay = .search(allSpaces: false) } }))
@@ -590,10 +603,10 @@ struct CommandPalette: View {
         items.append(PaletteItem(id: "space.finder", title: "Reveal \(ws.name) in Finder", icon: "folder", section: "Space",
                                  action: .run { NSWorkspace.shared.activateFileViewerSelecting([ws.root]) }))
         if SpaceList.isInRepository(ws.root) {
-            items.append(PaletteItem(id: "space.delete", title: "Delete Space “\(ws.name)”…", icon: "trash", section: "Space",
+            items.append(PaletteItem(id: "space.delete", title: "Delete Space “\(ws.name)”", icon: "trash", section: "Space",
                                      keywords: ["delete space", "remove space"],
                                      action: .run { DispatchQueue.main.async { Opener.shared.deleteSpace(ws.root, in: state) } }))
-            // The save panel waits until the palette is gone.
+            // Open the picker after the command palette closes.
             items.append(PaletteItem(id: "space.link", title: "Link \(ws.name) to…", icon: "link", section: "Space",
                                      keywords: ["symlink", "alias", "shortcut"],
                                      action: .run { DispatchQueue.main.async { Opener.shared.link(ws.root) } }))
@@ -601,12 +614,11 @@ struct CommandPalette: View {
                                      keywords: ["trash", "restore", "undelete"],
                                      action: .run { DispatchQueue.main.async { RecentlyDeleted.show(in: ws.root) } }))
         } else {
-            items.append(PaletteItem(id: "space.forget", title: "Remove \(ws.name) from Spaces…", icon: "trash", section: "Space",
+            items.append(PaletteItem(id: "space.forget", title: "Remove \(ws.name) from Spaces", icon: "trash", section: "Space",
                                      keywords: ["delete space", "remove space", "forget space"],
                                      action: .run { DispatchQueue.main.async { Opener.shared.forgetSpace(ws.root, in: state) } }))
         }
         if SpaceList.isInRepository(ws.root) {
-            // The alert waits until the palette is gone.
             items.append(PaletteItem(id: "space.invite", title: "Share \(ws.name)…", icon: "person.badge.plus", section: "Space",
                                      keywords: ["share", "collaborate", "invite", "link", "sync"],
                                      action: .run { DispatchQueue.main.async { Invites.share(ws.root) } }))
@@ -852,15 +864,9 @@ struct CommandPalette: View {
     }
 
     private static func addFontFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        panel.prompt = "Add"
-        panel.message = "Choose folders with fonts every space can use"
-        guard panel.runModal() == .OK else { return }
+        guard let folder = PaletteFiles.folder("Add Font Folder") else { return }
         let fonts = FontLibrary.shared
-        fonts.machinePaths += panel.urls.map(\.path).filter { !fonts.machinePaths.contains($0) }
+        if !fonts.machinePaths.contains(folder.path) { fonts.machinePaths.append(folder.path) }
     }
 
     private func folderItems(_ kind: String, _ ws: Workspace) -> [PaletteItem] {

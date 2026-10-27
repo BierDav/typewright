@@ -143,7 +143,10 @@ final class Workspace: EditorLanguage {
     /// File tree changes with undo; its undo manager is the window's.
     @ObservationIgnored lazy var fileOps = FileOperations(workspace: self)
     /// The note after a deletion, offering undo.
-    var notice: FileNotice?
+    var notice: FileNotice? {
+        didSet { if let notice { onNotice?(notice) } }
+    }
+    @ObservationIgnored var onNotice: ((FileNotice) -> Void)?
     /// Images pasted into the editor, removed again when undo takes their reference out.
     @ObservationIgnored var pastedImages: [PastedImage] = []
 
@@ -654,8 +657,24 @@ final class Workspace: EditorLanguage {
         SpaceStore.save(session().state, for: root)
     }
 
+    @discardableResult
+    private func recoverMissingSelection() -> Bool {
+        guard let file = selectedFile, !FileManager.default.fileExists(atPath: file.path) else { return false }
+        let data = selectedKind?.isEditable == true ? Data(text.utf8) : filePreviewData
+        forgetRemoved([file])
+        if let data {
+            let name = "Recover “\(file.lastPathComponent)”"
+            fileOps.performed(inverse: .recover(file, data), name: name, message: "Delete \(file.lastPathComponent)")
+            notice = FileNotice(text: "“\(file.lastPathComponent)” was deleted", folder: file.deletingLastPathComponent())
+        }
+        return true
+    }
+
     /// Picks up edits made by other apps for files without pending changes.
     func refreshFromDisk() {
+        recoverMissingSelection()
+        let missing = buffers.keys.filter { !FileManager.default.fileExists(atPath: $0.path) }
+        if !missing.isEmpty { forgetRemoved(Array(missing)) }
         reloadTree()
         solvengContextCache = nil
         let pending = dirty.union(siblings.flatMap { $0.dirty })
@@ -867,13 +886,6 @@ final class Workspace: EditorLanguage {
     func delete(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         flushSaves()
-        guard SpaceList.isInRepository(root) else {
-            for url in urls {
-                do { try FileManager.default.trashItem(at: url, resultingItemURL: nil) } catch { PaletteDialog.error(error) }
-            }
-            forgetRemoved(urls)
-            return
-        }
         let repo = SpaceRepository.shared
         let title = urls.count == 1 ? "“\(urls[0].lastPathComponent)”" : "\(urls.count) Items"
         let paths = urls.map(repo.messagePath).joined(separator: ", ")
@@ -902,6 +914,7 @@ final class Workspace: EditorLanguage {
             revision += 1
             if let main = defaultMain(), !gone(main) { select(main) }
         }
+        startLive()
         schedulePersist()
     }
 
@@ -1053,7 +1066,7 @@ final class Workspace: EditorLanguage {
 
     /// `live` edits (color wheel drags) compile at once so the preview keeps up.
     func textDidChange(_ newText: String, live: Bool) {
-        guard let url = selectedFile else { return }
+        guard !recoverMissingSelection(), let url = selectedFile else { return }
         text = newText
         buffers[url] = newText
         siblings.forEach { $0.siblingDidEdit(url, text: newText) }
@@ -1110,7 +1123,10 @@ final class Workspace: EditorLanguage {
 
     /// Edits a file that may not be the selected one, keeping saving, the language server and compiling in step.
     func updateBuffer(_ url: URL, text new: String, live: Bool = false) {
-        guard isInSpace(url) else { return }
+        guard isInSpace(url), FileManager.default.fileExists(atPath: url.path) else {
+            _ = recoverMissingSelection()
+            return
+        }
         buffers[url] = new
         siblings.forEach { $0.siblingDidEdit(url, text: new) }
         if url == selectedFile {

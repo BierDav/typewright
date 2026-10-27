@@ -113,6 +113,64 @@ final class FileOperationsTests: XCTestCase {
         XCTAssertFalse(exists("chapters/one.typ"))
     }
 
+    func testDeletingAnOpenFileClearsOtherWindowsAndOffersRecovery() async throws {
+        let other = Workspace(url: space)
+        let manager = UndoManager()
+        other.fileOps.undoManager = manager
+        defer { other.close() }
+        other.select(url("chapters/one.typ"))
+        other.textDidChange("Unsaved in the other editor\n", live: false)
+        await step { ws.delete(url("chapters/one.typ")) }
+        XCTAssertFalse(exists("chapters/one.typ"))
+        XCTAssertNotEqual(other.selectedFile, url("chapters/one.typ"))
+        XCTAssertEqual(other.notice?.text, "“one.typ” was deleted")
+        other.flushSaves()
+        XCTAssertFalse(exists("chapters/one.typ"))
+        manager.undo()
+        await other.fileOps.settle()
+        XCTAssertEqual(text("chapters/one.typ"), "Unsaved in the other editor\n")
+    }
+
+    func testIncomingDeletionRecoversUnsavedText() async throws {
+        ws.select(url("chapters/one.typ"))
+        ws.textDidChange("Uncommitted typing\n", live: false)
+        try fm.removeItem(at: url("chapters/one.typ"))
+        undo.beginUndoGrouping()
+        ws.refreshFromDisk()
+        undo.endUndoGrouping()
+        ws.flushSaves()
+        XCTAssertFalse(exists("chapters/one.typ"))
+        XCTAssertEqual(ws.notice?.text, "“one.typ” was deleted")
+        await undoStep()
+        XCTAssertEqual(text("chapters/one.typ"), "Uncommitted typing\n")
+        XCTAssertEqual(ws.selectedFile, url("chapters/one.typ"))
+    }
+
+    func testExternalFileDeletionUndoesAndRedoes() async throws {
+        let outside = fm.temporaryDirectory.appendingPathComponent("tw-delete-\(UUID().uuidString)")
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: outside) }
+        let file = outside.appendingPathComponent("main.typ")
+        try "External\n".write(to: file, atomically: true, encoding: .utf8)
+        let external = Workspace(url: outside)
+        external.fileOps.undoManager = undo
+        defer { external.close() }
+        undo.beginUndoGrouping()
+        external.delete(file)
+        undo.endUndoGrouping()
+        await external.fileOps.settle()
+        XCTAssertFalse(fm.fileExists(atPath: file.path))
+        XCTAssertEqual(external.notice?.text, "Deleted “main.typ”")
+        undo.undo()
+        await external.fileOps.settle()
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "External\n")
+        undo.redo()
+        await external.fileOps.settle()
+        XCTAssertFalse(fm.fileExists(atPath: file.path))
+        undo.undo()
+        await external.fileOps.settle()
+    }
+
     func testDeletingAFolderWithAnImageUndoes() async throws {
         let png = Data([0x89, 0x50, 0x4E, 0x47, 0, 1, 2, 3])
         try png.write(to: url("chapters/plot.png"))

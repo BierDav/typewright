@@ -16,6 +16,9 @@ enum FileOp {
     case delete([URL])
     /// Deleted items back at their own paths.
     case restore([DeletedItem])
+    case restoreExternal([FileOp.Move])
+    case recover(URL, Data)
+    case listSpace(URL, Bool)
     case renameSpace(Move)
     case deleteSpace(URL)
     case restoreSpace(DeletedItem)
@@ -139,12 +142,50 @@ final class FileOperations {
             workspace?.flushSaves()
             let urls = urls.filter { FileManager.default.fileExists(atPath: $0.path) || SpaceFolders.isLink($0) }
             guard !urls.isEmpty else { return nil }
+            if let workspace, !SpaceList.isInRepository(workspace.root) {
+                var moves: [FileOp.Move] = []
+                for url in urls {
+                    do {
+                        var trashed: NSURL?
+                        try FileManager.default.trashItem(at: url, resultingItemURL: &trashed)
+                        if let trashed { moves.append(.init(from: trashed as URL, to: url)) }
+                    } catch { PaletteDialog.error(error) }
+                }
+                workspace.forgetRemoved(moves.map(\.to))
+                Workspace.filesChangedExternally(in: workspace.root, paths: moves.map(\.to))
+                return moves.isEmpty ? nil : .restoreExternal(moves)
+            }
             guard let items = await repository.delete(urls, message: message) else {
                 alert("Couldn't delete “\(urls[0].lastPathComponent)”", repository.lastError)
                 return nil
             }
             workspace?.forgetRemoved(urls)
+            Workspace.filesChangedExternally(in: repository.root, paths: urls)
             return .restore(items)
+        case .restoreExternal(let moves):
+            var restored: [URL] = []
+            for move in moves {
+                guard !FileManager.default.fileExists(atPath: move.to.path) else { _ = failMove(move); continue }
+                do {
+                    try FileManager.default.createDirectory(at: move.to.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try FileManager.default.moveItem(at: move.from, to: move.to)
+                    restored.append(move.to)
+                } catch { PaletteDialog.error(error) }
+            }
+            workspace?.reloadTree()
+            return restored.isEmpty ? nil : .delete(restored)
+        case .recover(let url, let data):
+            do {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: url, options: .withoutOverwriting)
+                await commit(message)
+                workspace?.reloadTree()
+                workspace?.select(url)
+                return .delete([url])
+            } catch { PaletteDialog.error(error); return nil }
+        case .listSpace(let url, let listed):
+            if listed { SpaceList.add(url) } else { SpaceList.remove(url) }
+            return .listSpace(url, !listed)
         case .restore(let items):
             var restored: [URL] = []
             for item in items {

@@ -62,11 +62,6 @@ struct SidebarView: View {
                     // Avoid flashing scrollers while the selector slides.
                     .scrollIndicators(CGFloat(rows.count) * Self.rowPitch + 8 > geo.size.height ? .automatic : .never)
                 }
-                if let notice = workspace.notice {
-                    FileNoticeBar(notice: notice, workspace: workspace)
-                        .padding(.horizontal, 10)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
                 HStack {
                     SpacesButton(active: false, action: onShowSpaces)
                     BackgroundStatusArea(workspace: workspace)
@@ -307,9 +302,9 @@ struct SidebarView: View {
 }
 
 /// "Deleted ‘x’" with Undo and Show Recently Deleted; goes away on its own.
-private struct FileNoticeBar: View {
+struct FileNoticeBar: View {
     let notice: FileNotice
-    let workspace: Workspace
+    let state: WindowState
 
     var body: some View {
         HStack(spacing: 8) {
@@ -317,35 +312,37 @@ private struct FileNoticeBar: View {
             Text(notice.text).lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 4)
             Button("Undo") {
-                if workspace.fileOps.undoManager?.canUndo == true { workspace.fileOps.undoManager?.undo() }
-                dismiss()
+                state.undoDeletion()
             }
-            Menu {
-                Button("Show Recently Deleted") {
-                    RecentlyDeleted.show(in: notice.folder)
-                    dismiss()
+            if SpaceList.isInRepository(notice.folder) {
+                Menu {
+                    Button("Show Recently Deleted") {
+                        RecentlyDeleted.show(in: notice.folder)
+                        dismiss()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
                 }
-            } label: {
-                Image(systemName: "ellipsis")
+                .menuStyle(.button)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More")
             }
-            .menuStyle(.button)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("More")
         }
         .buttonStyle(.borderless)
         .font(.system(size: 12))
         .padding(.horizontal, 10)
         .frame(height: 32)
+        .frame(maxWidth: 480)
         .glassEffect(.regular, in: .capsule)
         .task(id: notice.id) {
             try? await Task.sleep(for: .seconds(8))
-            if workspace.notice?.id == notice.id { dismiss() }
+            if state.deletionNotice?.id == notice.id { dismiss() }
         }
     }
 
     private func dismiss() {
-        withAnimation(.smooth(duration: 0.25)) { if workspace.notice?.id == notice.id { workspace.notice = nil } }
+        withAnimation(.smooth(duration: 0.25)) { if state.deletionNotice?.id == notice.id { state.dismissDeletion() } }
     }
 }
 

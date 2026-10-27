@@ -731,8 +731,18 @@ impl Repo {
         self.commit("Edit")?;
         let odb = self.odb()?;
         let remote = odb.node(oid(node)?).with_context(|| format!("node {node} isn't imported"))?;
-        let keep: Vec<RepoPathBuf> = keep.iter().map(|k| repo_path(k)).collect::<Result<_>>()?;
         let state = self.share_state(share);
+        let mut remote_files = BTreeMap::new();
+        odb.files(remote.tree, "", &mut remote_files)?;
+        // Live content survives edits, but must not resurrect a peer's deletions.
+        let live: Vec<RepoPathBuf> = keep.iter().map(|k| repo_path(k)).collect::<Result<_>>()?;
+        let keep: Vec<RepoPathBuf> = keep.iter().filter(|key| {
+            let rel = match state.kind.unwrap_or(ShareKind::Folder) {
+                ShareKind::Folder => key.strip_prefix(&format!("{path}/")),
+                ShareKind::File => (key.as_str() == path).then_some(FILE_ENTRY),
+            };
+            rel.is_some_and(|rel| remote_files.contains_key(rel) || remote.lfs.contains_key(rel))
+        }).map(|k| repo_path(k)).collect::<Result<_>>()?;
         if !state.pending.is_empty() {
             // A peer resolved the conflict this share is waiting on: take its resolution.
             let ancestors: HashSet<ObjectId> = odb.ancestors(&[remote.id], usize::MAX).into_iter().collect();
@@ -805,7 +815,7 @@ impl Repo {
             (resolved(remote.tree), remote_label.clone()),
         ]))
         .block_on()?;
-        let merged = self.keep_local(merged, kind, path, &a, &keep)?;
+        let merged = self.keep_local(merged, kind, path, &a, &live, &keep)?;
         let value: MergedTreeValue = match kind {
             ShareKind::Folder => merged.tree_ids().map(|id| (id != store.empty_tree_id()).then(|| TreeValue::Tree(id.clone()))),
             ShareKind::File => merged.path_value(RepoPath::from_internal_string(FILE_ENTRY).unwrap()).block_on()?,
@@ -839,12 +849,12 @@ impl Repo {
     }
 
     /// Resolves conflicts at kept paths to the local side `a`, so live-edited files never block a merge.
-    fn keep_local(&self, merged: MergedTree, kind: ShareKind, path: &str, a: &Node, keep: &[RepoPathBuf]) -> Result<MergedTree> {
+    fn keep_local(&self, merged: MergedTree, kind: ShareKind, path: &str, a: &Node, live: &[RepoPathBuf], keep: &[RepoPathBuf]) -> Result<MergedTree> {
         let store = merged.store().clone();
         let local = MergedTree::resolved(store, tree_id(&a.tree));
         let mut builder = MergedTreeBuilder::new(merged.clone());
         let mut touched = false;
-        for k in keep {
+        for k in live {
             let key = k.as_internal_file_string();
             let rel = match kind {
                 ShareKind::Folder => key.strip_prefix(&format!("{path}/")).map(str::to_owned),
@@ -853,7 +863,8 @@ impl Repo {
             let Some(rel) = rel else { continue };
             let rel = repo_path(&rel)?;
             if !merged.path_value(&rel).block_on()?.is_resolved() {
-                builder.set_or_remove(rel.clone(), local.path_value(&rel).block_on()?);
+                let value = if keep.contains(k) { local.path_value(&rel).block_on()? } else { Merge::resolved(None) };
+                builder.set_or_remove(rel.clone(), value);
                 touched = true;
             }
         }

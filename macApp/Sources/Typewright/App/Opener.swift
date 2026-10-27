@@ -337,13 +337,7 @@ final class Opener {
 
     /// Asks for a folder to import as a space.
     func openPanel(in state: WindowState? = nil) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Import"
-        panel.message = "Choose a folder to import as a space"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let url = PaletteFiles.folder("Import Space") else { return }
         guard SpaceList.repositorySpace(of: url) == nil else {
             if let state { open(url, in: state) } else { open(url) }
             return
@@ -380,7 +374,7 @@ final class Opener {
     }
 
     /// The window to ask in: `state`, the key one, any, or a new empty one.
-    private func promptState(_ state: WindowState?) -> WindowState {
+    func promptState(_ state: WindowState?) -> WindowState {
         if let state = state ?? keyState ?? controllers.first(where: { $0.window?.isMainWindow == true })?.state
             ?? controllers.last?.state {
             state.window?.makeKeyAndOrderFront(nil)
@@ -460,22 +454,19 @@ final class Opener {
         }
     }
 
-    /// Deletes a repository space after asking in the command palette; it stays in the history (Recently Deleted) and
-    /// undo brings it back. Links to it stay where they are and work again once it's back.
+    /// Deleted spaces stay in history for undo and Recently Deleted.
     func deleteSpace(_ url: URL, in state: WindowState? = nil) {
         let url = url.standardizedFileURL
-        let name = url.lastPathComponent
-        var detail = "Undo or File › Recently Deleted… bring it back"
-        if SyncService.shared.isSynced(url) { detail += "; this Mac stops syncing it, other devices keep it" }
         let state = promptState(state)
-        state.ask(PalettePage(title: "Delete “\(name)”?", placeholder: "Delete “\(name)”?", kind: .list {[
-            PaletteItem(id: "delete.confirm", title: "Delete Space “\(name)”", subtitle: detail, icon: "trash",
-                        section: "Delete “\(name)”", action: .run {
-                FileOperations.spaces.perform(.deleteSpace(url), name: "Delete “\(name)”",
-                                              message: "Delete space \(name)", undoManager: state.undoManager)
-            }),
-            PaletteItem(id: "delete.cancel", title: "Cancel", icon: "xmark", section: "Delete “\(name)”", action: .run {}),
-        ]}))
+        let name = url.lastPathComponent
+        FileOperations.spaces.perform(.deleteSpace(url), name: "Delete “\(name)”",
+                                      message: "Delete space \(name)", undoManager: state.undoManager)
+        let notice = FileNotice(text: "Deleted “\(name)”", folder: url.deletingLastPathComponent())
+        let states = windows(showing: url).map(\.state)
+        for target in states where target !== state {
+            target.showDeletion(notice) { [weak state] in state?.undoManager.undo() }
+        }
+        state.showDeletion(notice)
     }
 
     /// The deletion itself, for `FileOperations`: windows showing the space close it, and its sync stops.
@@ -493,35 +484,24 @@ final class Opener {
         return item
     }
 
-    /// Removes a folder outside the library from the spaces list after asking; the folder stays where it is.
+    /// Removing an external space leaves its folder on disk.
     func forgetSpace(_ url: URL, in state: WindowState? = nil) {
         let url = url.standardizedFileURL
-        let name = url.lastPathComponent
         let state = promptState(state)
-        state.ask(PalettePage(title: "Remove “\(name)” from Spaces?", placeholder: "Remove “\(name)” from Spaces?",
-                              kind: .list {[
-            PaletteItem(id: "forget.confirm", title: "Remove “\(name)” from Spaces",
-                        subtitle: "The folder stays where it is; it's no longer listed here", icon: "minus.circle",
-                        section: "Remove “\(name)”", action: .run {
-                self.windows(showing: url).forEach { $0.state.space = nil }
-                SpaceList.remove(url)
-            }),
-            PaletteItem(id: "forget.cancel", title: "Cancel", icon: "xmark", section: "Remove “\(name)”",
-                        action: .run {}),
-        ]}))
+        windows(showing: url).forEach { $0.state.space = nil }
+        SpaceList.remove(url)
+        FileOperations.spaces.performed(inverse: .listSpace(url, true), name: "Remove “\(url.lastPathComponent)”",
+                                       message: "Remove space \(url.lastPathComponent)", undoManager: state.undoManager)
+        state.showDeletion(FileNotice(text: "Removed “\(url.lastPathComponent)”", folder: url))
     }
 
     /// Asks where to put a link to a space or an item in one, ~/Documents first.
     func link(_ item: URL) {
-        let panel = NSSavePanel()
-        panel.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        panel.nameFieldStringValue = item.lastPathComponent
-        panel.canCreateDirectories = true
-        panel.prompt = "Link"
-        panel.message = "Choose where to put a link to “\(item.lastPathComponent)”"
-        guard panel.runModal() == .OK, let location = panel.url else { return }
+        guard let location = PaletteFiles.save("Create Link", name: item.lastPathComponent,
+                                               directory: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+                                                   ?? FileManager.default.homeDirectoryForCurrentUser) else { return }
         do {
-            // The panel already asked whether to replace an existing item.
+            // The palette already asked whether to replace the item.
             if FileManager.default.fileExists(atPath: location.path) || SpaceFolders.isLink(location) {
                 try FileManager.default.trashItem(at: location, resultingItemURL: nil)
             }

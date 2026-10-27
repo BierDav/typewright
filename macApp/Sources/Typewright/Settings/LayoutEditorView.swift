@@ -268,14 +268,6 @@ struct LayoutEditorView: View {
 
     private func delete() {
         stopRecording()
-        let choice = PaletteDialog.choose("Delete “\(layout.name)”?",
-                                          detail: "Its shortcuts go away. \(layout.base.title) stays.",
-                                          choices: [
-                                            PaletteDialog.Choice(id: "delete", title: "Delete", icon: "trash",
-                                                                 destructive: true),
-                                            PaletteDialog.Choice(id: "cancel", title: "Cancel", icon: "xmark"),
-                                          ])
-        guard choice == "delete" else { return }
         let base = layout.base.rawValue
         let wasActive = selectedID == layout.id
         layouts.delete(layout.id)

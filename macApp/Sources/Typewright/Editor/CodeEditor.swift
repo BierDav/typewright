@@ -1236,6 +1236,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     // The Edit menu's Undo and Redo reach the text view first, so a rename's own history wins there too.
     @objc func undo(_ sender: Any?) {
+        if (window?.windowController as? MainWindowController)?.state.undoDeletion() == true { return }
         if onUndo?() != true { undoManager?.undo() }
         onDidUndo?(false, string)
     }
@@ -1246,7 +1247,10 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(undo(_:)) { return onUndo != nil && isRenaming || undoManager?.canUndo == true }
+        if item.action == #selector(undo(_:)) {
+            return (window?.windowController as? MainWindowController)?.state.deletionNotice != nil
+                || onUndo != nil && isRenaming || undoManager?.canUndo == true
+        }
         if item.action == #selector(redo(_:)) { return onRedo != nil && isRenaming || undoManager?.canRedo == true }
         if item.action == #selector(copy(_:)) { return isSelectable }
         if item.action == #selector(cut(_:)) { return isEditable && !string.isEmpty }
