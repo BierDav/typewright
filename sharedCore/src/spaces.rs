@@ -1,6 +1,8 @@
 //! The user's spaces in their chosen order, as stored paths. Storage and file system checks stay with
 //! the platform; `visible` is the stored list resolved to existing space folders.
 
+use unicode_normalization::UnicodeNormalization as _;
+
 /// Appends a new space; known ones keep their place.
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
 pub fn space_order_add(mut stored: Vec<String>, path: String) -> Vec<String> {
@@ -31,13 +33,16 @@ pub fn space_order_replace(stored: Vec<String>, old: &str, new: &str) -> Vec<Str
 /// Lower is better: prefix, word start, substring, then scattered letters; None if no match.
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
 pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
-    if text.starts_with(query) {
+    // macOS filenames often store accents separately from their letters.
+    let query: String = query.nfc().flat_map(char::to_lowercase).collect();
+    let text: String = text.nfc().flat_map(char::to_lowercase).collect();
+    if text.starts_with(&query) {
         return Some(0);
     }
     if text.contains(&format!(" {query}")) || text.contains(&format!("/{query}")) {
         return Some(1);
     }
-    if text.contains(query) {
+    if text.contains(&query) {
         return Some(2);
     }
     let mut rest = text.chars();
@@ -74,5 +79,17 @@ mod tests {
         assert_eq!(Some(2), fuzzy_score("in", "main.typ"));
         assert_eq!(Some(4), fuzzy_score("mt", "main.typ"));
         assert_eq!(None, fuzzy_score("zz", "main.typ"));
+    }
+
+    #[test]
+    fn matches_canonically_equivalent_filenames() {
+        for query in ["Übung 2.typ", "U\u{308}bung 2.typ", "übung 2.typ"] {
+            for filename in ["Übung 2.typ", "U\u{308}bung 2.typ"] {
+                assert_eq!(Some(0), fuzzy_score(query, filename));
+                assert_eq!(Some(1), fuzzy_score(query, &format!("courses/{filename}")));
+            }
+        }
+        assert_eq!(Some(4), fuzzy_score("ü2", "U\u{308}bung 2.typ"));
+        assert_eq!(None, fuzzy_score("Übung 3", "U\u{308}bung 2.typ"));
     }
 }

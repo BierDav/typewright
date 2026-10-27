@@ -39,6 +39,7 @@ struct SidebarView: View {
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 SpaceHeader(name: workspace.name,
+                            url: workspace.root,
                             renaming: Binding(get: { workspace.renamingSpace }, set: { workspace.renamingSpace = $0 }),
                             isExternal: !SpaceList.isInRepository(workspace.root),
                             isDropTarget: dropTarget?.path == workspace.root.path,
@@ -559,6 +560,7 @@ private struct MenuAnchor: NSViewRepresentable {
 /// Space name above the file tree; clicking it renames the space folder.
 private struct SpaceHeader: View {
     let name: String
+    let url: URL
     @Binding var renaming: Bool
     let isExternal: Bool
     var isDropTarget = false
@@ -594,6 +596,7 @@ private struct SpaceHeader: View {
             }
             Spacer(minLength: 0)
             if isExternal { ExternalSpaceBadge() }
+            SharingBadge(url: url)
             if hovered && canReveal && !renaming {
                 Button(action: onReveal) {
                     ZenIcon(systemName: "scope", size: 24, idleFill: false)
@@ -759,6 +762,7 @@ private struct FileRow: View {
             }
             Spacer(minLength: 0)
             if SpaceRepository.shared.hasConflict(node.url) && !(isFolder && (hovered || menuOpen)) { ConflictBadge() }
+            SharingBadge(url: node.url)
             if isFolder && !isRenaming && (hovered || menuOpen) {
                 ZenMenuButton(systemName: "ellipsis", onOpenChange: { menuOpen = $0 }, items: menuItems)
                     .help("More")

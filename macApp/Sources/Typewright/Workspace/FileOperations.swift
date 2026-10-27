@@ -146,9 +146,8 @@ final class FileOperations {
                 var moves: [FileOp.Move] = []
                 for url in urls {
                     do {
-                        var trashed: NSURL?
-                        try FileManager.default.trashItem(at: url, resultingItemURL: &trashed)
-                        if let trashed { moves.append(.init(from: trashed as URL, to: url)) }
+                        let trashed = try await FileTrash.recycle(url)
+                        moves.append(.init(from: trashed, to: url))
                     } catch { PaletteDialog.error(error) }
                 }
                 workspace.forgetRemoved(moves.map(\.to))
@@ -168,7 +167,8 @@ final class FileOperations {
                 guard !FileManager.default.fileExists(atPath: move.to.path) else { _ = failMove(move); continue }
                 do {
                     try FileManager.default.createDirectory(at: move.to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try FileManager.default.moveItem(at: move.from, to: move.to)
+                    let from = move.from, to = move.to
+                    try await Task.detached(priority: .userInitiated) { try FileTrash.move(from, to: to) }.value
                     restored.append(move.to)
                 } catch { PaletteDialog.error(error) }
             }

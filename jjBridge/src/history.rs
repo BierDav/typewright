@@ -111,6 +111,10 @@ impl Repo {
                 _ => "modified",
             };
             let old_path = from.clone().unwrap_or_else(|| current.clone());
+            if kind == "deleted" && self.state.lfs_versions.get(current.as_internal_file_string())
+                .is_some_and(|versions| versions.iter().any(|v| v.hash.is_some() && v.jj_commit.as_deref() == Some(&commit.id().hex()))) {
+                continue;
+            }
             let old_value = if from.is_some() { before_tree.path_value(&old_path).block_on()? } else { before };
             let (added, removed) = line_counts(&content(&store, &old_path, &old_value)?, &content(&store, &current, &after)?);
             let time = commit.author().timestamp.timestamp.0 as f64 / 1000.0;
@@ -128,6 +132,9 @@ impl Repo {
             }
             versions.push(version);
         }
+        versions.extend(self.lfs_history(path));
+        versions.sort_by(|a, b| b["time"].as_f64().partial_cmp(&a["time"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+        versions.truncate(limit as usize);
         Ok(Value::Array(versions))
     }
 
@@ -141,6 +148,12 @@ impl Repo {
     }
 
     pub fn file_at(&self, commit: &str, path: &str) -> Result<Value> {
+        if commit.starts_with("lfs:") {
+            return Ok(match self.lfs_version_bytes(path, commit)? {
+                Some(bytes) => json!({"data": base64::engine::general_purpose::STANDARD.encode(bytes)}),
+                None => json!({"missing": true}),
+            });
+        }
         let (path, tree, value) = self.value_at(commit, path)?;
         let bytes = match value.as_resolved() {
             Some(None) | Some(Some(TreeValue::Tree(_))) => return Ok(json!({"missing": true})),
@@ -156,6 +169,13 @@ impl Repo {
     }
 
     pub fn restore_file(&mut self, commit: &str, path: &str) -> Result<Value> {
+        if commit.starts_with("lfs:") {
+            let bytes = self.lfs_version_bytes(path, commit)?.ok_or_else(|| anyhow!("file is absent in this version"))?;
+            self.commit("Edit")?;
+            crate::fsutil::write_atomic(&self.disk_path(&repo_path(path)?)?, &bytes, false)?;
+            let committed = self.commit(&format!("Restore {path}"))?;
+            return Ok(json!({"commit": committed.commit}));
+        }
         let (repo_path, tree, value) = self.value_at(commit, path)?;
         let Some(Some(TreeValue::File { id, executable, .. })) = value.as_resolved() else {
             bail!("{path} is not a file in {commit}");

@@ -52,6 +52,8 @@ pub(crate) struct State {
     #[serde(default)]
     pub lfs: BTreeMap<String, LfsFile>,
     #[serde(default)]
+    pub lfs_versions: BTreeMap<String, Vec<crate::lfs_history::Version>>,
+    #[serde(default)]
     pub shares: BTreeMap<String, crate::nodes::ShareState>,
 }
 
@@ -350,6 +352,7 @@ impl Repo {
             self.write_excludes()?;
         }
         lfs_changed.extend(added);
+        lfs_changed.extend(self.record_lfs_versions(message, committed.as_deref())?);
         self.save_state()?;
         let mut changed = changed;
         for path in lfs_changed {

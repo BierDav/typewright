@@ -384,6 +384,7 @@ pub(crate) fn share_list(
     let mut out: Vec<serde_json::Value> = listed
         .into_iter()
         .map(|(id, mut info)| {
+            info["joined"] = json!(info["secret"].is_string());
             info["shared"] = json!(info["shared"].as_bool().unwrap_or(false) || info["secret"].is_string());
             if let Some(fields) = info.as_object_mut() {
                 fields.remove("secret");
@@ -425,9 +426,11 @@ mod tests {
         assert_eq!(list[0]["id"], "a");
         assert_eq!(list[0]["members"], json!(["d1"]));
         assert_eq!(list[0]["shared"], true);
+        assert_eq!(list[0]["joined"], false);
         assert_eq!(list[1]["name"], "Notes");
         assert_eq!(list[1]["kind"], "file");
         assert_eq!(list[1]["shared"], true);
+        assert_eq!(list[1]["joined"], true);
         assert!(list[1].get("secret").is_none());
     }
 }

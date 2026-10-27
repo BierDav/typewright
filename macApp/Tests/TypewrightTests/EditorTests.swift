@@ -151,6 +151,8 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(CommandPalette.score("file", "new file in sub"), 1)
         XCTAssertEqual(CommandPalette.score("nfs", "new file in sub"), 4)
         XCTAssertNil(CommandPalette.score("xyz", "new file"))
+        XCTAssertEqual(CommandPalette.score("Übung 2.typ", "U\u{0308}bung 2.typ"), 0)
+        XCTAssertEqual(CommandPalette.score("u\u{0308}bung 2", "Übung 2.typ"), 0)
     }
     func testFindsHexWithoutHash() {
         let text = "#set page(fill: rgb(\"DDD3C4\"))"

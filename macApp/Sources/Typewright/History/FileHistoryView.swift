@@ -69,11 +69,10 @@ struct FileHistoryView: View {
     }
 
     private var emptyDescription: String {
-        if FileHistory.isLFS(model.file) {
-            return "Large and binary files have no history; Typewright syncs them whole."
-        }
         if FileHistory.isAvailable(for: model.file) || workspace == nil {
-            return "Versions appear here a few seconds after the file changes."
+            return FileHistory.isLFS(model.file)
+                ? "Whole-file versions are saved after changes. Versions from before recording began aren't available."
+                : "Versions appear here a few seconds after the file changes."
         }
         if SpaceFolders.gitRepository(containing: model.file, below: SpaceRepository.shared.root) != nil {
             return SpaceFolders.gitRepositoryNote
@@ -114,6 +113,7 @@ struct FileHistoryView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .fixedSize()
+                    .disabled(!model.isText)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -214,6 +214,12 @@ struct FileHistoryView: View {
             restored = await repository.restore(model.file, from: version.commit)
         } else {
             // The version lived under an older name; its content goes to the file's current place.
+            switch await repository.commit("Edit") {
+            case .committed: break
+            case .busy, .failed:
+                failure = "The current version couldn't be saved. Try again in a moment."
+                return
+            }
             restored = false
             switch model.content {
             case .text(let text)?: restored = (try? Data(text.utf8).write(to: model.file, options: .atomic)) != nil
@@ -483,6 +489,10 @@ private struct VersionPreview: View {
                     .scaledToFit()
                     .padding(20)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if FileKind(url: URL(fileURLWithPath: name)) == .document {
+                DocumentPreview(url: URL(fileURLWithPath: name), data: data)
+            } else if let text = String(data: data, encoding: .utf8), !data.prefix(8000).contains(0) {
+                ScrollView { Text(text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).padding() }
             } else {
                 ContentUnavailableView("No Preview", systemImage: "doc",
                                        description: Text(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)))

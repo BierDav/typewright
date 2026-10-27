@@ -290,7 +290,7 @@ fn utc_offset_makes_days_local() {
 }
 
 #[test]
-fn lfs_files_stay_out_of_history() {
+fn lfs_files_stay_out_of_jj_trees() {
     let dir = tempfile::tempdir().unwrap();
     let mut repo = open(dir.path());
     repo.set_lfs_limit(100);

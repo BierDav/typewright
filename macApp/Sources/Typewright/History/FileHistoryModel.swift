@@ -194,7 +194,9 @@ final class FileHistoryModel {
         loadTask = Task {
             let content = await source.content(path, version.commit)
             let base: FileContent
-            if comparison == .current {
+            if case .data = content {
+                base = .missing
+            } else if comparison == .current {
                 base = currentText().map(FileContent.text) ?? .missing
             } else if let older {
                 base = await source.content(paths[older], versions[older].commit)

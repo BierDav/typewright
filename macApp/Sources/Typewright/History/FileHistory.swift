@@ -20,7 +20,7 @@ enum FileHistory {
         return repository.contains(file) && SpaceFolders.gitRepository(containing: file, below: repository.root) == nil
     }
 
-    /// Files the repository leaves untracked (over the LFS limit, or binary like the bridge's sniff), so they have no history.
+    /// Whole-file versions have previews instead of line diffs.
     static func isLFS(_ file: URL) -> Bool {
         let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         if Double(size) > SyncService.shared.lfsThresholdMB * 1_048_576 { return true }

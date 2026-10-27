@@ -18,6 +18,7 @@ struct AccountShare: Identifiable, Hashable {
     var members: [String] = []
     /// Shared with other accounts through an invite link.
     var shared = false
+    var joined = false
 }
 
 /// Where a share lives on this device: its path in the space repository.
@@ -236,6 +237,15 @@ final class SyncService {
     func isShared(_ url: URL) -> Bool {
         guard let id = shareID(for: url) else { return false }
         return accountShares.contains { $0.id == id && $0.shared }
+    }
+
+    func sharingIndicator(for url: URL) -> SharingIndicator? {
+        guard let path = repository.relativePath(of: url) else { return nil }
+        let shared = sharePaths.filter { share in accountShares.contains { $0.id == share.id && $0.shared } }
+        let exact = shared.first { $0.path == path }
+        guard let id = exact?.id ?? sharePlace(shares: shared, path: path)?.id,
+              let account = accountShares.first(where: { $0.id == id }) else { return nil }
+        return SharingIndicator(joined: account.joined, inherited: exact == nil)
     }
 
     func status(for url: URL) -> ShareStatus? {
@@ -571,6 +581,7 @@ final class SyncService {
             let kind: String?
             let members: [String]?
             let shared: Bool?
+            let joined: Bool?
         }
     }
 
@@ -584,7 +595,7 @@ final class SyncService {
         case "shares":
             accountShares = (event.shares ?? []).map {
                 AccountShare(id: $0.id, name: $0.name ?? "Space", kind: ShareKind(rawValue: $0.kind ?? "") ?? .space,
-                             members: $0.members ?? [], shared: $0.shared ?? false)
+                             members: $0.members ?? [], shared: $0.shared ?? false, joined: $0.joined ?? false)
             }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             // Removed from all devices elsewhere: stop here too, keeping the files.

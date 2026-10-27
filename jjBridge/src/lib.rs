@@ -12,6 +12,9 @@ mod ffi;
 mod fsutil;
 mod history;
 mod lfs;
+mod lfs_history;
+#[cfg(test)]
+mod lfs_history_tests;
 mod nodes;
 mod normalize;
 mod repo;

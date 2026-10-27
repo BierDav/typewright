@@ -70,6 +70,7 @@ impl Repo {
     /// timestamps. Returns (squashed, kept) counts over the chain.
     pub fn squash(&mut self, policy: &Policy) -> Result<(usize, usize)> {
         let repo = self.prepare()?;
+        self.prune_lfs_versions(policy)?;
         let name = self.workspace.workspace_name().to_owned();
         let wc = self.wc_commit(&repo)?;
         let mut chain = first_parent_chain(repo.as_ref(), &wc)?;

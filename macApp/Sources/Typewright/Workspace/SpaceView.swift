@@ -122,7 +122,7 @@ struct SpaceView: View {
             case .image?:
                 ImageFileView(controller: workspace.imagePreview)
             case .document?:
-                if let url = workspace.selectedFile { DocumentPreview(url: url).id(workspace.revision) }
+                if let url = workspace.selectedFile { DocumentPreview(url: url, revision: workspace.revision) }
             case .font?:
                 if let url = workspace.selectedFile {
                     FontPreview(url: url, initialOffset: workspace.fontOffset(for: url), onScroll: workspace.fontDidScroll)

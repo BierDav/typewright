@@ -33,11 +33,12 @@ struct CommitTiming: Equatable {
         lastChange = nil
     }
 
-    /// Whether a changed path counts: jj's own store and Finder's metadata don't.
+    /// Ignore history stores so snapshots don't trigger more snapshots.
     static func counts(_ path: String, root: String) -> Bool {
         guard path.hasPrefix(root + "/") else { return path == root }
         let relative = path.dropFirst(root.count + 1)
         if relative == ".jj" || relative.hasPrefix(".jj/") { return false }
+        if relative == ".git" || relative.hasPrefix(".git/") { return false }
         return !relative.hasSuffix(".DS_Store")
     }
 }

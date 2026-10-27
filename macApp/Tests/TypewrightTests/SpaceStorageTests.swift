@@ -64,14 +64,21 @@ final class SpaceStorageTests: XCTestCase {
         XCTAssertEqual(timing.deadline, t0.addingTimeInterval(6))
     }
 
-    func testIgnoresJJAndFinderMetadata() {
+    func testIgnoresJJGitAndFinderMetadata() {
         let root = "/repo"
         XCTAssertTrue(CommitTiming.counts("/repo/Thesis/main.typ", root: root))
         XCTAssertTrue(CommitTiming.counts("/repo", root: root))
         XCTAssertFalse(CommitTiming.counts("/repo/.jj", root: root))
         XCTAssertFalse(CommitTiming.counts("/repo/.jj/repo/op_store/x", root: root))
+        XCTAssertFalse(CommitTiming.counts("/repo/.git", root: root))
+        XCTAssertFalse(CommitTiming.counts("/repo/.git/HEAD", root: root))
+        XCTAssertFalse(CommitTiming.counts("/repo/.git/index.lock", root: root))
+        XCTAssertFalse(CommitTiming.counts("/repo/.git/objects/ab/cdef", root: root))
+        XCTAssertFalse(CommitTiming.counts("/repo/.git/refs/heads/main", root: root))
         XCTAssertFalse(CommitTiming.counts("/repo/Thesis/.DS_Store", root: root))
         XCTAssertTrue(CommitTiming.counts("/repo/.jjx/file", root: root))
+        XCTAssertTrue(CommitTiming.counts("/repo/.github/workflows/build.yml", root: root))
+        XCTAssertTrue(CommitTiming.counts("/repo/Thesis/.gitignore", root: root))
         XCTAssertFalse(CommitTiming.counts("/elsewhere/file", root: root))
     }
 

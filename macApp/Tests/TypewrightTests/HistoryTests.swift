@@ -99,7 +99,7 @@ final class HistoryTests: XCTestCase {
         let model = FileHistoryModel(
             file: URL(fileURLWithPath: "/r/S/logo.png"), path: "S/logo.png",
             source: .init(versions: { list }, content: { _, _ in .data(Data([0x89, 0x50])) }),
-            currentText: { nil }
+            currentText: { XCTFail("Whole-file versions must not read or diff the current text"); return nil }
         )
         await model.load()
         try await waitFor { model.content != nil }
