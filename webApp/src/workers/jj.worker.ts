@@ -4,7 +4,7 @@
 // and a journal of files being written, so a tab closed mid-call can't leave a file looking unchanged.
 import jspiUrl from "~/wasm/jj/jj_bridge.wasm?url";
 import asyncifyUrl from "~/wasm/jj/jj_bridge.asyncify.wasm?url";
-import { hasJSPI, type HostState, OpfsFS, unlocked, Wasi } from "~/lib/wasi";
+import { hasJSPI, type HostState, moveFile, OpfsFS, unlocked, Wasi } from "~/lib/wasi";
 
 export type Arg = string | number | null;
 export type Request =
@@ -71,7 +71,7 @@ async function readJSON<T>(name: string): Promise<T | null> {
   }
 }
 
-/** Replaces `name` atomically: a temp file moved over it. */
+/** Flushes the replacement before clearing the recovery journal. */
 async function writeAtomically(name: string, text: string) {
   const temp = await host!.getFileHandle(`${name}.tmp`, { create: true });
   const access = await unlocked(() => temp.createSyncAccessHandle());
@@ -83,7 +83,7 @@ async function writeAtomically(name: string, text: string) {
   } finally {
     access.close();
   }
-  await (temp as FileSystemFileHandle & { move(dir: FileSystemDirectoryHandle, name: string): Promise<void> }).move(host!, name);
+  await moveFile(temp, host!, host!, name);
 }
 
 function appendJournal(path: string) {

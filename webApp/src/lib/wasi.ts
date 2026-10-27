@@ -450,13 +450,7 @@ export class OpfsFS {
     }
     if (meta.kind === "file") {
       const handle = await fromParent.getFileHandle(name);
-      // OPFS moves files atomically, replacing the target; jj's op heads and working-copy state rely on that.
-      const movable = handle as FileSystemFileHandle & { move?: (dir: FileSystemDirectoryHandle, name: string) => Promise<void> };
-      if (movable.move) await unlocked(() => movable.move!(toParent, newName));
-      else {
-        await copyFile(handle, toParent, newName);
-        await fromParent.removeEntry(name);
-      }
+      await moveFile(handle, fromParent, toParent, newName);
       const cached = this.content.get(from);
       this.forget(from);
       // The target's old bytes must go even when the source wasn't cached (a temp file just written).
@@ -520,6 +514,16 @@ export class OpfsFS {
 
 function* parentsAndSelf(parts: string[]) {
   for (let i = 1; i <= parts.length; i++) yield parts.slice(0, i).join("/");
+}
+
+/** Uses an atomic move where supported; Firefox needs a copy before removing the source. */
+export async function moveFile(handle: FileSystemFileHandle, from: FileSystemDirectoryHandle, to: FileSystemDirectoryHandle, name: string) {
+  const movable = handle as FileSystemFileHandle & { move?: (dir: FileSystemDirectoryHandle, name: string) => Promise<void> };
+  if (movable.move) await unlocked(() => movable.move!(to, name));
+  else {
+    await copyFile(handle, to, name);
+    await from.removeEntry(handle.name);
+  }
 }
 
 async function copyFile(handle: FileSystemFileHandle, to: FileSystemDirectoryHandle, name: string) {

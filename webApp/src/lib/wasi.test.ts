@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { fakeOpfs } from "./fakeOpfs";
-import { type HostState, OpfsFS, type OpfsOptions, Wasi } from "./wasi";
+import { type HostState, moveFile, OpfsFS, type OpfsOptions, Wasi } from "./wasi";
 
 const RIGHTS_WRITE = 1n << 6n;
 const CREAT = 1;
@@ -183,4 +183,37 @@ test("cached contents stay under the cap", async () => {
   for (let i = 0; i < 50; i++) await h.create(`f${i}`, "x".repeat(1000));
   for (let i = 0; i < 50; i++) expect(await h.cat(`f${i}`)).toHaveLength(1000);
   expect(h.fs.cachedBytes).toBeLessThanOrEqual(10_000);
+});
+
+test("host state is replaced without FileSystemFileHandle.move", async () => {
+  const root = fakeOpfs();
+  const h = host(root);
+  await h.create("state.json", "old state with more bytes");
+  await h.create("state.json.tmp", "new state");
+  const temp = await root.getFileHandle("state.json.tmp");
+  Object.defineProperty(temp, "move", { value: undefined });
+  await moveFile(temp, root, root, "state.json");
+  expect(await (await (await root.getFileHandle("state.json")).getFile()).text()).toBe("new state");
+  await expect(root.getFileHandle("state.json.tmp")).rejects.toMatchObject({ name: "NotFoundError" });
+});
+
+test("a failed replacement keeps the source for recovery", async () => {
+  const root = fakeOpfs();
+  const h = host(root);
+  await h.create("state.json", "old state");
+  await h.create("state.json.tmp", "new state");
+  const temp = await root.getFileHandle("state.json.tmp");
+  Object.defineProperty(temp, "move", { value: undefined });
+  const target = await root.getFileHandle("state.json");
+  const getFileHandle = root.getFileHandle.bind(root);
+  Object.defineProperty(root, "getFileHandle", { value: async (name: string, options?: FileSystemGetFileOptions) => {
+    const handle = await getFileHandle(name, options);
+    if (name === "state.json") Object.defineProperty(handle, "createSyncAccessHandle", { value: async () => {
+      throw new DOMException("Disk full", "QuotaExceededError");
+    } });
+    return handle;
+  } });
+  await expect(moveFile(temp, root, root, "state.json")).rejects.toMatchObject({ name: "QuotaExceededError" });
+  expect(await (await temp.getFile()).text()).toBe("new state");
+  expect(await (await target.getFile()).text()).toBe("old state");
 });

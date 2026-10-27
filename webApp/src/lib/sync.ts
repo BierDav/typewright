@@ -213,7 +213,12 @@ export async function restart() {
   const run = ++generation;
   setSync({ status: jj.repository.status === "elsewhere" ? "elsewhere" : "starting", lastError: null });
   // Sync runs where the repository does: it exports and merges through it.
-  await jj.whenOpen();
+  try {
+    await jj.whenOpen();
+  } catch (err) {
+    if (run === generation) setSync({ status: "error", lastError: `Couldn't start syncing: ${(err as Error).message ?? err}` });
+    return;
+  }
   if (run !== generation) return;
   setSync("status", "starting");
   if (!navigator.locks) return start(account, fingerprint, run);

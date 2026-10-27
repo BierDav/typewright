@@ -121,7 +121,12 @@ function startWorker(): Worker {
       if (response.fatal) void restart();
     }
   };
-  w.onerror = (event) => console.error("jj worker:", event.message);
+  w.onerror = (event) => {
+    const error = new Error(event.message || "Couldn't load the repository worker");
+    for (const p of pending.values()) p.reject(error);
+    pending.clear();
+    console.error("jj worker:", error.message);
+  };
   worker = w;
   return w;
 }
@@ -184,7 +189,6 @@ async function open() {
     const value = await post({ op: "open", lfsLimit: lfsLimit(), stale });
     removeUnseen(stale);
     setRepository({ status: "open", mode: value?.mode ?? null });
-    opened();
     await refreshConflicts();
   } catch (err) {
     setRepository({ status: "failed", error: (err as Error).message });
@@ -192,12 +196,21 @@ async function open() {
 }
 
 let started = false;
-let opened: () => void = () => {};
-const openedOnce = new Promise<void>((resolve) => (opened = resolve));
-
-/** Resolves once this tab runs the repository (never, while another tab does). */
+/** Waits for this tab's repository, reporting startup failures to sync as well. */
 export function whenOpen(): Promise<void> {
-  return openedOnce;
+  return new Promise((resolve, reject) => {
+    createRoot((dispose) => {
+      createEffect(() => {
+        if (repository.status === "open") {
+          dispose();
+          resolve();
+        } else if (repository.status === "failed") {
+          dispose();
+          reject(new Error(repository.error ?? "Couldn't open the repository"));
+        }
+      });
+    });
+  });
 }
 
 /** Opens the repository in this tab once it holds the lock; until then status is "elsewhere". */
