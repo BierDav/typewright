@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Opens the history and conflict sheets of a space window from menus, the palette and the sidebar.
+/// Routes history and conflicts from menus, the palette and the sidebar.
 @MainActor
 enum FileHistory {
     static let showHistory = Notification.Name("FileHistoryShowHistory")
@@ -48,26 +48,25 @@ private struct SheetFile: Identifiable {
     var id: URL { url }
 }
 
-/// Presents the history and conflict sheets for `workspace` and keeps the conflict list fresh.
+/// Presents history in the palette and conflicts in a sheet for this workspace.
 struct HistoryPresenter: ViewModifier {
     let workspace: Workspace
-    @State private var history: SheetFile?
     @State private var conflict: SheetFile?
 
     func body(content: Content) -> some View {
         content
             .onReceive(NotificationCenter.default.publisher(for: FileHistory.showHistory)) { note in
                 guard note.object as? Workspace === workspace, let url = note.userInfo?["file"] as? URL else { return }
-                history = SheetFile(url: url)
+                if let state = Opener.shared.keyState, state.workspace === workspace {
+                    state.historyFile = url
+                    state.overlay = .palette(page: "file.history")
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: FileHistory.showConflict)) { note in
                 guard note.object as? Workspace === workspace, let url = note.userInfo?["file"] as? URL else { return }
                 conflict = SheetFile(url: url)
             }
             .task(id: workspace.root) { await SpaceRepository.shared.refreshConflicts() }
-            .sheet(item: $history) { file in
-                FileHistoryView(model: FileHistoryModel(file: file.url, workspace: workspace), workspace: workspace)
-            }
             .sheet(item: $conflict) { file in
                 ConflictResolveView(file: file.url, workspace: workspace)
             }

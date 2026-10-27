@@ -93,6 +93,20 @@ final class Opener {
         }
     }
 
+    func newFile(in state: WindowState? = nil) {
+        guard let state = state ?? keyState, let workspace = state.workspace else { return }
+        let folder = workspace.selectedFile.flatMap { workspace.isInSpace($0) ? $0.deletingLastPathComponent() : nil }
+            ?? workspace.root
+        state.ask(PalettePage(title: "New File in \(workspace.displayName(of: folder))",
+                              placeholder: "Name, e.g. chapter.typ", kind: .input(initial: "") { name in
+            withAnimation(.smooth(duration: 0.25)) {
+                if folder != workspace.root { workspace.expanded.insert(folder) }
+                workspace.createFile(in: folder, named: name)
+                state.setSpacesOpen(false)
+            }
+        }))
+    }
+
     func closeSpace() {
         keyState?.space = nil
     }
@@ -102,6 +116,7 @@ final class Opener {
         Popups.menuCommands = { [weak self] in
             let keys = KeyLayout.current.shortcuts
             return [
+                Popups.MenuCommand(keys: keys.newFile) { [weak self] in self?.newFile(in: self?.state(for: $0)) },
                 Popups.MenuCommand(keys: keys.palette) { [weak self] in self?.state(for: $0)?.overlay = .palette() },
                 Popups.MenuCommand(keys: keys.findInSpace) { [weak self] in self?.state(for: $0)?.overlay = .search(allSpaces: nil) },
                 Popups.MenuCommand(keys: keys.showSpaces) { [weak self] window in
@@ -123,6 +138,10 @@ final class Opener {
                 }
                 if keys.newWindow.matches(event) {
                     self.newWindow()
+                    return true
+                }
+                if keys.newFile.matches(event), let state = self.state(for: event.window), state.workspace != nil {
+                    self.newFile(in: state)
                     return true
                 }
                 if keys.openSpace.matches(event) {

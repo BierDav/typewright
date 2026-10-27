@@ -148,6 +148,8 @@ struct PalettePage {
     let title: String
     let placeholder: String
     let kind: Kind
+    var onSelect: ((String) -> Void)? = nil
+    var preview: (() -> AnyView)? = nil
 }
 
 /// Linear-style command menu: type to filter commands and files, arrows to move, Return to run.
@@ -166,6 +168,7 @@ struct CommandPalette: View {
     @FocusState private var focused: Bool
 
     private var page: PalettePage? { pages.last }
+    private var availableHeight: CGFloat { max(240, state.windowSize.height - 180) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -201,10 +204,17 @@ struct CommandPalette: View {
                 Divider()
                 list
             }
+            if let preview = page?.preview {
+                Divider()
+                preview().frame(height: min(260, availableHeight * 0.55))
+            }
             Divider()
             footer
         }
         .frame(width: 640)
+        .task(id: selectedItemID) {
+            if let id = selectedItemID { page?.onSelect?(id) }
+        }
         .onEscapeWhenUnfocused(back)
         // Swiping to the space overview or another space changes what the palette offers.
         .onChange(of: context) {
@@ -217,6 +227,9 @@ struct CommandPalette: View {
                 state.prompt = nil
                 prompted = true
                 pages = [prompt.page]
+            } else if startPage == "file.history", let file = state.historyFile, let workspace {
+                state.historyFile = nil
+                pages = [historyPage(file, workspace)]
             } else if let startPage, case .page(let next)? = rootItems.first(where: { $0.id == startPage })?.action {
                 pages = [next]
             }
@@ -229,6 +242,11 @@ struct CommandPalette: View {
     }
 
     // MARK: List
+
+    private var selectedItemID: String? {
+        let rows = items
+        return rows.indices.contains(selection) ? rows[selection].id : nil
+    }
 
     private var items: [PaletteItem] {
         guard case .list(let build)? = page?.kind ?? .list({ rootItems }) else { return [] }
@@ -317,7 +335,7 @@ struct CommandPalette: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(OverlayScrollers())
             }
-            .frame(height: 360)
+            .frame(height: page?.preview == nil ? min(360, availableHeight) : min(220, availableHeight * 0.45))
             .onChange(of: selection) { _, index in
                 if items.indices.contains(index) { proxy.scrollTo(items[index].id) }
             }
@@ -435,22 +453,23 @@ struct CommandPalette: View {
                                                      workspace?.selectedFile?.deletingLastPathComponent().lastPathComponent,
                                                      workspace?.name] + spaces.map(\.lastPathComponent))
         let editor = inOverview ? nil : workspace?.find.textView
-        let editorUndo = editor?.undoManager
-        let undoInEditor = state.deletionNotice == nil && (editor?.isRenaming == true || editorUndo?.canUndo == true)
-        let undo = undoInEditor ? editorUndo : state.undoManager
+        let undo = ActionUndoManager.preferred([editor?.undoManager, state.undoManager], redo: false)
+        let redo = ActionUndoManager.preferred([editor?.undoManager, state.undoManager], redo: true)
         items.append(PaletteItem(id: "edit.undo", title: undo?.undoMenuItemTitle ?? "Undo", icon: "arrow.uturn.backward",
-                                 shortcut: "⌘Z", section: "Edit", keywords: ["undo"],
-                                 action: .run {
-                                     if state.undoDeletion() { return }
-                                     if undoInEditor { editor?.undo(nil) } else { undo?.undo() }
-                                 }))
-        let redoInEditor = editor?.isRenaming == true || editorUndo?.canRedo == true
-        let redo = redoInEditor ? editorUndo : state.undoManager
+                                 shortcut: "⌘Z", section: "Edit", action: .run {
+            if state.undoDeletion() { return }
+            if let editor { editor.undo(nil) } else { state.undoManager.undo() }
+        }))
         items.append(PaletteItem(id: "edit.redo", title: redo?.redoMenuItemTitle ?? "Redo", icon: "arrow.uturn.forward",
-                                 shortcut: "⇧⌘Z", section: "Edit", keywords: ["redo"],
-                                 action: .run {
-                                     if redoInEditor { editor?.redo(nil) } else { redo?.redo() }
-                                 }))
+                                 shortcut: "⇧⌘Z", section: "Edit", action: .run {
+            if let editor { editor.redo(nil) } else { state.undoManager.redo() }
+        }))
+        items.append(PaletteItem(id: "edit.undo.history", title: "Undo History…", icon: "list.bullet",
+                                 section: "Edit", keywords: ["undo", "changes"],
+                                 action: .page(undoPage(editor: editor, redo: false))))
+        items.append(PaletteItem(id: "edit.redo.history", title: "Redo History…", icon: "list.bullet",
+                                 section: "Edit", keywords: ["redo", "changes"],
+                                 action: .page(undoPage(editor: editor, redo: true))))
         items += fontItems
         items += settingsItems
         items += [
@@ -471,6 +490,70 @@ struct CommandPalette: View {
                         action: .run { Opener.shared.newWindow() }),
         ]
         return items
+    }
+
+    private func historyPage(_ file: URL, _ ws: Workspace) -> PalettePage {
+        let model = FileHistoryModel(file: file, workspace: ws)
+        return PalettePage(title: "History of \(file.lastPathComponent)", placeholder: "Filter versions…", kind: .list {
+            model.versions.map { version in
+                PaletteItem(id: version.id, title: version.description,
+                            subtitle: version.time.formatted(date: .abbreviated, time: .shortened),
+                            icon: "clock.arrow.circlepath", section: FileHistoryView.dayTitle(Calendar.current.startOfDay(for: version.time)),
+                            action: .stay { model.selection = version.id })
+            }
+        }, onSelect: { model.selection = $0 }, preview: {
+            AnyView(FileHistoryView(model: model, workspace: ws, compact: true))
+        })
+    }
+
+    private func undoPage(editor: TypstTextView?, redo: Bool) -> PalettePage {
+        let selection = UndoPreviewSelection()
+        typealias Source = (journal: UndoJournal, text: () -> String?, run: () -> Void, section: String)
+        var sources: [Source] = []
+        if let editor {
+            let journal: UndoJournal?
+            if let live = workspace?.live, live.isActive { journal = live.journal }
+            else { journal = (editor.undoManager as? ActionUndoManager)?.journal }
+            if let journal {
+                sources.append((journal, { editor.string }, {
+                    if let live = workspace?.live, live.isActive {
+                        _ = live.undo(redo: redo)
+                    } else if redo { editor.undoManager?.redo() } else { editor.undoManager?.undo() }
+                    editor.onDidUndo?(redo, editor.string)
+                }, "Editor"))
+            }
+        }
+        sources.append((state.undoManager.journal, { nil }, {
+            state.dismissDeletion()
+            if redo { state.undoManager.redo() } else { state.undoManager.undo() }
+        }, "Files and Spaces"))
+        func entries(_ source: Source) -> [UndoJournal.Entry] {
+            Array((redo ? source.journal.redo : source.journal.undo).reversed())
+        }
+        return PalettePage(title: redo ? "Redo History" : "Undo History", placeholder: "Filter changes…", kind: .list {
+            sources.flatMap { source in
+                entries(source).enumerated().map { offset, entry in
+                    PaletteItem(id: entry.id.uuidString, title: "\(redo ? "Redo" : "Undo") \(entry.name)",
+                                subtitle: offset == 0 ? "Next change" : "Includes \(offset + 1) changes",
+                                icon: redo ? "arrow.uturn.forward" : "arrow.uturn.backward", section: source.section,
+                                action: .run { for _ in 0...offset { source.run() } })
+                }
+            }
+        }, onSelect: { id in
+            for source in sources {
+                guard let entry = entries(source).first(where: { $0.id.uuidString == id }) else { continue }
+                selection.detail = entry.detail ?? entry.name
+                if source.section == "Editor", workspace?.live.isActive == true {
+                    selection.detail = "Original edit on this device"
+                    selection.before = redo ? entry.before : entry.after
+                } else {
+                    selection.before = source.text() ?? (redo ? entry.before : entry.after)
+                }
+                selection.after = redo ? entry.after : entry.before
+            }
+        }, preview: {
+            AnyView(UndoChangePreview(selection: selection))
+        })
     }
 
     /// A space on the way to its confirmation; external ones leave the list instead of the library.
@@ -494,7 +577,8 @@ struct CommandPalette: View {
         let here = file?.deletingLastPathComponent().standardizedFileURL ?? ws.root
         for (kind, icon) in [("File", "doc.badge.plus"), ("Folder", "folder.badge.plus")] {
             items.append(PaletteItem(id: "new.\(kind).here", title: "New \(kind) in \(ws.displayName(of: here))",
-                                     icon: icon, section: "Create", action: .page(namePage(kind, in: here, ws))))
+                                     icon: icon, shortcut: kind == "File" ? keys.newFile.display : nil,
+                                     section: "Create", action: .page(namePage(kind, in: here, ws))))
             if here != ws.root {
                 items.append(PaletteItem(id: "new.\(kind).root", title: "New \(kind) in \(ws.name)",
                                          icon: icon, section: "Create", action: .page(namePage(kind, in: ws.root, ws))))
@@ -533,7 +617,7 @@ struct CommandPalette: View {
             if FileHistory.isAvailable(for: file) {
                 items.append(PaletteItem(id: "file.history", title: "Show History of \(name)…", icon: "clock.arrow.circlepath",
                                          section: "File", keywords: ["versions", "restore", "diff", "time machine"],
-                                         action: .run { FileHistory.show(file, in: ws) }))
+                                         action: .page(historyPage(file, ws))))
             }
             if SpaceRepository.shared.hasConflict(file) {
                 items.append(PaletteItem(id: "file.conflict", title: "Resolve Conflict in \(name)…", icon: "arrow.triangle.merge",

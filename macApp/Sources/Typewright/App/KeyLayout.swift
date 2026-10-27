@@ -265,7 +265,8 @@ struct KeyBinding: Equatable {
 /// The shortcuts of a layout; each one is used by the menus, the editor and the palette's hints.
 struct Shortcuts: Equatable {
     var settings = KeyBinding(.character(","), .command)
-    var newWindow = KeyBinding(.character("n"), .command)
+    var newFile = KeyBinding(.character("n"), .command)
+    var newWindow = KeyBinding(.character("n"), [.command, .shift])
     var openSpace = KeyBinding(.character("o"), .command)
     var moveFile = KeyBinding(.character("i"), [.command, .option])
     var closeSpace = KeyBinding(.character("w"), [.command, .control])
@@ -306,7 +307,7 @@ struct Shortcuts: Equatable {
 
 /// A command the layouts bind, as listed in the layout editor.
 enum ShortcutCommand: String, CaseIterable, Identifiable {
-    case settings, newWindow, openSpace, closeSpace, palette, showSpaces, sidebar
+    case settings, newFile, newWindow, openSpace, closeSpace, palette, showSpaces, sidebar
     case moveFile, findInSpace
     case back, forward
     case togglePreview, previewCurrentFile
@@ -321,6 +322,7 @@ enum ShortcutCommand: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .settings: return "Settings…"
+        case .newFile: return "New File"
         case .newWindow: return "New Window"
         case .openSpace: return "Link Folder as Space…"
         case .closeSpace: return "Close Space"
@@ -362,7 +364,7 @@ enum ShortcutCommand: String, CaseIterable, Identifiable {
     /// The group it's listed under in the layout editor.
     var section: String {
         switch self {
-        case .settings, .newWindow, .openSpace, .closeSpace, .palette, .showSpaces, .sidebar: return "App"
+        case .settings, .newFile, .newWindow, .openSpace, .closeSpace, .palette, .showSpaces, .sidebar: return "App"
         case .moveFile, .findInSpace: return "Files"
         case .back, .forward: return "Navigation"
         case .togglePreview, .previewCurrentFile: return "Preview"
@@ -378,6 +380,7 @@ enum ShortcutCommand: String, CaseIterable, Identifiable {
     var keyPath: WritableKeyPath<Shortcuts, KeyBinding> {
         switch self {
         case .settings: return \.settings
+        case .newFile: return \.newFile
         case .newWindow: return \.newWindow
         case .openSpace: return \.openSpace
         case .closeSpace: return \.closeSpace
@@ -533,6 +536,7 @@ struct KeyLayout: Identifiable, Equatable {
         let keys = current.shortcuts
         let items: [(title: String, binding: KeyBinding)] = [
             ("Settings…", keys.settings),
+            ("New File", keys.newFile),
             ("New Window", keys.newWindow),
             ("Link Folder as Space…", keys.openSpace),
             ("Move File…", keys.moveFile),

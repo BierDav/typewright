@@ -65,6 +65,8 @@ struct LiveResult: Decodable {
     var cursors: [Cursor] = []
     var peers = 0
     var undone = false
+    var undoCount: Int?
+    var redoCount: Int?
 }
 
 /// Syncs shares (spaces, or any folder or file in one) across the devices of the account and with the people they

@@ -93,6 +93,9 @@ struct AppCommands: Commands {
                 .keyboardShortcut(keys.settings)
         }
         CommandGroup(replacing: .newItem) {
+            Button("New File…") { Opener.shared.newFile() }
+                .keyboardShortcut(keys.newFile)
+                .disabled(Opener.shared.keyState?.workspace == nil)
             Button("New Window") { Opener.shared.newWindow() }
                 .keyboardShortcut(keys.newWindow)
             Button("New Space") { Opener.shared.newSpace(in: Opener.shared.keyState) }

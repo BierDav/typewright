@@ -8,37 +8,30 @@ struct FileHistoryView: View {
     @State private var model: FileHistoryModel
     /// The space the file belongs to; nil in previews.
     let workspace: Workspace?
+    var compact = false
     @Environment(\.dismiss) private var dismiss
-    @State private var confirmingRestore = false
-    @State private var failure: String?
 
-    init(model: FileHistoryModel, workspace: Workspace?) {
+    init(model: FileHistoryModel, workspace: Workspace?, compact: Bool = false) {
         _model = State(initialValue: model)
         self.workspace = workspace
+        self.compact = compact
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                versionList.frame(width: 260)
-                Divider()
+                if !compact {
+                    versionList.frame(width: 260)
+                    Divider()
+                }
                 detail.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             Divider()
             footer
         }
-        .frame(minWidth: 820, idealWidth: 960, minHeight: 520, idealHeight: 640)
+        .frame(minWidth: compact ? 0 : 820, idealWidth: compact ? 640 : 960,
+               minHeight: compact ? 0 : 520, idealHeight: compact ? 260 : 640)
         .task { await model.load() }
-        .confirmationDialog("Restore “\(model.file.lastPathComponent)” to this version?", isPresented: $confirmingRestore) {
-            Button("Restore") { Task { await restore() } }
-        } message: {
-            Text("The current content stays in the history, so you can go back to it.")
-        }
-        .alert("Couldn't Restore the File", isPresented: .init(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(failure ?? "")
-        }
     }
 
     // MARK: - Versions
@@ -91,7 +84,10 @@ struct FileHistoryView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if let version = model.selected {
+        if model.selected == nil, !model.isLoading {
+            ContentUnavailableView("No History", systemImage: "clock.arrow.circlepath",
+                                   description: Text(emptyDescription))
+        } else if let version = model.selected {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -154,10 +150,18 @@ struct FileHistoryView: View {
                 .disabled(!hasContent)
                 .help("Open this version in its default app, without changing the file")
             Spacer()
-            Button("Restore…") { confirmingRestore = true }
+            Button("Restore…") {
+                guard PaletteDialog.choose("Restore “\(model.file.lastPathComponent)” to this version?",
+                                           detail: "The current content stays in history. Undo brings it back too.",
+                                           choices: [.init(id: "restore", title: "Restore", icon: "clock.arrow.circlepath"),
+                                                     .init(id: "cancel", title: "Cancel")]) == "restore" else { return }
+                Task { await restore() }
+            }
                 .disabled(!hasContent || workspace == nil)
-            Button("Done") { dismiss() }
-                .keyboardShortcut(.defaultAction)
+            if !compact {
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
         }
         .padding(12)
     }
@@ -206,37 +210,17 @@ struct FileHistoryView: View {
 
     private func restore() async {
         guard let version = model.selected, let workspace else { return }
-        // Unsaved edits would otherwise be written over the restored file.
+        let data: Data
+        switch model.content {
+        case .text(let text)?: data = Data(text.utf8)
+        case .data(let bytes)?: data = bytes
+        default: return
+        }
         workspace.flushSaves()
-        let repository = SpaceRepository.shared
-        var restored: Bool
-        if model.path(of: version) == model.path {
-            restored = await repository.restore(model.file, from: version.commit)
-        } else {
-            // The version lived under an older name; its content goes to the file's current place.
-            switch await repository.commit("Edit") {
-            case .committed: break
-            case .busy, .failed:
-                failure = "The current version couldn't be saved. Try again in a moment."
-                return
-            }
-            restored = false
-            switch model.content {
-            case .text(let text)?: restored = (try? Data(text.utf8).write(to: model.file, options: .atomic)) != nil
-            case .data(let data)?: restored = (try? data.write(to: model.file, options: .atomic)) != nil
-            default: break
-            }
-            if restored {
-                await repository.commit("Restore \(model.path)")
-                workspace.refreshFromDisk()
-            }
-        }
-        guard restored else {
-            failure = "The version couldn't be written back. Try again in a moment."
-            return
-        }
-        // `restore` reloads editors through `didCommit`.
-        dismiss()
+        workspace.fileOps.perform(.write(model.file, data), name: "Restore \(model.file.lastPathComponent)",
+                                  message: "Restore \(model.path) from \(version.commit.prefix(12))")
+        await workspace.fileOps.settle()
+        if compact { await model.load() } else { dismiss() }
     }
 }
 

@@ -25,7 +25,13 @@ final class WindowState {
     }
     /// The command palette or full text search over the window.
     var overlay: WindowOverlay? {
-        didSet { if overlay != nil { Popups.dismiss(in: window) } }
+        didSet {
+            if overlay != nil {
+                (workspace?.find.textView?.undoManager as? ActionUndoManager)?.checkpoint()
+                undoManager.checkpoint()
+                Popups.dismiss(in: window)
+            }
+        }
     }
     /// A question shown as a palette page instead of an alert; `overlay` names it by `id`.
     @ObservationIgnored var prompt: (id: String, page: PalettePage)?
@@ -64,6 +70,7 @@ final class WindowState {
     var pendingReveal: SourceLocation?
     /// A file to select once the window opened its space, keeping its saved caret.
     var pendingFile: URL?
+    var historyFile: URL?
     var pendingSession: WorkspaceSession?
     var renameNewSpace = false
     var relocatingSpace = false
@@ -96,7 +103,7 @@ final class WindowState {
     /// The space shown, for menu commands.
     @ObservationIgnored weak var workspace: Workspace?
     /// File tree and space changes; the editor's text has its own.
-    @ObservationIgnored let undoManager = UndoManager()
+    @ObservationIgnored let undoManager = ActionUndoManager()
     /// Live selector progress while a two-finger swipe drives it.
     var swipe: CGFloat?
     /// Whether the selector overlay is in the view tree; it stays a moment after closing to animate out.

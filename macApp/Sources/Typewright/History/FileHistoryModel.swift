@@ -163,6 +163,7 @@ final class FileHistoryModel {
         paths = FileVersion.paths(of: versions, current: path)
         isLoading = false
         if selection == nil || selected == nil { selection = versions.first?.id }
+        else { loadSelection() }
     }
 
     /// The selection's line diff, when both sides are text (a missing side counts as empty).
@@ -181,6 +182,9 @@ final class FileHistoryModel {
 
     private func loadSelection() {
         loadTask?.cancel()
+        content = nil
+        base = nil
+        hunks = nil
         expandedFolds = []
         guard let version = selected, let index = versions.firstIndex(of: version) else {
             content = nil

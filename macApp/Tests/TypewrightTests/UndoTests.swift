@@ -121,4 +121,84 @@ final class UndoTests: XCTestCase {
         stepBack(tv)
         XCTAssertEqual(tv.string, text)
     }
+    func testEditorCommandsRedoRepeatedly() {
+        let cases: [(String, (TypstTextView, CodeEditor.Coordinator) -> Void)] = [
+            ("a\nb", { tv, _ in tv.duplicateLine() }),
+            ("a\nb", { tv, _ in tv.deleteLine() }),
+            ("#let w = 15mm\n#box(width: w)", { tv, c in
+                tv.setSelectedRange(NSRange(location: 6, length: 0))
+                c.inlineVariable()
+            })
+        ]
+        for (original, edit) in cases {
+            let (tv, c) = setUp(original)
+            event { edit(tv, c) }
+            let changed = tv.string
+            XCTAssertNotEqual(changed, original)
+            for _ in 0..<3 {
+                stepBack(tv)
+                XCTAssertEqual(tv.string, original)
+                XCTAssertTrue(undo.canRedo)
+                undo.redo()
+                XCTAssertEqual(tv.string, changed)
+            }
+        }
+    }
+
+    func testJournalTracksNativeTextUndoAndRedo() {
+        let (tv, c) = setUp("a\nb")
+        event { tv.duplicateLine() }
+        XCTAssertEqual(c.textUndo.journal.undo.count, 1)
+        XCTAssertEqual(c.textUndo.journal.undo.last?.before, "a\nb")
+        XCTAssertEqual(c.textUndo.journal.undo.last?.after, "a\nb\nb")
+        stepBack(tv)
+        XCTAssertEqual(c.textUndo.journal.redo.count, 1)
+        undo.redo()
+        XCTAssertEqual(c.textUndo.journal.undo.count, 1)
+        XCTAssertTrue(c.textUndo.journal.redo.isEmpty)
+    }
+
+    func testNewEditAfterUndoClearsRedoJournal() {
+        let (tv, c) = setUp("a\nb")
+        event { tv.duplicateLine() }
+        stepBack(tv)
+        event { tv.insertText("x", replacementRange: NSRange(location: 0, length: 0)) }
+        XCTAssertFalse(undo.canRedo)
+        XCTAssertTrue(c.textUndo.journal.redo.isEmpty)
+    }
+
+    func testCommittedRenameRedoesEveryStep() {
+        let (tv, c) = setUp("#box(width: 15mm)")
+        select(tv, "15mm")
+        event { c.extractVariable() }
+        let extracted = tv.string
+        event { tv.insertText("w", replacementRange: tv.selectedRange()) }
+        c.textUndo.checkpoint()
+        event { _ = c.textView(tv, doCommandBy: #selector(NSResponder.insertNewline(_:))) }
+        let renamed = tv.string
+        stepBack(tv)
+        stepBack(tv)
+        undo.redo()
+        XCTAssertEqual(tv.string, extracted)
+        undo.redo()
+        XCTAssertEqual(tv.string, renamed)
+    }
+
+    func testTypingJournalMatchesNativeUndo() {
+        let (tv, c) = setUp("")
+        undo.groupsByEvent = true
+        tv.insertText("a", replacementRange: tv.selectedRange())
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        tv.insertText("b", replacementRange: tv.selectedRange())
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        c.textUndo.checkpoint()
+        let preview = c.textUndo.journal.undo.last?.before
+        stepBack(tv)
+        XCTAssertEqual(tv.string, preview)
+        XCTAssertEqual(c.textUndo.journal.redo.last?.after, "ab")
+        XCTAssertEqual(c.textUndo.journal.undo.isEmpty, !undo.canUndo)
+        undo.redo()
+        XCTAssertEqual(tv.string, "ab")
+    }
+
 }

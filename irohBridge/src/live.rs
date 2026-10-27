@@ -131,6 +131,10 @@ impl Session {
                 }
             }
         });
+        // Opening a file establishes the baseline, rather than an undoable insertion.
+        if !base.is_empty() {
+            text.insert(&mut doc.transact_mut(), 0, &base);
+        }
         // yrs has no default clock in browsers, so both platforms use the same one.
         let undo_options = undo::Options {
             capture_timeout_millis: 500,
@@ -526,6 +530,8 @@ pub(crate) fn sync(inner: &Inner, space: &str, path: &str, text: &str, selection
         "cursors": cursors,
         "peers": session.peers.len(),
         "undone": local.unwrap_or(false),
+        "undoCount": session.undo.undo_stack().len(),
+        "redoCount": session.undo.redo_stack().len(),
     })
 }
 
@@ -541,6 +547,18 @@ mod tests {
 
     fn take_edits(session: &Session) -> Vec<(u32, u32, String)> {
         std::mem::take(&mut *session.edits.lock().unwrap())
+    }
+
+    #[test]
+    fn opening_text_is_not_undoable() {
+        let mut a = session("existing text");
+        assert!(!a.undo.undo_blocking());
+        assert_eq!(a.string(), "existing text");
+        a.set("edited text");
+        assert!(a.undo.undo_blocking());
+        assert_eq!(a.string(), "existing text");
+        assert!(a.undo.redo_blocking());
+        assert_eq!(a.string(), "edited text");
     }
 
     #[test]
@@ -582,6 +600,13 @@ mod tests {
         assert!(a.undo.undo_blocking());
         assert_eq!(a.string(), "zero one");
         assert_eq!(take_edits(&a), vec![(8, 4, String::new())]);
+        assert_eq!(a.undo.undo_stack().len(), 0);
+        assert_eq!(a.undo.redo_stack().len(), 1);
+        a.apply(&b.set("zero one two!").unwrap());
+        assert!(a.undo.redo_blocking());
+        assert_eq!(a.string(), "zero one two!");
+        assert_eq!(a.undo.undo_stack().len(), 1);
+        assert_eq!(a.undo.redo_stack().len(), 0);
     }
 
     #[test]

@@ -49,6 +49,7 @@ final class SyncIdentity: NSObject {
 
     override private init() {
         super.init()
+        guard !SpaceRepository.isTestHost else { return }
         account = Self.loadSecret()
         kind = account == nil ? nil : UserDefaults.standard.string(forKey: Self.kindKey).flatMap(Kind.init)
         // Recovery keys of old builds had no kind; they sign out once.

@@ -22,6 +22,8 @@ struct RemoteCursor: Equatable {
 final class LiveEditing {
     /// Names of the other devices with the file open.
     private(set) var participants: [String] = []
+    let journal = UndoJournal()
+    @ObservationIgnored private var lastText: String?
 
     /// Set by the editor: applies remote edits in order, keeping the caret in place.
     @ObservationIgnored var applyEdits: (([LiveResult.Edit]) -> Bool)?
@@ -69,6 +71,7 @@ final class LiveEditing {
         // The bridge keeps one session per file; another window with it open already shares it.
         guard Self.sessions.insert(root.standardizedFileURL.path + "/" + path).inserted else { return }
         self.path = path
+        lastText = text
         selection = NSRange(location: 0, length: 0)
         SyncService.shared.liveOpen(root: root, path: path, text: text)
     }
@@ -78,6 +81,9 @@ final class LiveEditing {
         Self.sessions.remove(root.standardizedFileURL.path + "/" + path)
         SyncService.shared.liveClose(root: root, path: path)
         self.path = nil
+        lastText = nil
+        journal.undo = []
+        journal.redo = []
         participants = []
         showCursors?([])
     }
@@ -92,30 +98,51 @@ final class LiveEditing {
         if !isApplying { sync() }
     }
 
-    /// Undoes or redoes this device's own edits only, leaving the others' in place; false when not live.
+    /// False lets the window handle file changes when this session has nothing to undo or redo.
     func undo(redo: Bool) -> Bool {
         guard isActive else { return false }
-        sync(step: redo ? 2 : 1)
-        return true
+        return sync(step: redo ? 2 : 1)
     }
 
-    private func sync(step: Int32 = 0) {
-        guard let path, let result = SyncService.shared.liveSync(root: root, path: path, text: currentText(),
-                                                                 selection: selection, step: step) else { return }
+    @discardableResult
+    private func sync(step: Int32 = 0) -> Bool {
+        let mine = currentText()
+        let before = lastText ?? mine
+        guard let path, let result = SyncService.shared.liveSync(root: root, path: path, text: mine,
+                                                                 selection: selection, step: step) else { return false }
         if let adopted = result.adopted {
             // Another device's session was first; this device's edits since opening merge into it.
             let mine = currentText()
             let merged = merge3(base: adopted.base, local: mine, remote: adopted.theirs)
             apply([Self.edit(from: mine, to: merged.conflicts == 0 ? merged.text : adopted.theirs)])
+            journal.undo = []
+            journal.redo = []
+            lastText = currentText()
             sync()
-            return
+            return true
         }
         apply(result.edits)
+        if step == 1, result.undone, var entry = journal.undo.popLast() {
+            entry.order = ProcessInfo.processInfo.systemUptime
+            journal.redo.append(entry)
+        } else if step == 2, result.undone, var entry = journal.redo.popLast() {
+            entry.order = ProcessInfo.processInfo.systemUptime
+            journal.undo.append(entry)
+        } else if before != mine, step == 0 {
+            if let count = result.undoCount, count > journal.undo.count {
+                journal.undo.append(.init(name: "Edit", before: before, after: mine, detail: nil, target: nil))
+            } else if !journal.undo.isEmpty {
+                journal.undo[journal.undo.count - 1].after = mine
+            }
+            journal.redo = []
+        }
+        lastText = currentText()
         let names = result.cursors.map(\.name)
         if names != participants { participants = names }
         showCursors?(result.cursors.map {
             RemoteCursor(device: $0.device, name: $0.name, range: NSRange(location: $0.location, length: $0.length))
         })
+        return step == 0 || result.undone
     }
 
     private func apply(_ edits: [LiveResult.Edit]) {

@@ -18,6 +18,7 @@ enum FileOp {
     case restore([DeletedItem])
     case restoreExternal([FileOp.Move])
     case recover(URL, Data)
+    case write(URL, Data)
     case listSpace(URL, Bool)
     case renameSpace(Move)
     case deleteSpace(URL)
@@ -40,6 +41,7 @@ final class FileOperations {
     /// The window's; set when the space is shown.
     weak var undoManager: UndoManager?
     private var chain: Task<Void, Never>?
+    private var queued = 0
     private var repository: SpaceRepository { .shared }
 
     init(workspace: Workspace?) { self.workspace = workspace }
@@ -49,7 +51,12 @@ final class FileOperations {
 
     /// Runs `op` and registers its undo as `name` (the Edit menu's "Undo <name>").
     func perform(_ op: FileOp, name: String, message: String, undoManager: UndoManager? = nil) {
-        run(FileOpBox(op), name: name, message: message, undoMessage: "Undo \(message)", manager: undoManager ?? self.undoManager)
+        let manager = undoManager ?? self.undoManager
+        if case .write(let url, let data) = op, !data.contains(0), let after = String(data: data, encoding: .utf8) {
+            (manager as? ActionUndoManager)?.prepare(text: try? String(contentsOf: url, encoding: .utf8),
+                                                   after: after, detail: message, target: self)
+        }
+        run(FileOpBox(op), name: name, message: message, undoMessage: "Undo \(message)", manager: manager)
     }
 
     /// For ops that already happened synchronously (so the UI could follow at once): commits and registers `inverse`.
@@ -69,7 +76,13 @@ final class FileOperations {
     }
 
     /// Waits for every queued op, for tests and before quitting.
-    func settle() async { await chain?.value }
+    func settle() async {
+        while true {
+            let generation = queued
+            await chain?.value
+            if generation == queued { return }
+        }
+    }
 
     private func run(_ box: FileOpBox, name: String, message: String, undoMessage: String, manager: UndoManager?) {
         let inverse = FileOpBox()
@@ -83,6 +96,7 @@ final class FileOperations {
 
     private func register(_ box: FileOpBox, name: String, message: String, undoMessage: String, manager: UndoManager?) {
         guard let manager else { return }
+        (manager as? ActionUndoManager)?.prepare(detail: undoMessage, target: self)
         manager.registerUndo(withTarget: self) { ops in
             ops.run(box, name: name, message: message, undoMessage: undoMessage, manager: manager)
         }
@@ -90,6 +104,7 @@ final class FileOperations {
     }
 
     private func enqueue(_ work: @escaping @MainActor () async -> Void) {
+        queued += 1
         let previous = chain
         chain = Task { @MainActor in
             await previous?.value
@@ -174,6 +189,23 @@ final class FileOperations {
             }
             workspace?.reloadTree()
             return restored.isEmpty ? nil : .delete(restored)
+        case .write(let url, let data):
+            workspace?.flushSaves()
+            switch await repository.commit("Edit") {
+            case .committed: break
+            case .busy, .failed:
+                alert("Couldn't save the current version", "Try restoring again in a moment.")
+                return nil
+            }
+            do {
+                let previous = FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: url, options: .atomic)
+                await commit(message)
+                workspace?.refreshFromDisk()
+                if let previous { return .write(url, previous) }
+                return .delete([url])
+            } catch { PaletteDialog.error(error); return nil }
         case .recover(let url, let data):
             do {
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -256,31 +288,41 @@ struct PastedImage {
     let document: URL
     let reference: String
     /// Set once undo took the reference out and the file went with it.
-    var removed: [DeletedItem]?
+    var removed: FileOp?
     var pending = false
+    var referencePresent = true
 }
 
 extension Workspace {
     /// Undo in the text took a pasted image's reference out: the file goes too; redo brings both back.
     func editorDidUndo(redo: Bool, text: String) {
         guard let document = selectedFile else { return }
-        for index in pastedImages.indices where pastedImages[index].document == document && !pastedImages[index].pending {
-            let image = pastedImages[index]
-            let present = text.contains(image.reference)
-            let message = SpaceRepository.shared.messagePath(image.file)
-            if !redo, !present, image.removed == nil, FileManager.default.fileExists(atPath: image.file.path) {
-                pastedImages[index].pending = true
-                fileOps.apply(.delete([image.file]), message: "Undo Add \(message)") { [weak self] inverse in
-                    guard let self, let i = self.pastedImages.firstIndex(where: { $0.file == image.file }) else { return }
-                    self.pastedImages[i].pending = false
-                    if case .restore(let items)? = inverse { self.pastedImages[i].removed = items }
-                }
-            } else if redo, present, let items = image.removed {
-                pastedImages[index].pending = true
-                fileOps.apply(.restore(items), message: "Add \(message)") { [weak self] _ in
-                    guard let self, let i = self.pastedImages.firstIndex(where: { $0.file == image.file }) else { return }
-                    self.pastedImages[i].pending = false
+        for index in pastedImages.indices where pastedImages[index].document == document {
+            pastedImages[index].referencePresent = text.contains(pastedImages[index].reference)
+            reconcilePastedImage(at: index)
+        }
+    }
+
+    private func reconcilePastedImage(at index: Int) {
+        let image = pastedImages[index]
+        guard !image.pending else { return }
+        let message = SpaceRepository.shared.messagePath(image.file)
+        if !image.referencePresent, image.removed == nil, FileManager.default.fileExists(atPath: image.file.path) {
+            pastedImages[index].pending = true
+            fileOps.apply(.delete([image.file]), message: "Undo Add \(message)") { [weak self] inverse in
+                guard let self, let i = self.pastedImages.firstIndex(where: { $0.file == image.file }) else { return }
+                self.pastedImages[i].pending = false
+                self.pastedImages[i].removed = inverse
+                if inverse != nil { self.reconcilePastedImage(at: i) }
+            }
+        } else if image.referencePresent, let restore = image.removed {
+            pastedImages[index].pending = true
+            fileOps.apply(restore, message: "Add \(message)") { [weak self] inverse in
+                guard let self, let i = self.pastedImages.firstIndex(where: { $0.file == image.file }) else { return }
+                self.pastedImages[i].pending = false
+                if inverse != nil {
                     self.pastedImages[i].removed = nil
+                    self.reconcilePastedImage(at: i)
                 }
             }
         }

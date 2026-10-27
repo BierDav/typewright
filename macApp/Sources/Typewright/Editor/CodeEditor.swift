@@ -1237,12 +1237,20 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     // The Edit menu's Undo and Redo reach the text view first, so a rename's own history wins there too.
     @objc func undo(_ sender: Any?) {
         if (window?.windowController as? MainWindowController)?.state.undoDeletion() == true { return }
-        if onUndo?() != true { undoManager?.undo() }
+        if onUndo?() != true {
+            (undoManager as? ActionUndoManager)?.checkpoint()
+            let files = (window?.windowController as? MainWindowController)?.state.undoManager
+            files?.checkpoint()
+            ActionUndoManager.preferred([undoManager, files], redo: false)?.undo()
+        }
         onDidUndo?(false, string)
     }
 
     @objc func redo(_ sender: Any?) {
-        if onRedo?() != true { undoManager?.redo() }
+        if onRedo?() != true {
+            let files = (window?.windowController as? MainWindowController)?.state.undoManager
+            ActionUndoManager.preferred([undoManager, files], redo: true)?.redo()
+        }
         onDidUndo?(true, string)
     }
 
@@ -1250,8 +1258,12 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         if item.action == #selector(undo(_:)) {
             return (window?.windowController as? MainWindowController)?.state.deletionNotice != nil
                 || onUndo != nil && isRenaming || undoManager?.canUndo == true
+                || (window?.windowController as? MainWindowController)?.state.undoManager.canUndo == true
         }
-        if item.action == #selector(redo(_:)) { return onRedo != nil && isRenaming || undoManager?.canRedo == true }
+        if item.action == #selector(redo(_:)) {
+            return onRedo != nil && isRenaming || undoManager?.canRedo == true
+                || (window?.windowController as? MainWindowController)?.state.undoManager.canRedo == true
+        }
         if item.action == #selector(copy(_:)) { return isSelectable }
         if item.action == #selector(cut(_:)) { return isEditable && !string.isEmpty }
         // A plain text view doesn't read images, so Paste would stay disabled for them.
@@ -1820,12 +1832,30 @@ struct CodeEditor: NSViewRepresentable {
         tv.onInlineVariable = highlights ? { [weak c] in c?.inlineVariable() } : nil
         tv.onExtractFunction = highlights ? { [weak c] in c?.extractFunction(toScope: $0) } : nil
         // While other devices edit along, undo takes back only this device's edits.
-        tv.onUndo = { [weak c] in c?.undoRename() == true || c?.live?.undo(redo: false) == true }
+        tv.onUndo = { [weak c, weak tv] in
+            if c?.undoRename() == true { return true }
+            guard let live = c?.live, live.isActive else { return false }
+            let files = (tv?.window?.windowController as? MainWindowController)?.state.undoManager
+            if let files, files.canUndo,
+               (files.journal.undo.last?.order ?? 0) > (live.journal.undo.last?.order ?? 0) {
+                files.undo()
+            } else if !live.undo(redo: false) { files?.undo() }
+            return true
+        }
         tv.onQuickFix = { [weak c] in c?.showQuickFixes(at: $0) }
         tv.hasQuickFixes = { [weak c] in !(c?.quickFixes(at: $0).isEmpty ?? true) }
         c.hover?.fixesProvider = language.map { l in { l.quickFixes(for: $0) } }
         c.hover?.command = { [weak c] url in c?.runCommand(url) ?? false }
-        tv.onRedo = { [weak c] in c?.redoRename() == true || c?.live?.undo(redo: true) == true }
+        tv.onRedo = { [weak c, weak tv] in
+            if c?.redoRename() == true { return true }
+            guard let live = c?.live, live.isActive else { return false }
+            let files = (tv?.window?.windowController as? MainWindowController)?.state.undoManager
+            if let files, files.canRedo,
+               (files.journal.redo.last?.order ?? 0) > (live.journal.redo.last?.order ?? 0) {
+                files.redo()
+            } else if !live.undo(redo: true) { files?.redo() }
+            return true
+        }
         if c.live !== live {
             c.live?.applyEdits = nil
             c.live?.showCursors = nil
@@ -1851,10 +1881,8 @@ struct CodeEditor: NSViewRepresentable {
                 DispatchQueue.main.async { [weak find] in find?.textDidChange() }
                 c.endColorEdit()
                 c.isRestoring = true
-                if tv.string != text {
-                    tv.string = text
-                    tv.undoManager?.removeAllActions()
-                }
+                tv.undoManager?.removeAllActions()
+                if tv.string != text { tv.string = text }
                 let state = state ?? EditorState()
                 // Wait for the view to get its real width so line positions are final.
                 DispatchQueue.main.async {
@@ -1935,10 +1963,15 @@ struct CodeEditor: NSViewRepresentable {
         /// The color panel is shared; only the editor that last opened it drives it.
         private static weak var colorOwner: Coordinator?
         /// The text's own undo, apart from the window's, which holds file tree changes.
-        let textUndo = UndoManager()
+        let textUndo = ActionUndoManager()
 
         func undoManager(for view: NSTextView) -> UndoManager? { textUndo }
-        weak var textView: NSTextView?
+        weak var textView: NSTextView? {
+            didSet {
+                textUndo.text = { [weak self] in self?.textView?.string }
+                textUndo.finishEditing = { [weak self] in self?.textView?.breakUndoCoalescing() }
+            }
+        }
         weak var ruler: NSRulerView?
         weak var markers: DiagnosticMarkers?
         var completion: CompletionController?
@@ -2033,6 +2066,7 @@ struct CodeEditor: NSViewRepresentable {
 
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
             guard allowsRenameEdit(range, text) else { return false }
+            textUndo.prepare(text: textView.string)
             let event = NSApp.currentEvent
             let typing = event?.type == .keyDown && event?.modifierFlags.contains(.command) == false
                 && (textView as? TypstTextView)?.isColumnMode != true
@@ -2840,6 +2874,7 @@ struct CodeEditor: NSViewRepresentable {
             if !edit.undoRegistered {
                 edit.undoRegistered = true
                 tv.breakUndoCoalescing()
+                textUndo.prepare(text: tv.string)
                 // Reads the session's final text when it runs.
                 tv.undoManager?.registerUndo(withTarget: self) { coordinator in
                     coordinator.swapColor(at: edit.range.location, length: (edit.current as NSString).length,
@@ -2851,6 +2886,7 @@ struct CodeEditor: NSViewRepresentable {
             edit.range.length = (new as NSString).length
             edit.current = new
             edit.format = ColorLiteral.format(of: new, previous: edit.format)
+            textUndo.refreshPreview()
         }
 
         private func swapColor(at location: Int, length: Int, to text: String, back: String) {

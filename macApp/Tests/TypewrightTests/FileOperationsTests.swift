@@ -19,7 +19,7 @@ final class FileOperationsTests: XCTestCase {
         await repository.commit("Add test space")
         ws = Workspace(url: space)
         await ws.waitForIndex()
-        undo = UndoManager()
+        undo = ActionUndoManager()
         undo.groupsByEvent = false
         ws.fileOps.undoManager = undo
     }
@@ -254,6 +254,10 @@ final class FileOperationsTests: XCTestCase {
         ws.editorDidUndo(redo: false, text: base + reference + "x")
         await ws.fileOps.settle()
         XCTAssertTrue(fm.fileExists(atPath: image.path))
+        ws.editorDidUndo(redo: false, text: base)
+        ws.editorDidUndo(redo: true, text: base + reference)
+        await ws.fileOps.settle()
+        XCTAssertTrue(fm.fileExists(atPath: image.path), "A queued redo also restores the image file")
     }
 
     func testDeletingASpaceUndoes() async throws {
@@ -299,4 +303,27 @@ final class FileOperationsTests: XCTestCase {
         XCTAssertEqual(text("chapters/one-2.typ"), "New one\n")
         XCTAssertEqual(text("chapters/one.typ"), "Newest\n")
     }
+    func testHistoryReplacementUndoesAndRedoesBinaryContent() async throws {
+        let file = url("version.bin")
+        let before = Data([0, 1, 255]), after = Data([0, 2, 254])
+        try before.write(to: file)
+        await step { ws.fileOps.perform(.write(file, after), name: "Restore", message: "Restore version.bin") }
+        XCTAssertEqual(try Data(contentsOf: file), after)
+        await undoStep()
+        XCTAssertEqual(try Data(contentsOf: file), before)
+        await redoStep()
+        XCTAssertEqual(try Data(contentsOf: file), after)
+    }
+
+    func testRedoCanQueueBeforeUndoFinishes() async {
+        await step { ws.rename(url("chapters/one.typ"), to: "renamed.typ") }
+        undo.undo()
+        undo.redo()
+        await ws.fileOps.settle()
+        XCTAssertTrue(exists("chapters/renamed.typ"))
+        XCTAssertFalse(exists("chapters/one.typ"))
+        XCTAssertEqual((undo as? ActionUndoManager)?.journal.undo.count, 1)
+        XCTAssertTrue((undo as? ActionUndoManager)?.journal.redo.isEmpty == true)
+    }
+
 }
