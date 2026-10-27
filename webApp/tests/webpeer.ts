@@ -90,11 +90,16 @@ try {
     const load = (path: string) => import(path);
     (await load("/src/lib/app.ts")).setOverlay(null);
   });
-  await ev(`const share = sync.elsewhere().find((s) => s.name === "Thesis"); return await sync.join(share, await sync.suggestedDestination(share));`);
+  await ev(`
+    const share = sync.elsewhere().find((s) => s.name === "Thesis");
+    await fs.writeFile("spaces/Thesis/local.typ", "Local content survives linking.", true);
+    await jj.commit("Prepare existing space");
+    return await sync.join(share, "Thesis", true);`);
   await until("files arrived", `
     const text = await fs.readText("spaces/Thesis/main.typ");
     const pdf = await fs.readFile("spaces/Thesis/figures/plot.pdf");
-    return text === "one\\ntwo\\nthree\\nfour\\nfive\\n" && pdf && [...pdf].join() === "37,80,68,70,0,1,2";`);
+    const local = await fs.readText("spaces/Thesis/local.typ");
+    return local === "Local content survives linking." && text === "one\\ntwo\\nthree\\nfour\\nfive\\n" && pdf && [...pdf].join() === "37,80,68,70,0,1,2";`);
   signal("1");
 
   // 2. Change the first line while the Mac changes the last.

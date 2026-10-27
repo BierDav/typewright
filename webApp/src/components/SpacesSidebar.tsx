@@ -6,7 +6,7 @@ import { identity } from "~/lib/identity";
 import { createSpace, deleteSpace, download, importFiles, moveSpace, restoreSpace, spaces, unzip, zipSpace } from "~/lib/spaces";
 import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
-import { Cloud, CloudOff, Download, Layers, Link, Plus, Settings, Users } from "./icons";
+import { Cloud, CloudOff, Download, Layers, Link, Plus, Settings, UserPlus, Users } from "./icons";
 import { SyncBadge } from "./SyncBadge";
 import { renameCurrentSpace } from "./FileSidebar";
 import { type MenuItem, showMenu } from "./Menu";
@@ -68,8 +68,6 @@ async function removeEverywhere(id: string, name: string) {
 }
 
 function spaceMenu(folder: string): MenuItem[] {
-  const synced = syncService.isSynced(folder);
-  const id = syncService.shareId(folder);
   const items: MenuItem[] = [
     { label: "Open", action: () => openSpace(folder) },
     {
@@ -84,10 +82,6 @@ function spaceMenu(folder: string): MenuItem[] {
     { separator: true },
   ];
   items.push({ label: "Share…", disabled: !syncService.isRunning(), action: () => void commands.share(folder) });
-  if (synced) {
-    items.push({ label: "Stop Syncing on This Device", action: () => syncService.stopSyncing(folder) });
-    if (id) items.push({ label: "Remove From All Devices…", destructive: true, action: () => void removeEverywhere(id, folder) });
-  }
   items.push(
     { separator: true },
     { label: "Show Recently Deleted", action: () => showRecentlyDeleted(folder) },
@@ -114,7 +108,12 @@ export async function fetchSpace(share: syncService.AccountShare) {
     const ok = await choose(`Download “${share.name}”?`, "Its files download from your other devices into a new space here and stay in sync.", [
       { label: "Cancel", value: "cancel", role: "cancel" },
       { label: "Download", value: "ok", role: "default" },
+      { label: "Link to an Existing Space…", value: "link" },
     ]);
+    if (ok === "link") {
+      setOverlay({ type: "palette", page: `link-share:${share.id}` });
+      return;
+    }
     if (ok !== "ok") return;
   }
   // Own spaces land next to the others; folders and files go where the user picks.
@@ -141,7 +140,7 @@ export default function SpacesSidebar() {
       <div class="spaces-list" onDragLeave={() => setOver(null)}>
         <For each={spaces.names}>
           {(folder, index) => (
-            <button
+            <div
               class="space-row"
               classList={{ selected: workspace()?.folder === folder, "drop-before": over() === index() && dragging() !== folder }}
               draggable={true}
@@ -165,14 +164,18 @@ export default function SpacesSidebar() {
                 setDragging(null);
                 setOver(null);
               }}
-              onClick={() => openSpace(folder)}
               onContextMenu={(e) => showMenu(e, spaceMenu(folder))}
               title="Drag to reorder"
             >
-              <Layers size={15} class="space-icon" />
-              <span class="space-label">{folder}</span>
-              <SyncBadge path={folder} />
-            </button>
+              <button class="space-open" onClick={() => openSpace(folder)}>
+                <Layers size={15} class="space-icon" />
+                <span class="space-label">{folder}</span>
+              </button>
+              <button class="icon-button" title="Sharing…" aria-label="Sharing…" onClick={() => void commands.share(folder)}>
+                <SyncBadge path={folder} />
+                <Show when={!syncService.isSynced(folder) && !syncService.isShared(folder)}><UserPlus size={13} class="secondary" /></Show>
+              </button>
+            </div>
           )}
         </For>
         <Show when={spaces.loaded && spaces.names.length === 0}>

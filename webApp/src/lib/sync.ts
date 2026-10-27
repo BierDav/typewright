@@ -22,7 +22,7 @@ export type ShareKind = "space" | "folder" | "file";
 export type ShareStatus = "Synced" | "Syncing" | "Conflicts" | "Offline";
 
 /** A share listed by the account, possibly not on this device yet. */
-export type AccountShare = { id: string; name: string; kind: ShareKind; members: string[]; shared: boolean };
+export type AccountShare = { id: string; name: string; kind: ShareKind; members: string[]; shared: boolean; joined?: boolean; devices?: boolean; host?: string };
 
 /** Where a share lives on this device: its repository path. */
 export type LocalShare = { path: string; kind: ShareKind };
@@ -143,7 +143,7 @@ function runtime(id: string): Runtime {
 
 function sharePaths(): SharePath[] {
   return Object.entries(sync.shares)
-    .filter(([, s]) => s)
+    .filter(([id, s]) => s && isActive(id))
     .map(([id, s]) => ({ id, path: s.path, file: s.kind === "file" }));
 }
 
@@ -162,18 +162,44 @@ export function shareId(path: string): string | undefined {
 }
 
 export function isSynced(path: string): boolean {
-  return shareId(path) !== undefined;
+  const id = shareId(path);
+  return !!id && accountShare(path)?.devices !== false;
+}
+
+export function accountShare(path: string): AccountShare | undefined {
+  const id = shareId(path);
+  return sync.accountShares.find((s) => s.id === id);
+}
+
+function isActive(id: string): boolean {
+  const share = sync.accountShares.find((s) => s.id === id);
+  return !share || share.devices !== false || (share.shared && share.host === sync.deviceId);
+}
+
+export async function configure(path: string, devices: boolean, shared: boolean, rotate = false): Promise<boolean> {
+  const current = node;
+  const id = shareId(path) ?? await share(path);
+  if (!current || !id) return false;
+  // A new share is listed asynchronously before its settings can be changed.
+  for (let i = 0; i < 100 && !sync.accountShares.some((s) => s.id === id); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  try {
+    await current.configureShare(id, devices, shared, rotate);
+    return true;
+  } catch (err) {
+    setSync("lastError", (err as Error).message ?? String(err));
+    return false;
+  }
 }
 
 /** Whether anything in or around `folder` syncs, so its edits should reach storage quickly. */
 export function syncsAnything(folder: string): boolean {
-  return Object.values(sync.shares).some((s) => s && (s.path === folder || s.path.startsWith(`${folder}/`) || folder.startsWith(`${s.path}/`)));
+  return Object.entries(sync.shares).some(([id, s]) => s && isActive(id) && (s.path === folder || s.path.startsWith(`${folder}/`) || folder.startsWith(`${s.path}/`)));
 }
 
 /** Whether other accounts sync the share too. */
 export function isShared(path: string): boolean {
   const id = shareId(path);
-  return !!id && sync.accountShares.some((s) => s.id === id && s.shared);
+  return !!id && isActive(id) && sync.accountShares.some((s) => s.id === id && s.shared);
 }
 
 export function status(path: string): ShareStatus | undefined {
@@ -183,7 +209,7 @@ export function status(path: string): ShareStatus | undefined {
 
 /** Account shares another device syncs and this one doesn't. */
 export function elsewhere(): AccountShare[] {
-  return sync.accountShares.filter((s) => !sync.shares[s.id] && s.members.some((m) => m !== sync.deviceId));
+  return sync.accountShares.filter((s) => s.devices !== false && !sync.shares[s.id] && s.members.some((m) => m !== sync.deviceId));
 }
 
 /** Runs before sync replaces files of a space, so editors save their edits first. */
@@ -373,11 +399,12 @@ export async function suggestedDestination(share: AccountShare): Promise<string>
 }
 
 /** Checks a destination and makes its folder, so a new space shows up before its files. */
-async function prepareDestination(dest: string, file: boolean): Promise<string | null> {
+async function prepareDestination(dest: string, file: boolean, merge = false): Promise<string | null> {
   const path = fs.split(dest).join("/");
   if (!path) return fail("Pick a place in the library.");
   if (file && !path.includes("/")) return fail("A shared file goes into a space.");
-  if (await fs.exists(fs.join(SPACES, path))) return fail(`“${fs.basename(path)}” already exists.`);
+  const existing = await fs.stat(fs.join(SPACES, path));
+  if (existing && (!merge || (existing.kind === "file") !== file)) return fail(`“${fs.basename(path)}” already exists.`);
   await fs.makeDirectory(fs.join(SPACES, file ? fs.dirname(path) : path));
   await refreshSpaces();
   return path;
@@ -389,10 +416,12 @@ function fail(message: string): null {
 }
 
 /** Starts syncing an account share at `dest` (a repository path not there yet); its files arrive after. */
-export async function join(share: AccountShare, dest: string): Promise<string | null> {
+export async function join(share: AccountShare, dest: string, merge = false): Promise<string | null> {
   if (!node) return null;
-  const path = await prepareDestination(dest, share.kind === "file");
+  const path = await prepareDestination(dest, share.kind === "file", merge);
   if (!path) return null;
+  const previous = shareId(path);
+  if (previous && previous !== share.id) stopSyncingId(previous);
   const kind: ShareKind = share.kind === "file" ? "file" : path.includes("/") ? "folder" : "space";
   batch(() => {
     setSync("shares", share.id, { path, kind });
@@ -433,7 +462,10 @@ export function pathOf(id: string): string | null {
 export async function joinInvite(invite: SpaceInvite, dest: string): Promise<string | null> {
   if (!node) return null;
   const existing = pathOf(invite.id);
-  if (existing) return existing;
+  if (existing) {
+    node.joinShare(invite.id, invite.name, sync.shares[invite.id].kind, invite.secret, invite.hints, settings.deviceName);
+    return existing;
+  }
   const path = await prepareDestination(dest, !!invite.file);
   if (!path) return null;
   const kind: ShareKind = invite.file ? "file" : path.includes("/") ? "folder" : "space";
@@ -447,7 +479,7 @@ export async function joinInvite(invite: SpaceInvite, dest: string): Promise<str
 }
 
 function open(id: string) {
-  if (!node) return;
+  if (!node || !isActive(id)) return;
   const parked = rejoining[id];
   if (parked) {
     // It left the account when its folder was deleted; list it again under the same id.
@@ -523,8 +555,9 @@ type Event = {
   peers?: string[];
   devices?: string[];
   shared?: Record<string, string[]>;
-  shares?: { id: string; name?: string; kind?: string; members?: string[]; shared?: boolean }[];
+  shares?: { id: string; name?: string; kind?: string; members?: string[]; shared?: boolean; joined?: boolean; devices?: boolean; host?: string }[];
   removed?: string[];
+  reset?: string[];
   share?: string;
   space?: string;
   device?: string;
@@ -546,6 +579,7 @@ function handle(text: string) {
       updateStatuses();
       break;
     case "shares": {
+      const active = new Set(Object.keys(sync.shares).filter(isActive));
       const all = (event.shares ?? [])
         .map((s) => ({
           id: s.id,
@@ -553,6 +587,9 @@ function handle(text: string) {
           kind: (["space", "folder", "file"].includes(s.kind ?? "") ? s.kind : "space") as ShareKind,
           members: s.members ?? [],
           shared: s.shared ?? false,
+          joined: s.joined ?? false,
+          devices: s.devices ?? true,
+          host: s.host,
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
       setSync("accountShares", all);
@@ -568,12 +605,23 @@ function handle(text: string) {
           persist();
         }
       }
+      for (const id of Object.keys(sync.shares)) {
+        if (!sync.shares[id]) continue;
+        if (!isActive(id) || event.reset?.includes(id)) {
+          clearTimeout(publishTimers.get(id));
+          publishTimers.delete(id);
+          runtimes.delete(id);
+          queues.delete(id);
+          setSync("statuses", id, undefined!);
+        }
+        if (isActive(id) && (!active.has(id) || event.reset?.includes(id))) open(id);
+      }
       updateStatuses();
       scheduleSnapshot();
       break;
     }
     case "head": {
-      if (!event.share || !event.device || !event.node) return;
+      if (!event.share || !sync.shares[event.share] || !isActive(event.share) || !event.device || !event.node) return;
       runtime(event.share).heads.set(event.device, { node: event.node, name: event.name ?? null });
       mergeHeads(event.share);
       updateStatus(event.share);
@@ -626,8 +674,8 @@ function enqueue(id: string, work: () => Promise<void>) {
   const run = generation;
   const previous = queues.get(id) ?? Promise.resolve();
   const next = previous
-    .then(() => (run === generation ? work() : undefined))
-    .catch((err) => setSync("lastError", `Sync: ${(err as Error).message ?? err}`))
+    .then(() => (run === generation && runtimes.get(id) === r ? work() : undefined))
+    .catch((err) => { if (runtimes.get(id) === r) setSync("lastError", `Sync: ${(err as Error).message ?? err}`); })
     .finally(() => {
       r.working--;
       updateStatus(id);
@@ -654,6 +702,7 @@ function message(err: unknown): string {
 
 /** Exports the share's content as a node and publishes it unless the devices already have it. */
 async function publish(id: string) {
+  if (!isActive(id)) return;
   const share = sync.shares[id];
   const current = node;
   if (!current || !share) return;
@@ -679,7 +728,7 @@ async function publish(id: string) {
     else if (!message(err).includes("unresolved conflicts")) setSync("problems", id, message(err));
     return;
   }
-  if (!manifest.node) return;
+  if (!manifest.node || !isActive(id) || runtimes.get(id) !== r) return;
   r.head = manifest.node;
   r.ancestry = manifest.ancestry ?? [];
   const lfs = Object.entries(manifest.files ?? {}).filter(([, f]) => f.lfs && f.blake3);
@@ -693,7 +742,7 @@ async function publish(id: string) {
       const bytes = await fs.readFile(fs.join(SPACES, core.shareFilePath(sp, rel)));
       if (bytes) seeds.push([file.blake3!, bytes]);
     }
-    if (node !== current) return;
+    if (node !== current || !isActive(id) || runtimes.get(id) !== r) return;
     await current.publishNode(id, JSON.stringify(manifest), objects, seeds);
     seeds.forEach(([hash]) => r.seeded.add(hash));
     r.published = manifest.node;
@@ -740,6 +789,7 @@ async function merge(id: string, device: string) {
   if (!fetchedNode || !core.needsMerge(r.head ?? undefined, r.ancestry, fetchedNode)) return;
   const folder = spaceOf(share.path);
   for (const hook of willChange) await hook(folder);
+  if (!isActive(id) || runtimes.get(id) !== r) return;
   const sp = sharePath(id)!;
   const keep = [...livePaths].filter((k) => k.startsWith(`${id}/`)).map((k) => core.shareFilePath(sp, k.slice(id.length + 1)));
   let merged: jj.MergeResult;
@@ -770,6 +820,7 @@ function updateStatuses() {
 }
 
 function updateStatus(id: string) {
+  if (!isActive(id)) return;
   const share = sync.shares[id];
   if (!share) return;
   const r = runtimes.get(id);

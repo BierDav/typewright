@@ -25,6 +25,9 @@ void tws_add_share(const TWSyncNode *_Nonnull node, const char *_Nonnull share, 
 /// The hex secret an invite link carries; marks the share shared for all devices of the account. Free with `tws_string_free`.
 char *_Nonnull tws_share_invite(const TWSyncNode *_Nonnull node, const char *_Nonnull share, const char *_Nonnull name,
                                 const char *_Nonnull kind);
+/// Configures device sync and sharing independently; answers with a `configured` event.
+void tws_configure_share(const TWSyncNode *_Nonnull node, const char *_Nonnull share, int32_t devices,
+                         int32_t shared, int32_t rotate, int64_t request);
 /// Starts syncing a share from another account's invite; `hints` are comma separated endpoint ids to dial first.
 void tws_join_share(const TWSyncNode *_Nonnull node, const char *_Nonnull share, const char *_Nonnull name,
                     const char *_Nonnull kind, const char *_Nonnull secret, const char *_Nonnull hints,

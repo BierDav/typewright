@@ -460,6 +460,16 @@ select {
   cursor: default;
 }
 
+.space-open {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
 .space-row:hover {
   background: var(--hover);
 }

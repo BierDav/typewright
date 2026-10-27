@@ -137,7 +137,6 @@ export default function FileSidebar(props: { workspace: Workspace }) {
   }
 
   function spaceMenu(): MenuItem[] {
-    const synced = syncService.isSynced(ws.folder);
     return [
       { label: "New File…", action: () => void newFile() },
       { label: "New Folder…", action: () => void newFolder() },
@@ -155,7 +154,6 @@ export default function FileSidebar(props: { workspace: Workspace }) {
       { label: "Download Space as Zip", action: async () => download(`${ws.folder}.zip`, await zipSpace(ws.folder), "application/zip") },
       { separator: true },
       { label: "Share…", disabled: !syncService.isRunning(), action: () => void commands.share(ws.folder) },
-      ...(synced ? [{ label: "Stop Syncing on This Device", action: () => syncService.stopSyncing(ws.folder) }] : []),
     ];
   }
 

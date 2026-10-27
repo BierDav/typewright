@@ -5,10 +5,18 @@ import TypewrightCore
 struct SyncStatusLabel: View {
     let status: ShareStatus?
     let shared: Bool
+    var synced = true
 
     var body: some View {
         HStack(spacing: 3) {
-            Image(systemName: shared ? "person.2" : "laptopcomputer.and.iphone")
+            if synced {
+                Image(systemName: "laptopcomputer.and.iphone")
+                    .help("Available on your devices")
+            }
+            if shared {
+                Image(systemName: "person.2")
+                    .help("Shared with others")
+            }
             if let statusSymbol {
                 Image(systemName: statusSymbol)
                     .foregroundStyle(status == .conflicts ? AnyShapeStyle(.yellow) : AnyShapeStyle(.tertiary))
@@ -17,7 +25,7 @@ struct SyncStatusLabel: View {
         }
         .font(.system(size: 10))
         .foregroundStyle(.tertiary)
-        .help((shared ? "Shared with others" : "Available on your devices") + " · " + Self.title(status ?? .synced))
+        .help([synced ? "Available on your devices" : nil, shared ? "Shared with others" : nil, Self.title(status ?? .synced)].compactMap { $0 }.joined(separator: " · "))
     }
 
     private var statusSymbol: String? {

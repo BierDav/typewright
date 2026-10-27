@@ -313,10 +313,6 @@ struct SpacesPane: View {
                         } else {
                             Opener.shared.forgetSpace(url, in: state)
                         }
-                    } onToggleSync: {
-                        toggleSync(url)
-                    } onRemoveEverywhere: {
-                        if let id = sync.shareID(for: url) { removeEverywhere(id, name: url.lastPathComponent) }
                     } onInvite: {
                         Invites.share(url)
                     } onDrag: { offset in
@@ -477,18 +473,6 @@ struct SpacesPane: View {
         }
     }
 
-    /// Without an account, syncing starts in the Devices settings. Only spaces in the library sync.
-    private func toggleSync(_ url: URL) {
-        guard SpaceList.isInRepository(url) else { return }
-        if sync.isSynced(url) {
-            sync.stopSyncing(url)
-        } else if !sync.isRunning {
-            SettingsWindowController.shared.show(tab: 4)
-        } else {
-            sync.share(url)
-        }
-    }
-
     /// Every device stops syncing the space; their files stay where they are.
     private func removeEverywhere(_ id: String, name: String) {
         var detail = "Your devices stop syncing this space. Their copies of the files stay where they are."
@@ -507,7 +491,7 @@ struct SpacesPane: View {
     /// files arrive.
     private func download(_ share: AccountShare) {
         if share.kind == .space {
-            join(share, at: sync.suggestedDestination(for: share))
+            state.ask(Invites.downloadPage(share) { join(share, at: sync.suggestedDestination(for: share)) })
         } else {
             LibraryDestination.choose(name: share.name, file: share.kind == .file, in: sync.repository, state: state) { destination in
                 join(share, at: destination)
@@ -549,8 +533,6 @@ private struct SpaceRow: View {
     let onStartRename: () -> Void
     let onRename: (String?) -> Void
     let onForget: () -> Void
-    let onToggleSync: () -> Void
-    let onRemoveEverywhere: () -> Void
     let onInvite: () -> Void
     let onDrag: (CGFloat) -> Void
     let onDrop: () -> Void
@@ -587,8 +569,18 @@ private struct SpaceRow: View {
                     .padding(.vertical, 1)
                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
-            } else if isSynced {
-                SyncStatusLabel(status: status, shared: isShared)
+            } else if inRepository {
+                Button(action: onInvite) {
+                    if isSynced || isShared {
+                        SyncStatusLabel(status: status, shared: isShared, synced: isSynced)
+                    } else {
+                        Image(systemName: "person.badge.plus")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.borderless)
+                .help("Sharing…")
             }
             if shortcut == nil, SpaceFolders.isGitRepository(url) {
                 Image(systemName: "exclamationmark.triangle")
@@ -639,10 +631,6 @@ private struct SpaceRow: View {
             Button("Copy Path") { copyPath(url) }
             Divider()
             if inRepository {
-                Button(isSynced ? "Stop Syncing on This Mac" : "Sync Across Devices", action: onToggleSync)
-                if isSynced {
-                    Button("Remove From All Devices…", action: onRemoveEverywhere)
-                }
                 Button("Share…", action: onInvite)
                 Divider()
                 Button("Link to…") { Opener.shared.link(url) }

@@ -19,6 +19,8 @@ struct AccountShare: Identifiable, Hashable {
     /// Shared with other accounts through an invite link.
     var shared = false
     var joined = false
+    var devices = true
+    var host: String?
 }
 
 /// Where a share lives on this device: its path in the space repository.
@@ -114,7 +116,7 @@ final class SyncService {
     var isRunning: Bool { node != nil }
     /// Account shares that another device syncs and this one doesn't.
     var elsewhere: [AccountShare] {
-        accountShares.filter { share in shares[share.id] == nil && share.members.contains { $0 != deviceID } }
+        accountShares.filter { share in share.devices && shares[share.id] == nil && share.members.contains { $0 != deviceID } }
     }
 
     let repository: SpaceRepository
@@ -128,6 +130,7 @@ final class SyncService {
     @ObservationIgnored private var queues: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var publishTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var fetches: [Int64: CheckedContinuation<String?, Never>] = [:]
+    @ObservationIgnored private var configurations: [Int64: CheckedContinuation<Bool, Never>] = [:]
     @ObservationIgnored private var nextRequest: Int64 = 1
     /// `share/inside` of files open here and on another device; merges leave them to the live session.
     @ObservationIgnored private var livePaths: Set<String> = []
@@ -137,6 +140,7 @@ final class SyncService {
     private struct Runtime {
         /// This device's current node, its ancestors and the LFS files it holds.
         var head: String?
+        var token = UUID()
         var ancestry: [String] = []
         var lfs: Set<String> = []
         /// The node last published as this device's head.
@@ -218,7 +222,7 @@ final class SyncService {
     // MARK: - Lookups
 
     private var sharePaths: [SharePath] {
-        shares.map { SharePath(id: $0.key, path: $0.value.path, file: $0.value.kind == .file) }
+        shares.filter { isActive($0.key) }.map { SharePath(id: $0.key, path: $0.value.path, file: $0.value.kind == .file) }
     }
 
     /// The share whose root is exactly `url`.
@@ -227,18 +231,42 @@ final class SyncService {
         return shares.first { $0.value.path == path }?.key
     }
 
-    func isSynced(_ url: URL) -> Bool { shareID(for: url) != nil }
+    func isSynced(_ url: URL) -> Bool {
+        guard let id = shareID(for: url) else { return false }
+        return accountShares.first { $0.id == id }?.devices ?? true
+    }
+
+    private func isActive(_ id: String) -> Bool {
+        guard let share = accountShares.first(where: { $0.id == id }) else { return true }
+        return share.devices || (share.shared && share.host == deviceID)
+    }
+
+    func accountShare(for url: URL) -> AccountShare? {
+        guard let id = shareID(for: url) else { return nil }
+        return accountShares.first { $0.id == id }
+    }
+
+    func configure(_ url: URL, devices: Bool, shared: Bool, rotate: Bool = false) async -> Bool {
+        guard let node, let id = shareID(for: url) else { return false }
+        for _ in 0..<100 where !accountShares.contains(where: { $0.id == id }) { try? await Task.sleep(for: .milliseconds(20)) }
+        let request = nextRequest
+        nextRequest += 1
+        return await withCheckedContinuation { continuation in
+            configurations[request] = continuation
+            tws_configure_share(node, id, devices ? 1 : 0, shared ? 1 : 0, rotate ? 1 : 0, request)
+        }
+    }
 
     /// Whether anything in or around `root` syncs, so its edits should reach the disk quickly.
     func syncsAnything(in root: URL) -> Bool {
         guard let path = repository.relativePath(of: root) else { return false }
-        return shares.values.contains { $0.path == path || $0.path.hasPrefix(path + "/") || path.hasPrefix($0.path + "/") }
+        return shares.contains { id, share in isActive(id) && (share.path == path || share.path.hasPrefix(path + "/") || path.hasPrefix(share.path + "/")) }
     }
 
     /// Whether other accounts sync the share too.
     func isShared(_ url: URL) -> Bool {
         guard let id = shareID(for: url) else { return false }
-        return accountShares.contains { $0.id == id && $0.shared }
+        return isActive(id) && accountShares.contains { $0.id == id && $0.shared }
     }
 
     func sharingIndicator(for url: URL) -> SharingIndicator? {
@@ -325,6 +353,8 @@ final class SyncService {
         publishTasks.removeAll()
         fetches.values.forEach { $0.resume(returning: nil) }
         fetches.removeAll()
+        configurations.values.forEach { $0.resume(returning: false) }
+        configurations.removeAll()
         runtimes.removeAll()
         statuses.removeAll()
         connected = []
@@ -424,8 +454,9 @@ final class SyncService {
     }
 
     /// Starts syncing an account share at `destination` (in the library, not there yet); its files arrive after.
-    func join(_ share: AccountShare, at destination: URL) -> URL? {
-        guard let node, let path = destinationPath(destination, file: share.kind == .file) else { return nil }
+    func join(_ share: AccountShare, at destination: URL, merge: Bool = false) -> URL? {
+        guard let node, let path = destinationPath(destination, file: share.kind == .file, merge: merge) else { return nil }
+        if let previous = shareID(for: destination), previous != share.id { stopSyncing(id: previous) }
         shares[share.id] = LocalShare(path: path, kind: share.kind == .file ? .file : path.contains("/") ? .folder : .space)
         parked[share.id] = nil
         persist()
@@ -449,7 +480,11 @@ final class SyncService {
     /// Starts syncing a share from an invite at `destination`; the account lists it for this user's other devices.
     func join(_ invite: SpaceInvite, at destination: URL) -> URL? {
         guard let node else { return nil }
-        if let url = url(of: invite.id) { return url }
+        if let existing = url(of: invite.id) {
+            let kind = shares[invite.id]!.kind
+            tws_join_share(node, invite.id, invite.name, kind.rawValue, invite.secret, invite.hints.joined(separator: ","), deviceName)
+            return existing
+        }
         guard let path = destinationPath(destination, file: invite.file) else { return nil }
         let kind: ShareKind = invite.file ? .file : path.contains("/") ? .folder : .space
         shares[invite.id] = LocalShare(path: path, kind: kind)
@@ -461,7 +496,7 @@ final class SyncService {
     }
 
     /// A destination's repository path; folders are made right away, so a new space shows up before its files.
-    private func destinationPath(_ destination: URL, file: Bool) -> String? {
+    private func destinationPath(_ destination: URL, file: Bool, merge: Bool = false) -> String? {
         guard let path = repository.relativePath(of: destination) else {
             lastError = "Shares sync into Typewright's library."
             return nil
@@ -470,9 +505,12 @@ final class SyncService {
             lastError = "A shared file goes into a space."
             return nil
         }
-        guard !FileManager.default.fileExists(atPath: destination.path) else {
-            lastError = "“\(destination.lastPathComponent)” already exists."
-            return nil
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory) {
+            guard merge, isDirectory.boolValue != file else {
+                lastError = "“\(destination.lastPathComponent)” already exists."
+                return nil
+            }
         }
         do {
             let folder = file ? destination.deletingLastPathComponent() : destination
@@ -485,7 +523,7 @@ final class SyncService {
     }
 
     private func open(_ id: String) {
-        guard let node else { return }
+        guard isActive(id), let node else { return }
         if let parked = rejoining.removeValue(forKey: id) {
             // It left the account when its folder was deleted; list it again under the same id.
             let kind = parked.share.kind.rawValue
@@ -568,6 +606,7 @@ final class SyncService {
         var devices: [String]?
         var shares: [Share]?
         var removed: [String]?
+        var reset: [String]?
         var share: String?
         var space: String?
         var device: String?
@@ -584,6 +623,8 @@ final class SyncService {
             let members: [String]?
             let shared: Bool?
             let joined: Bool?
+            let devices: Bool?
+            let host: String?
         }
     }
 
@@ -595,9 +636,11 @@ final class SyncService {
             devices = event.devices ?? []
             updateStatuses()
         case "shares":
+            let active = Set(shares.keys.filter(isActive))
             accountShares = (event.shares ?? []).map {
                 AccountShare(id: $0.id, name: $0.name ?? "Space", kind: ShareKind(rawValue: $0.kind ?? "") ?? .space,
-                             members: $0.members ?? [], shared: $0.shared ?? false, joined: $0.joined ?? false)
+                             members: $0.members ?? [], shared: $0.shared ?? false, joined: $0.joined ?? false,
+                             devices: $0.devices ?? true, host: $0.host)
             }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             // Removed from all devices elsewhere: stop here too, keeping the files.
@@ -610,9 +653,20 @@ final class SyncService {
                 rejoining[id] = nil
                 persist()
             }
+            for id in shares.keys where !isActive(id) || (event.reset ?? []).contains(id) {
+                queues.removeValue(forKey: id)?.cancel()
+                publishTasks.removeValue(forKey: id)?.cancel()
+                runtimes[id] = nil
+                statuses[id] = nil
+            }
+            for id in shares.keys where isActive(id) && (!active.contains(id) || (event.reset ?? []).contains(id)) { open(id) }
             updateStatuses()
+            NotificationCenter.default.post(name: Self.syncedSpacesDidChange, object: nil)
+        case "configured":
+            if event.ok != true { lastError = event.message }
+            if let request = event.request { configurations.removeValue(forKey: request)?.resume(returning: event.ok == true) }
         case "head":
-            guard let id = event.share, let device = event.device, let node = event.node else { return }
+            guard let id = event.share, shares[id] != nil, isActive(id), let device = event.device, let node = event.node else { return }
             runtimes[id, default: Runtime()].heads[device] = Head(node: node, name: event.name)
             mergeHeads(id)
             updateStatus(id)
@@ -656,12 +710,13 @@ final class SyncService {
     private func enqueue(_ id: String, _ work: @escaping @MainActor () async -> Void) {
         let previous = queues[id]
         runtimes[id, default: Runtime()].working += 1
+        let token = runtimes[id]!.token
         updateStatus(id)
         queues[id] = Task { [weak self] in
             await previous?.value
             guard !Task.isCancelled else { return }
             await work()
-            guard let self else { return }
+            guard let self, !Task.isCancelled, self.runtimes[id]?.token == token else { return }
             self.runtimes[id]?.working -= 1
             self.updateStatus(id)
         }
@@ -691,7 +746,8 @@ final class SyncService {
 
     /// Exports the share's content as a node and publishes it unless the devices already have it.
     private func publish(_ id: String) async {
-        guard let node, let share = shares[id], let dataDir else { return }
+        guard isActive(id), let node, let share = shares[id], let dataDir else { return }
+        let token = runtimes[id, default: Runtime()].token
         let url = repository.url(of: share.path)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue == (share.kind != .file) else {
@@ -714,7 +770,7 @@ final class SyncService {
             else if !error.contains("unresolved conflicts") { problems[id] = error }
             return
         }
-        guard let nodeID = manifest.node else { return }
+        guard !Task.isCancelled, isActive(id), runtimes[id]?.token == token, let nodeID = manifest.node else { return }
         var runtime = runtimes[id] ?? Runtime()
         runtime.head = nodeID
         runtime.ancestry = manifest.ancestry ?? []
@@ -734,6 +790,7 @@ final class SyncService {
                 return ["blake3": hash, "path": repository.url(of: inside).path]
             }
             let lfsJSON = String(data: (try? JSONSerialization.data(withJSONObject: lfs)) ?? Data("[]".utf8), encoding: .utf8) ?? "[]"
+            guard !Task.isCancelled, isActive(id), runtimes[id]?.token == token else { return }
             tws_publish_node(node, id, String(decoding: data, as: UTF8.self), dir.path, lfsJSON)
             runtimes[id]?.published = nodeID
         }
@@ -759,6 +816,7 @@ final class SyncService {
             lastError = "Couldn't import a node from \(label)."
             return
         }
+        guard !Task.isCancelled, isActive(id), runtimes[id]?.token == runtime.token else { return }
         let sharePath = SharePath(id: id, path: share.path, file: share.kind == .file)
         let keep = livePaths.filter { $0.hasPrefix(id + "/") }.map { shareFilePath(share: sharePath, inside: String($0.dropFirst(id.count + 1))) }
         let keepJSON = String(data: (try? JSONSerialization.data(withJSONObject: keep)) ?? Data("[]".utf8), encoding: .utf8) ?? "[]"
@@ -810,7 +868,7 @@ final class SyncService {
     }
 
     private func updateStatus(_ id: String) {
-        guard let share = shares[id] else { return }
+        guard isActive(id), let share = shares[id] else { return }
         let runtime = runtimes[id] ?? Runtime()
         let peers = runtime.heads.map { PeerHead(device: $0.key, node: $0.value.node, connected: connected.contains($0.key)) }
         let members = Set(accountShares.first { $0.id == id }?.members ?? []).union(runtime.heads.keys)

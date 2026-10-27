@@ -131,6 +131,12 @@ impl SyncNode {
         hex(&secret)
     }
 
+    /// Changes device sync and public sharing; rotating disconnects holders of the old invite.
+    #[wasm_bindgen(js_name = configureShare)]
+    pub async fn configure_share(&self, share: String, devices: bool, shared: bool, rotate: bool) -> Result<(), JsError> {
+        shares::configure_share(self.inner.clone(), share, devices, shared, rotate).await.map_err(js)
+    }
+
     /// Starts syncing a share from another account's invite; `hints` are endpoint ids to dial first.
     #[wasm_bindgen(js_name = joinShare)]
     pub fn join_share(

@@ -402,9 +402,50 @@ function destinationPage(): Page {
   };
 }
 
+function sharingPage(path: string): Page {
+  return {
+    title: `Sharing “${fs.basename(path)}”`, placeholder: "Manage sharing and device sync…", kind: "list",
+    items: () => {
+      const account = syncService.accountShare(path);
+      const items: Item[] = [{
+        id: "sharing:devices", title: syncService.isSynced(path) ? "Unlink Across My Devices" : "Enable Device Sync",
+        subtitle: "Keep sharing with others independent of device sync", section: "Device Sync",
+        action: { run: () => void commands.changeDeviceSync(path) },
+      }];
+      if (!path.includes("/") && syncService.elsewhere().some((s) => s.kind === "space")) items.push({
+        id: "sharing:relink", title: "Link to a Space on Another Device…", subtitle: "Merge its contents with this space", section: "Device Sync",
+        action: { page: { title: "Link to Another Device", placeholder: "Choose a space…", kind: "list", items: () => syncService.elsewhere().filter((s) => s.kind === "space").map((s) => ({
+          id: `relink:${s.id}`, title: s.name, section: "On Your Devices", icon: "space", action: { run: () => void commands.linkAccountShare(s, path) },
+        })) } },
+      });
+      if (!account?.joined) items.push({
+        id: "sharing:new", title: account?.shared ? "Create New Sharing Link…" : "Create Sharing Link",
+        subtitle: account?.shared ? "Replace the old link and disconnect its participants" : "Anyone with the link can join and edit",
+        section: "Sharing Links", action: { run: () => void commands.createSharingLink(path) },
+      });
+      if (account?.shared) {
+        items.push(
+          { id: "sharing:copy", title: "Copy Invite Link", section: "Sharing Links", action: { run: () => void commands.copySharingLink(path) } },
+          { id: "sharing:web", title: "Copy Web Link", section: "Sharing Links", action: { run: () => void commands.copySharingLink(path, true) } },
+        );
+        if (!account.joined) items.push({ id: "sharing:revoke", title: "Revoke Sharing Link…", subtitle: "Disconnect everyone using this link", section: "Sharing Links", action: { run: () => void commands.revokeSharingLink(path) } });
+      }
+      if (syncService.shareId(path)) items.push({ id: "sharing:leave", title: "Disconnect This Device", subtitle: "Keep your local files", section: "This Device", action: { run: () => syncService.stopSyncing(path) } });
+      return items;
+    },
+  };
+}
+
 /** Opens a page by name, for menus that land inside the palette. */
 function startPage(name: string | undefined): Page | null {
   if (name === "destination") return destinationPage();
+  if (name?.startsWith("link-share:")) {
+    const share = syncService.sync.accountShares.find((s) => s.id === name.slice(11));
+    return share ? { title: `Link “${share.name}”`, placeholder: "Choose an existing space…", kind: "list", items: () => spaces.names.map((path) => ({
+      id: `link:${path}`, title: path, subtitle: "Link and merge the contents", section: "Existing Spaces", icon: "space", action: { run: () => void commands.linkAccountShare(share, path) },
+    })) } : null;
+  }
+  if (name?.startsWith("sharing:")) return sharingPage(name.slice(8));
   const ws = workspace();
   if (!name || !ws) return null;
   if (name.startsWith("move:")) return movePage(ws, name.slice(5));
@@ -442,6 +483,7 @@ export default function CommandPalette(props: { page?: string }) {
   createEffect(() => {
     const current = page();
     void (fonts.fonts.revision + fonts.fonts.catalog.length);
+    syncService.sync.accountShares.forEach((share) => { void share.shared; void share.devices; void share.joined; });
     // A new page starts empty; a refresh of the same one keeps its rows until the new ones are in.
     if (current !== shownPage) setItems([]);
     shownPage = current;

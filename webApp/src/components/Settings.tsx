@@ -581,17 +581,14 @@ function Devices() {
                   <Show when={sync.accountShares.find((s) => s.id === id)?.shared}>
                     <Users size={12} class="secondary" />
                   </Show>
-                  <span class="secondary"> · {sync.problems[id] ?? sync.statuses[id] ?? "Starting"}</span>
+                  <span class="secondary"> · {sync.problems[id] ?? sync.statuses[id] ?? (syncService.isSynced(share.path) || syncService.isShared(share.path) ? "Starting" : "Unlinked")}</span>
                 </span>
                 <div class="button-row">
                   <button class="button small" onClick={() => { openSpace(share.path.split("/")[0]); setOverlay(null); }}>
                     Open
                   </button>
-                  <button class="icon-button" title="Share…" onClick={() => void commands.share(share.path)}>
-                    <Link size={14} />
-                  </button>
-                  <button class="button small" onClick={() => syncService.stopSyncingId(id)}>
-                    Stop Syncing
+                  <button class="button small" onClick={() => void commands.share(share.path)}>
+                    <Link size={14} /> Sharing…
                   </button>
                 </div>
               </div>

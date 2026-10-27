@@ -47,16 +47,21 @@ fn lfs_key(hash: &str) -> String {
 /// The share's replica, opened, watched and syncing on first use.
 pub(crate) async fn share_doc(inner: &Arc<Inner>, id: &str) -> Result<Space> {
     let _guard = inner.opening.lock().await;
-    if let Some(share) = inner.shares.lock().unwrap().get(id).cloned() {
-        return Ok(share);
-    }
+    if !inner.can_sync(id) { return Err(anyhow!("Device sync is unlinked for this share")); }
     let secret = inner.namespace(id);
+    let opened = inner.shares.lock().unwrap().get(id).cloned();
+    if let Some(share) = opened {
+        if share.secret == secret { return Ok(share); }
+        inner.shares.lock().unwrap().remove(id);
+        live::leave(inner, id);
+        share.doc.leave().await?;
+    }
     let author = space_author(&secret);
     inner.docs.author_import(author.clone()).await?;
     let doc = inner.docs.import_namespace(Capability::Write(share_namespace(&secret))).await?;
     let events = doc.subscribe().await?;
     spawn(watch_share(inner.clone(), id.to_string(), doc.clone(), events));
-    let share = Space { doc: doc.clone(), author: author.id() };
+    let share = Space { doc: doc.clone(), author: author.id(), secret };
     inner.shares.lock().unwrap().insert(id.to_string(), share.clone());
     inner.account_doc.set_bytes(inner.author, member_key(inner, id), b"1".to_vec()).await?;
     live::join(inner, id).await?;
@@ -88,17 +93,58 @@ pub(crate) async fn open_share(inner: Arc<Inner>, id: String, name: String) -> R
     list_heads(&inner, &id).await
 }
 
+async fn saved_settings(inner: &Inner, id: &str) -> Result<Option<serde_json::Value>> {
+    let Some(entry) = latest(&inner.account_doc, format!("key/{id}").as_bytes()).await? else { return Ok(None) };
+    let bytes = inner.blobs.get_bytes(entry.content_hash()).await?;
+    Ok(serde_json::from_slice(&bytes).ok())
+}
+
 /// Lists the share for every device of the account and starts syncing it here.
 pub(crate) async fn add_share(inner: Arc<Inner>, id: String, name: String, kind: String, device: String) -> Result<()> {
+    let guard = inner.configuring.lock().await;
     // Membership lands before the listing, so no device sees the share without members.
     inner.account_doc.set_bytes(inner.author, member_key(&inner, &id), b"1".to_vec()).await?;
-    let info = serde_json::to_vec(&json!({"name": name, "kind": kind}))?;
-    inner.account_doc.set_bytes(inner.author, format!("share/{id}"), info).await?;
-    open_share(inner, id, device).await
+    let stored = match latest(&inner.account_doc, format!("share/{id}").as_bytes()).await? {
+        Some(entry) => inner.blobs.get_bytes(entry.content_hash()).await.ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()),
+        None => None,
+    };
+    let mut info = stored.or(saved_settings(&inner, &id).await?).unwrap_or_else(|| json!({}));
+    info["name"] = json!(name);
+    info["kind"] = json!(kind);
+    inner.account_doc.set_bytes(inner.author, format!("share/{id}"), serde_json::to_vec(&info)?).await?;
+    drop(guard);
+    crate::emit_shares(&inner).await?;
+    if inner.can_sync(&id) { open_share(inner, id, device).await } else { Ok(()) }
+}
+
+/// Changes the two sharing modes; rotating the owner key cuts off every old invite.
+pub(crate) async fn configure_share(inner: Arc<Inner>, id: String, devices: bool, shared: bool, rotate: bool) -> Result<()> {
+    let _guard = inner.configuring.lock().await;
+    let key = format!("share/{id}");
+    let entry = latest(&inner.account_doc, key.as_bytes()).await?.ok_or_else(|| anyhow!("Share is not listed yet"))?;
+    let bytes = inner.blobs.get_bytes(entry.content_hash()).await?;
+    let mut info: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if info["secret"].is_string() && (rotate || !shared) {
+        return Err(anyhow!("Only the owner can revoke this sharing link"));
+    }
+    // Going private also covers links created before the shared marker reached storage.
+    if rotate || !shared {
+        info["owner_key"] = json!(hex(&rand::random::<[u8; 32]>()));
+    }
+    info["devices"] = json!(devices);
+    info["shared"] = json!(shared);
+    info["host"] = json!(inner.endpoint.id().to_string());
+    // Settings and revoked credentials survive deleting and restoring the last local copy.
+    inner.account_doc.set_bytes(inner.author, format!("key/{id}"), serde_json::to_vec(&info)?).await?;
+    inner.account_doc.set_bytes(inner.author, key, serde_json::to_vec(&info)?).await?;
+    crate::emit_shares(&inner).await?;
+    live::retopic(&inner).await;
+    Ok(())
 }
 
 /// Marks an own share shared, so all devices of the account list themselves in its record.
 pub(crate) async fn invite_share(inner: Arc<Inner>, id: String, name: String, kind: String) -> Result<()> {
+    let guard = inner.configuring.lock().await;
     let key = format!("share/{id}");
     let stored = match latest(&inner.account_doc, key.as_bytes()).await? {
         Some(entry) => inner.blobs.get_bytes(entry.content_hash()).await.ok(),
@@ -110,7 +156,11 @@ pub(crate) async fn invite_share(inner: Arc<Inner>, id: String, name: String, ki
         info["shared"] = json!(true);
         inner.account_doc.set_bytes(inner.author, key, serde_json::to_vec(&info)?).await?;
     }
+    if !info["secret"].is_string() {
+        inner.account_doc.set_bytes(inner.author, format!("key/{id}"), serde_json::to_vec(&info)?).await?;
+    }
     inner.infos.lock().unwrap().entry(id.clone()).or_default().shared = true;
+    drop(guard);
     live::retopic(&inner).await;
     refresh_space_directory(&inner, &pkarr_client(&inner)?, &id, true).await;
     Ok(())
@@ -128,9 +178,14 @@ pub(crate) async fn join_share(
     // Joining again after "Remove From All Devices" brings it back.
     inner.account_doc.del(inner.author, format!("removed/{id}")).await?;
     inner.account_doc.set_bytes(inner.author, member_key(&inner, &id), b"1".to_vec()).await?;
-    let info = serde_json::to_vec(&json!({"name": name, "kind": kind, "secret": hex(&secret), "shared": true}))?;
-    inner.account_doc.set_bytes(inner.author, format!("share/{id}"), info).await?;
-    open_share(inner, id, device).await
+    let owned = saved_settings(&inner, &id).await?.filter(|info| {
+        let saved = info["secret"].as_str().or_else(|| info["owner_key"].as_str()).and_then(crate::parse_hex32);
+        saved.unwrap_or_else(|| crate::space_secret(&inner.account, &id)) == secret
+    });
+    let info = owned.unwrap_or_else(|| json!({"name": name, "kind": kind, "secret": hex(&secret), "shared": true}));
+    inner.account_doc.set_bytes(inner.author, format!("share/{id}"), serde_json::to_vec(&info)?).await?;
+    crate::emit_shares(&inner).await?;
+    if inner.can_sync(&id) { open_share(inner, id, device).await } else { Ok(()) }
 }
 
 /// Stops syncing here; a share nobody syncs anymore leaves the account.
@@ -227,10 +282,12 @@ async fn missing_content(inner: &Inner, bundle_hash: Hash) -> Result<Vec<Hash>> 
 
 async fn emit_head(inner: &Inner, id: &str, doc: &Doc, device: &str, manifest: &serde_json::Value) {
     inner.waiting.lock().unwrap().entry(id.to_string()).or_default().remove(device);
+    if !inner.current_doc(id, doc) { return; }
     let name = match latest(doc, format!("name/{device}").as_bytes()).await {
         Ok(Some(entry)) => inner.blobs.get_bytes(entry.content_hash()).await.ok().map(|b| String::from_utf8_lossy(&b).into_owned()),
         _ => None,
     };
+    if !inner.current_doc(id, doc) { return; }
     inner.emit(json!({
         "type": "head", "share": id, "device": device, "node": manifest["node"], "name": name,
         "parents": manifest["parents"],
@@ -253,7 +310,7 @@ fn chase_head(inner: &Arc<Inner>, id: &str, doc: &Doc, device: &str, bundle_hash
         loop {
             sleep(delay).await;
             let waiting = inner.waiting.lock().unwrap().get(id).and_then(|w| w.get(device)).copied();
-            if waiting != Some(bundle_hash) || !inner.shares.lock().unwrap().contains_key(id) {
+            if waiting != Some(bundle_hash) || !inner.current_doc(id, &doc) || !inner.shares.lock().unwrap().contains_key(id) {
                 break;
             }
             for hash in missing_content(&inner, bundle_hash).await.unwrap_or_default() {
@@ -285,6 +342,7 @@ async fn watch_share(
     mut events: impl n0_future::Stream<Item = Result<LiveEvent>> + Unpin,
 ) {
     while let Some(event) = events.next().await {
+        if !inner.current_doc(&id, &doc) { break; }
         let event = match event {
             Ok(event) => event,
             Err(err) => return inner.error("share replica", err),
@@ -338,6 +396,7 @@ where
     }
     let size = bundle_bytes.len() as u64;
     let tag = inner.blobs.add_bytes(bundle_bytes).await?;
+    if !inner.current_doc(&id, &share.doc) { return Err(anyhow!("Sharing settings changed during publish")); }
     let key = head_key(&inner.endpoint.id().to_string());
     share.doc.set_hash(share.author, Bytes::from(key.into_bytes()), tag.hash, size).await?;
     inner.emit(json!({"type": "published-node", "share": id, "node": manifest["node"]}));
@@ -388,6 +447,7 @@ pub(crate) fn share_list(
             info["shared"] = json!(info["shared"].as_bool().unwrap_or(false) || info["secret"].is_string());
             if let Some(fields) = info.as_object_mut() {
                 fields.remove("secret");
+                fields.remove("owner_key");
             }
             if !info["kind"].is_string() {
                 info["kind"] = json!("space");
@@ -404,6 +464,38 @@ pub(crate) fn share_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn revoked_keys_survive_the_last_owner_leaving_and_restoring() -> Result<()> {
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal).bind().await?;
+        let mem = iroh_blobs::store::mem::MemStore::new();
+        let blobs = (*mem).clone();
+        let gossip = iroh_gossip::net::Gossip::builder().max_message_size(crate::MAX_GOSSIP_MESSAGE).spawn(endpoint.clone());
+        let docs = iroh_docs::protocol::Docs::memory().spawn(endpoint.clone(), blobs.clone(), gossip.clone()).await?;
+        let inner = crate::start(crate::Parts { endpoint, store: Box::new(mem), blobs, gossip, docs }, [7; 32], Box::new(|_| {})).await?;
+        add_share(inner.clone(), "s".into(), "Notes".into(), "space".into(), "Mac".into()).await?;
+        configure_share(inner.clone(), "s".into(), true, true, false).await?;
+        let old = inner.namespace("s");
+        configure_share(inner.clone(), "s".into(), true, false, false).await?;
+        let revoked = inner.namespace("s");
+        assert_ne!(old, revoked);
+        leave_share(inner.clone(), "s".into()).await?;
+        add_share(inner.clone(), "s".into(), "Notes".into(), "space".into(), "Mac".into()).await?;
+        assert_eq!(inner.namespace("s"), revoked);
+        assert!(!inner.is_shared("s"));
+        inner.endpoint.close().await;
+        Ok(())
+    }
+
+    #[test]
+    fn rotated_owner_keys_are_private_and_do_not_mark_a_share_joined() {
+        let info = json!({"name": "Notes", "owner_key": "ab".repeat(32), "devices": false, "shared": false, "host": "a"});
+        let (list, _) = share_list(vec![("s".into(), info)], &[], &HashMap::new());
+        assert_eq!(list[0]["joined"], false);
+        assert_eq!(list[0]["shared"], false);
+        assert_eq!(list[0]["devices"], false);
+        assert!(list[0].get("owner_key").is_none());
+    }
 
     #[test]
     fn share_replicas_are_apart_from_space_replicas() {

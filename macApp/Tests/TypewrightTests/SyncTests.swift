@@ -312,6 +312,107 @@ final class SyncNetworkTests: XCTestCase {
         try await eventually("shared on both") { a.isShared(file) && b.isShared(destination) }
     }
 
+    func testDeviceSyncCanBeUnlinkedWhileSharingContinues() async throws {
+        let (a, rootA, b, rootB) = try await sharedSpace("initial\n")
+        let guest = try await device("guest", account: account())
+        let link = try XCTUnwrap(a.inviteLink(for: rootA))
+        let invite = try XCTUnwrap(parseInvite(link: link))
+        let rootGuest = guest.repository.url(of: "Shared")
+        XCTAssertNotNil(guest.join(invite, at: rootGuest))
+        try await eventually("guest joined") { read(rootGuest.appendingPathComponent("main.typ")) == "initial\n" }
+
+        let unlinked = await a.configure(rootA, devices: false, shared: true)
+        XCTAssertTrue(unlinked)
+        try await eventually("device sync unlinked") { !a.isSynced(rootA) && !b.isSynced(rootB) && !b.isShared(rootB) }
+        XCTAssertTrue(a.isShared(rootA))
+        try write("still shared\n", to: rootA.appendingPathComponent("main.typ"))
+        await commit(a)
+        try await eventually("guest still receives edits") { read(rootGuest.appendingPathComponent("main.typ")) == "still shared\n" }
+        XCTAssertEqual(read(rootB.appendingPathComponent("main.typ")), "initial\n")
+
+        let linked = await a.configure(rootA, devices: true, shared: true)
+        XCTAssertTrue(linked)
+        try await eventually("own device rejoins") { b.isSynced(rootB) && read(rootB.appendingPathComponent("main.typ")) == "still shared\n" }
+    }
+
+    func testRevokingALinkDisconnectsParticipantsAndKeepsDeviceSync() async throws {
+        let (a, rootA, b, rootB) = try await sharedSpace("before revocation\n")
+        let guest = try await device("guest", account: account())
+        let invite = try XCTUnwrap(parseInvite(link: try XCTUnwrap(a.inviteLink(for: rootA))))
+        let rootGuest = guest.repository.url(of: "Shared")
+        XCTAssertNotNil(guest.join(invite, at: rootGuest))
+        try await eventually("guest joined") { read(rootGuest.appendingPathComponent("main.typ")) == "before revocation\n" }
+
+        let revoked = await a.configure(rootA, devices: true, shared: false)
+        XCTAssertTrue(revoked)
+        try await eventually("revoked on own devices") { !a.isShared(rootA) && !b.isShared(rootB) }
+        XCTAssertTrue(a.isSynced(rootA))
+        XCTAssertTrue(b.isSynced(rootB))
+        try write("after revocation\n", to: rootA.appendingPathComponent("main.typ"))
+        await commit(a)
+        try await eventually("private edits reach own device") { read(rootB.appendingPathComponent("main.typ")) == "after revocation\n" }
+        XCTAssertEqual(read(rootGuest.appendingPathComponent("main.typ")), "before revocation\n")
+        try write("revoked guest edit\n", to: rootGuest.appendingPathComponent("main.typ"))
+        await commit(guest)
+
+        try await eventually("revoked guest has published locally") { guest.status(for: rootGuest) != .syncing }
+        XCTAssertEqual(read(rootA.appendingPathComponent("main.typ")), "after revocation\n")
+        let replacement = try XCTUnwrap(parseInvite(link: try XCTUnwrap(a.inviteLink(for: rootA))))
+        XCTAssertNotEqual(replacement.secret, invite.secret)
+        XCTAssertFalse(a.accountShare(for: rootA)?.joined ?? true)
+        XCTAssertNotNil(guest.join(replacement, at: rootGuest))
+        try await eventually("replacement link reopens sharing") { guest.accountShare(for: rootGuest)?.shared == true && !guest.repository.conflicted.isEmpty }
+        let merged = read(rootGuest.appendingPathComponent("main.typ")) ?? ""
+        XCTAssertTrue(merged.contains("after revocation"))
+        XCTAssertTrue(merged.contains("revoked guest edit"))
+    }
+
+    func testRevocationSurvivesDeletingAndRestoringTheLastOwnerCopy() async throws {
+        let a = try await device("a", account: account())
+        let guest = try await device("guest", account: account())
+        let rootA = a.repository.url(of: "Notes")
+        try write("original\n", to: rootA.appendingPathComponent("main.typ"))
+        await commit(a)
+        XCTAssertNotNil(a.share(rootA))
+        let invite = try XCTUnwrap(parseInvite(link: try XCTUnwrap(a.inviteLink(for: rootA))))
+        let rootGuest = guest.repository.url(of: "Shared")
+        XCTAssertNotNil(guest.join(invite, at: rootGuest))
+        try await eventually("guest joined") { read(rootGuest.appendingPathComponent("main.typ")) == "original\n" }
+        let revoked = await a.configure(rootA, devices: true, shared: false)
+        XCTAssertTrue(revoked)
+        let deletion = await a.repository.delete([rootA], message: "Delete Notes")
+        let item = try XCTUnwrap(deletion?.first)
+        try await eventually("last owner leaves") { a.accountShares.isEmpty }
+        let restored = await a.repository.restore(item, to: rootA)
+        XCTAssertEqual(restored, .restored)
+        try await eventually("owner resumes privately") { a.accountShare(for: rootA) != nil && a.isSynced(rootA) }
+        XCTAssertFalse(a.accountShare(for: rootA)?.joined ?? true)
+        XCTAssertFalse(a.isShared(rootA))
+        try write("restored privately\n", to: rootA.appendingPathComponent("main.typ"))
+        await commit(a)
+        try await eventually("private edit published") { a.status(for: rootA) != .syncing }
+        XCTAssertEqual(read(rootGuest.appendingPathComponent("main.typ")), "original\n")
+        let replacement = try XCTUnwrap(parseInvite(link: try XCTUnwrap(a.inviteLink(for: rootA))))
+        XCTAssertNotEqual(replacement.secret, invite.secret)
+    }
+
+    func testRelinksADeviceShareToAnExistingSpaceAndMerges() async throws {
+        let (a, rootA, b, rootB) = try await sharedSpace("common\n")
+        let id = try XCTUnwrap(b.shareID(for: rootB))
+        b.stopSyncing(rootB)
+        try await eventually("space can be linked again") { b.elsewhere.contains { $0.id == id } }
+        try write("remote file\n", to: rootA.appendingPathComponent("remote.typ"))
+        try write("local file\n", to: rootB.appendingPathComponent("local.typ"))
+        await commit(a, b)
+        let share = try XCTUnwrap(b.elsewhere.first { $0.id == id })
+        XCTAssertNotNil(b.join(share, at: rootB, merge: true))
+        try await eventually("both sets of files merge") {
+            read(rootA.appendingPathComponent("local.typ")) == "local file\n" && read(rootB.appendingPathComponent("remote.typ")) == "remote file\n"
+        }
+        XCTAssertEqual(read(rootA.appendingPathComponent("main.typ")), "common\n")
+        XCTAssertEqual(read(rootB.appendingPathComponent("main.typ")), "common\n")
+    }
+
     /// An editor's side of a live session, as `LiveEditing` does it.
     @MainActor private final class Editor {
         let service: SyncService

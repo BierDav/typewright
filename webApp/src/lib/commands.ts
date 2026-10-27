@@ -1,7 +1,7 @@
 // Editor commands shared by key bindings and the command palette.
 import { openSearchPanel } from "@codemirror/search";
 import type { EditorView } from "@codemirror/view";
-import { alert, choose, copyText, editorView, prompt, setOverlay, toast, workspace } from "./app";
+import { alert, choose, confirm, copyText, editorView, prompt, setOverlay, toast, workspace } from "./app";
 import { identity } from "./identity";
 import { goToDefinition, showDocs, type LanguageContext } from "./editor/language";
 import * as refactor from "./editor/refactor";
@@ -123,33 +123,42 @@ export async function exportPDF() {
   download(name, result, "application/pdf");
 }
 
-/** Share… for a space, folder or file (repository path): sync it to this account's devices, or invite others. */
+/** One palette for sharing links and device sync. */
 export async function share(path: string) {
-  if (!syncService.isRunning()) {
-    return alert("Syncing isn't running.", "Sign in with your passkey in Settings › Devices first.");
-  }
-  const name = fs.basename(path);
-  const synced = syncService.isSynced(path);
-  const choice = await choose(
-    `Share “${name}”`,
-    "Syncing keeps it the same on every device of your account. An invite link lets other people's accounts sync and edit it too, so only send it to people you trust; they need a Typewright account, in the Mac app or in the browser.",
-    [
-      { label: "Cancel", value: "cancel", role: "cancel" },
-      synced ? { label: "Stop Syncing on This Device", value: "stop" } : { label: "Sync to My Devices", value: "sync" },
-      { label: "Copy Invite Link", value: "invite", role: "default" },
-    ],
-  );
-  if (choice === "stop") return syncService.stopSyncing(path);
-  if (choice === "sync") return void (await syncService.share(path));
-  if (choice !== "invite") return;
-  if (!synced && !(await syncService.share(path))) return alert(`Couldn't share “${name}”.`);
+  if (!syncService.isRunning()) return alert("Syncing isn't running.", "Sign in with your account in Settings › Devices first.");
+  setOverlay({ type: "palette", page: `sharing:${path}` });
+}
+
+export async function changeDeviceSync(path: string) {
+  const enabled = syncService.isSynced(path);
+  const shared = syncService.accountShare(path)?.shared ?? false;
+  if (!(await syncService.configure(path, !enabled, shared))) await alert("Couldn't change device sync.", syncService.sync.lastError ?? undefined);
+}
+
+export async function createSharingLink(path: string) {
+  const replace = syncService.accountShare(path)?.shared ?? false;
+  if (replace && !(await confirm("Replace the sharing link?", "The old link and everyone who used it lose future access. Your devices keep syncing.", "Replace"))) return;
+  const devices = syncService.isSynced(path);
+  if (!(await syncService.configure(path, devices, true, replace))) return alert("Couldn't create a sharing link.", syncService.sync.lastError ?? undefined);
+  await copySharingLink(path);
+}
+
+export async function copySharingLink(path: string, web = false) {
   const link = syncService.inviteLink(path);
-  if (!link) return alert("Couldn't create an invite link.", "Syncing has to be running; check Settings › Devices.");
-  await copyText(link, "Invite link copied");
-  await alert("Invite link copied", "Send it to the people you invite. The first link opens in the Mac app; the second joins in the browser.", [
-    link,
-    syncService.webInviteLink(link),
-  ]);
+  if (!link) return alert("Couldn't copy the sharing link.", syncService.sync.lastError ?? undefined);
+  await copyText(web ? syncService.webInviteLink(link) : link, "Sharing link copied");
+}
+
+export async function revokeSharingLink(path: string) {
+  if (!(await confirm("Revoke the sharing link?", "Everyone using this link loses future access. Their existing copies stay on their devices. Your device-sync setting stays unchanged.", "Revoke", true))) return;
+  if (!(await syncService.configure(path, syncService.isSynced(path), false))) await alert("Couldn't revoke the sharing link.", syncService.sync.lastError ?? undefined);
+}
+
+export async function linkAccountShare(share: syncService.AccountShare, path: string) {
+  if (!(await confirm(`Link “${share.name}” to “${fs.basename(path)}”?`, "Both spaces' contents are merged. Conflicting edits stay available to resolve.", "Link and Merge"))) return;
+  const joined = await syncService.join(share, path, true);
+  if (!joined) return alert("Couldn't link the space.", syncService.sync.lastError ?? undefined);
+  setOverlay(null);
 }
 
 type DestinationRequest = { name: string; file: boolean; resolve: (path: string | null) => void };
@@ -193,7 +202,10 @@ export async function joinFromLink(text?: string): Promise<string | null> {
     return null;
   }
   const existing = syncService.pathOf(invite.id);
-  if (existing) return fs.split(existing)[0];
+  if (existing) {
+    await syncService.joinInvite(invite, existing);
+    return fs.split(existing)[0];
+  }
   const dest = await pickDestination(invite.name, !!invite.file);
   if (!dest) return null;
   const path = await syncService.joinInvite(invite, dest);

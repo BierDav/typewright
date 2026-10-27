@@ -6,10 +6,11 @@ import { CloudOff, MonitorSmartphone, RefreshCw, TriangleAlert, Users } from "./
 export function SyncBadge(props: { path: string }) {
   const state = () => syncService.status(props.path);
   return (
-    <Show when={syncService.isSynced(props.path)}>
-      <Show when={syncService.isShared(props.path)} fallback={
+    <Show when={syncService.isSynced(props.path) || syncService.isShared(props.path)}>
+      <Show when={syncService.isSynced(props.path)}>
         <span title="Available on your devices"><MonitorSmartphone size={13} class="secondary" aria-label="Available on your devices" /></span>
-      }>
+      </Show>
+      <Show when={syncService.isShared(props.path)}>
         <span title="Shared with others"><Users size={13} class="secondary" aria-label="Shared with others" /></span>
       </Show>
       <Switch>

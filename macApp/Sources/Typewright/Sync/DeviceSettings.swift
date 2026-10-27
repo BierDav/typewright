@@ -93,11 +93,6 @@ struct DeviceSettings: View {
                                 Button { Invites.share(url) } label: { Image(systemName: "person.badge.plus") }
                                     .buttonStyle(.borderless)
                                     .help("Share…")
-                                Menu("Stop Syncing") {
-                                    Button("On This Mac") { sync.stopSyncing(id: id) }
-                                    Button("On All Devices") { sync.removeEverywhere(id) }
-                                }
-                                .fixedSize()
                             }
                         } label: {
                             Text(url.lastPathComponent)
@@ -160,7 +155,9 @@ struct DeviceSettings: View {
         } else if let status = sync.statuses[id] {
             parts.append(SyncStatusLabel.title(status))
         }
-        if sync.accountShares.contains(where: { $0.id == id && $0.shared }) { parts.append("Shared") }
+        if sync.isSynced(sync.repository.url(of: share.path)) { parts.append("Device sync") }
+        if sync.isShared(sync.repository.url(of: share.path)) { parts.append("Shared") }
+        if parts.isEmpty { parts.append("Unlinked") }
         if share.kind != .space { parts.append((share.path as NSString).deletingLastPathComponent) }
         return parts.joined(separator: " · ")
     }

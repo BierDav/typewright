@@ -103,6 +103,8 @@ pub(crate) struct Inner {
     live: Mutex<HashMap<(String, String), live::Session>>,
     /// Serializes opening shares, so each is subscribed once.
     opening: tokio::sync::Mutex<()>,
+    configuring: tokio::sync::Mutex<()>,
+    refreshing: tokio::sync::Mutex<()>,
     neighbors: Mutex<HashSet<EndpointId>>,
     devices: Mutex<Vec<EndpointId>>,
     sink: Sink,
@@ -118,13 +120,22 @@ unsafe impl Sync for Inner {}
 pub(crate) struct Space {
     doc: Doc,
     author: AuthorId,
+    secret: [u8; 32],
 }
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct SpaceInfo {
-    /// Set for spaces joined from a link; others derive theirs from the account.
+    /// Joined and rotated keys override the original account derivation.
     secret: Option<[u8; 32]>,
     shared: bool,
+    devices: bool,
+    host: Option<String>,
+}
+
+impl Default for SpaceInfo {
+    fn default() -> Self {
+        Self { secret: None, shared: false, devices: true, host: None }
+    }
 }
 
 impl Inner {
@@ -160,13 +171,25 @@ impl Inner {
     /// The account's devices plus, for shared spaces, everyone else syncing it.
     fn space_peers(&self, id: &str) -> Vec<EndpointId> {
         let me = self.endpoint.id();
-        let mut peers: Vec<EndpointId> = self.devices.lock().unwrap().clone();
+        let devices = self.devices.lock().unwrap().clone();
+        let enabled = self.infos.lock().unwrap().get(id).is_none_or(|info| info.devices);
+        let mut peers = if enabled { devices.clone() } else { Vec::new() };
         if self.is_shared(id) {
-            peers.extend(self.space_devices.lock().unwrap().get(id).cloned().unwrap_or_default());
+            peers.extend(self.space_devices.lock().unwrap().get(id).cloned().unwrap_or_default().into_iter().filter(|peer| enabled || !devices.contains(peer)));
         }
         let mut seen = HashSet::new();
         peers.retain(|p| *p != me && seen.insert(*p));
         peers
+    }
+
+    fn can_sync(&self, id: &str) -> bool {
+        self.infos.lock().unwrap().get(id).is_none_or(|info| {
+            info.devices || (info.shared && info.host.as_deref() == Some(&self.endpoint.id().to_string()))
+        })
+    }
+
+    fn current_doc(&self, id: &str, doc: &Doc) -> bool {
+        self.can_sync(id) && doc.id() == shares::share_namespace(&self.namespace(id)).id()
     }
 
     fn namespace(&self, id: &str) -> [u8; 32] {
@@ -174,7 +197,7 @@ impl Inner {
     }
 
     fn is_shared(&self, id: &str) -> bool {
-        self.infos.lock().unwrap().get(id).is_some_and(|info| info.shared || info.secret.is_some())
+        self.infos.lock().unwrap().get(id).is_some_and(|info| info.shared)
     }
 }
 
@@ -219,8 +242,10 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// A space's keys as its `space/<id>` entry in the account replica describes them.
 fn space_info(value: &serde_json::Value) -> SpaceInfo {
     SpaceInfo {
-        secret: value["secret"].as_str().and_then(parse_hex32),
-        shared: value["shared"].as_bool().unwrap_or(false),
+        secret: value["owner_key"].as_str().or_else(|| value["secret"].as_str()).and_then(parse_hex32),
+        shared: value["shared"].as_bool().unwrap_or(false) || value["secret"].is_string(),
+        devices: value["devices"].as_bool().unwrap_or(true),
+        host: value["host"].as_str().map(str::to_string),
     }
 }
 
@@ -265,6 +290,8 @@ pub(crate) async fn start(parts: Parts, account: [u8; 32], sink: Sink) -> Result
         topics: Mutex::new(HashMap::new()),
         live: Mutex::new(HashMap::new()),
         opening: tokio::sync::Mutex::new(()),
+        configuring: tokio::sync::Mutex::new(()),
+        refreshing: tokio::sync::Mutex::new(()),
         neighbors: Mutex::new(HashSet::new()),
         devices: Mutex::new(Vec::new()),
         sink,
@@ -420,7 +447,8 @@ pub(crate) fn track(inner: &Inner, peer: EndpointId, up: bool) {
 
 /// Lists the account's shares with the devices syncing each (`member/<share>/<device>`), and the
 /// shares removed from all devices (`removed/<share>`); remembers the shares' keys on the way.
-async fn emit_shares(inner: &Inner) -> Result<()> {
+async fn emit_shares(inner: &Arc<Inner>) -> Result<()> {
+    let _guard = inner.refreshing.lock().await;
     let mut members: HashMap<String, Vec<String>> = HashMap::new();
     let mut removed = Vec::new();
     let all = inner.account_doc.get_many(Query::single_latest_per_key().build()).await?;
@@ -438,7 +466,15 @@ async fn emit_shares(inner: &Inner) -> Result<()> {
     }
     let mut infos = HashMap::new();
     let raw_spaces = account_entries(inner, "space/").await?;
-    let raw_shares = account_entries(inner, "share/").await?;
+    let mut raw_shares = account_entries(inner, "share/").await?;
+    let keys: HashMap<String, serde_json::Value> = account_entries(inner, "key/").await?.into_iter().collect();
+    for (id, info) in &mut raw_shares {
+        if !info["secret"].is_string() {
+            if let Some(key) = keys.get(id).and_then(|settings| settings["owner_key"].as_str()) {
+                info["owner_key"] = json!(key);
+            }
+        }
+    }
     for (id, info) in &raw_spaces {
         infos.insert(id.clone(), space_info(info));
     }
@@ -454,12 +490,21 @@ async fn emit_shares(inner: &Inner) -> Result<()> {
         known.retain(|id, info| (shares.contains_key(id) || info.secret.is_some()) && !infos.contains_key(id));
         known.extend(infos);
     }
+    let opened: Vec<(String, Space)> = inner.shares.lock().unwrap().iter().map(|(id, share)| (id.clone(), share.clone())).collect();
+    let reset: Vec<String> = opened.into_iter().filter(|(id, share)| !inner.can_sync(id) || share.secret != inner.namespace(id)).map(|(id, _)| id).collect();
+    for id in &reset {
+        let share = inner.shares.lock().unwrap().remove(id);
+        inner.waiting.lock().unwrap().remove(id);
+        inner.space_devices.lock().unwrap().remove(id);
+        live::leave(inner, id);
+        if let Some(share) = share { share.doc.leave().await?; }
+    }
     let (shares, migrate) = shares::share_list(raw_shares, &raw_spaces, &members);
     // Spaces listed before shares become space shares for all devices.
     for (id, info) in migrate {
         inner.account_doc.set_bytes(inner.author, format!("share/{id}"), serde_json::to_vec(&info)?).await?;
     }
-    inner.emit(json!({"type": "shares", "shares": shares, "removed": removed}));
+    inner.emit(json!({"type": "shares", "shares": shares, "removed": removed, "reset": reset}));
     Ok(())
 }
 
@@ -489,7 +534,7 @@ pub(crate) async fn latest(doc: &Doc, key: &[u8]) -> Result<Option<iroh_docs::En
 
 /// Remembers a joined share's keys and the devices its invite named, before anything opens it.
 pub(crate) fn begin_join(inner: &Inner, id: &str, secret: [u8; 32], hints: Vec<EndpointId>) {
-    inner.infos.lock().unwrap().insert(id.to_string(), SpaceInfo { secret: Some(secret), shared: true });
+    inner.infos.lock().unwrap().insert(id.to_string(), SpaceInfo { secret: Some(secret), shared: true, ..SpaceInfo::default() });
     inner.space_devices.lock().unwrap().insert(id.to_string(), hints);
 }
 

@@ -227,6 +227,18 @@ pub unsafe extern "C" fn tws_share_invite(
     CString::new(hex(&secret)).unwrap_or_default().into_raw()
 }
 
+/// Configures device sync and sharing independently; answers with a `configured` event.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tws_configure_share(node: *const TWSyncNode, share: *const c_char, devices: i32, shared: i32, rotate: i32, request: i64) {
+    let node = unsafe { &*node };
+    let id = unsafe { string(share) };
+    let inner = node.inner.clone();
+    node.runtime.spawn(async move {
+        let result = shares::configure_share(inner.clone(), id, devices != 0, shared != 0, rotate != 0).await;
+        inner.emit(serde_json::json!({"type": "configured", "request": request, "ok": result.is_ok(), "message": result.err().map(|e| format!("{e:#}"))}));
+    });
+}
+
 /// Starts syncing a share from an invite: `secret` is hex and `hints` comma separated endpoint ids to dial first.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tws_join_share(
