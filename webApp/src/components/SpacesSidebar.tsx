@@ -109,24 +109,25 @@ function addMenu(): MenuItem[] {
   ];
 }
 
+export async function fetchSpace(share: syncService.AccountShare) {
+  if (share.kind === "space") {
+    const ok = await choose(`Download “${share.name}”?`, "Its files download from your other devices into a new space here and stay in sync.", [
+      { label: "Cancel", value: "cancel", role: "cancel" },
+      { label: "Download", value: "ok", role: "default" },
+    ]);
+    if (ok !== "ok") return;
+  }
+  // Own spaces land next to the others; folders and files go where the user picks.
+  const dest = share.kind === "space" ? await syncService.suggestedDestination(share) : await commands.pickDestination(share.name, share.kind === "file");
+  if (!dest) return;
+  const path = await syncService.join(share, dest);
+  if (path) openSpace(path.split("/")[0]);
+  return path;
+}
+
 export default function SpacesSidebar() {
   const [dragging, setDragging] = createSignal<string | null>(null);
   const [over, setOver] = createSignal<number | null>(null);
-
-  async function fetchSpace(share: syncService.AccountShare) {
-    if (share.kind === "space") {
-      const ok = await choose(`Download “${share.name}”?`, "Its files download from your other devices into a new space here and stay in sync.", [
-        { label: "Cancel", value: "cancel", role: "cancel" },
-        { label: "Download", value: "ok", role: "default" },
-      ]);
-      if (ok !== "ok") return;
-    }
-    // Own spaces land next to the others; folders and files go where the user picks.
-    const dest = share.kind === "space" ? await syncService.suggestedDestination(share) : await commands.pickDestination(share.name, share.kind === "file");
-    if (!dest) return;
-    const path = await syncService.join(share, dest);
-    if (path) openSpace(path.split("/")[0]);
-  }
 
   return (
     <nav class="spaces-sidebar">

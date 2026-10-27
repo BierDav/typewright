@@ -7,18 +7,25 @@ struct SyncStatusLabel: View {
     let shared: Bool
 
     var body: some View {
-        Image(systemName: Self.symbol(status, shared: shared))
-            .font(.system(size: 10))
-            .foregroundStyle(status == .conflicts ? AnyShapeStyle(.yellow) : AnyShapeStyle(.tertiary))
-            .symbolEffect(.pulse, isActive: status == .syncing)
-            .help(Self.title(status ?? .synced) + (shared ? " · Shared with others" : " · Synced across your devices"))
+        HStack(spacing: 3) {
+            Image(systemName: shared ? "person.2" : "laptopcomputer.and.iphone")
+            if let statusSymbol {
+                Image(systemName: statusSymbol)
+                    .foregroundStyle(status == .conflicts ? AnyShapeStyle(.yellow) : AnyShapeStyle(.tertiary))
+                    .symbolEffect(.pulse, isActive: status == .syncing)
+            }
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(.tertiary)
+        .help((shared ? "Shared with others" : "Available on your devices") + " · " + Self.title(status ?? .synced))
     }
 
-    static func symbol(_ status: ShareStatus?, shared: Bool) -> String {
+    private var statusSymbol: String? {
         switch status {
         case .conflicts: "exclamationmark.triangle.fill"
         case .offline: "icloud.slash"
-        default: shared ? "person.2" : "arrow.triangle.2.circlepath"
+        case .syncing: "arrow.triangle.2.circlepath"
+        default: nil
         }
     }
 

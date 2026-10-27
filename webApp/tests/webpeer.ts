@@ -31,10 +31,6 @@ const context = await chromium.launchPersistentContext(profile, {
   executablePath: process.env.CHROMIUM ?? chromium.executablePath(),
   headless: true,
 });
-// The test's account, stored the way a passkey sign-in stores it.
-await context.addInitScript((secret: string) => {
-  if (!localStorage.getItem("typewright.account")) localStorage.setItem("typewright.account", JSON.stringify({ secret, name: "web peer test" }));
-}, secret);
 const page = context.pages()[0] ?? (await context.newPage());
 const logs: string[] = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
@@ -70,11 +66,30 @@ async function load() {
 let failed = false;
 try {
   await page.goto(URL);
+  await page.evaluate(async (secret) => {
+    const load = (path: string) => import(path);
+    const identity = await load("/src/lib/identity.ts");
+    const sync = await load("/src/lib/sync.ts");
+    await identity.signInWithKey(secret.match(/.{8}/g)!.join("-"));
+    await sync.restart();
+  }, secret);
   await load();
   log(`device ${await ev<string>(`return sync.sync.deviceId;`)}`);
 
   // 1. Download the Mac's space.
   await until("space listed", `return sync.elsewhere().some((s) => s.name === "Thesis");`);
+  await page.evaluate(async () => {
+    const load = (path: string) => import(path);
+    const app = await load("/src/lib/app.ts");
+    app.setOverlay({ type: "settings", tab: "devices" });
+  });
+  const available = page.locator("section").filter({ has: page.getByRole("heading", { name: "Available on Your Devices", exact: true }) });
+  await available.getByText("Thesis", { exact: true }).waitFor();
+  await available.getByRole("button", { name: "Download…" }).waitFor();
+  await page.evaluate(async () => {
+    const load = (path: string) => import(path);
+    (await load("/src/lib/app.ts")).setOverlay(null);
+  });
   await ev(`const share = sync.elsewhere().find((s) => s.name === "Thesis"); return await sync.join(share, await sync.suggestedDestination(share));`);
   await until("files arrived", `
     const text = await fs.readText("spaces/Thesis/main.typ");

@@ -1,12 +1,17 @@
 import { Match, Show, Switch } from "solid-js";
 import * as syncService from "~/lib/sync";
-import { Cloud, CloudOff, RefreshCw, TriangleAlert, Users } from "./icons";
+import { CloudOff, MonitorSmartphone, RefreshCw, TriangleAlert, Users } from "./icons";
 
-/** A share's state beside its name: conflicts, syncing, offline, or synced (shared with others or not). */
+/** Sharing stays visible while transfers and connection status change. */
 export function SyncBadge(props: { path: string }) {
   const state = () => syncService.status(props.path);
   return (
     <Show when={syncService.isSynced(props.path)}>
+      <Show when={syncService.isShared(props.path)} fallback={
+        <span title="Available on your devices"><MonitorSmartphone size={13} class="secondary" aria-label="Available on your devices" /></span>
+      }>
+        <span title="Shared with others"><Users size={13} class="secondary" aria-label="Shared with others" /></span>
+      </Show>
       <Switch>
         <Match when={state() === "Conflicts"}>
           <span title="Conflicts to resolve"><TriangleAlert size={13} class="warning" aria-label="Conflicts" /></span>
@@ -16,12 +21,6 @@ export function SyncBadge(props: { path: string }) {
         </Match>
         <Match when={state() === "Offline"}>
           <span title="None of the other devices is connected"><CloudOff size={13} class="secondary" aria-label="Offline" /></span>
-        </Match>
-        <Match when={syncService.isShared(props.path)}>
-          <span title="Shared with others"><Users size={13} class="secondary" aria-label="Shared" /></span>
-        </Match>
-        <Match when={true}>
-          <span title="Synced"><Cloud size={13} class="secondary" aria-label="Synced" /></span>
         </Match>
       </Switch>
     </Show>

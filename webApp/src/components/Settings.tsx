@@ -10,6 +10,7 @@ import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
 import { pickFiles } from "~/lib/drop";
 import { cloneFromGitHub } from "~/lib/packages";
+import { fetchSpace } from "./SpacesSidebar";
 import { Download, KeyRound, Link, MonitorSmartphone, Package, Pencil, Settings as Gear, Trash2, Type, Users, X } from "./icons";
 
 const TABS: { id: SettingsTab; label: string; icon: () => JSX.Element }[] = [
@@ -551,6 +552,22 @@ function Devices() {
           <Show when={sync.lastError}>
             <div class="form-row error-text">{sync.lastError}</div>
           </Show>
+        </Section>
+        <Section title="Available on Your Devices" footer="Spaces, folders and files synced by your other devices can be downloaded here. Keep another device online while they download.">
+          <For each={syncService.elsewhere()} fallback={
+            <div class="form-row secondary">
+              {sync.status === "starting" ? "Connecting to your account…" : sync.connected.length === 0 ? "Waiting for your other devices. Open Typewright on a device that syncs your spaces." : "No other shares available to download."}
+            </div>
+          }>
+            {(share) => (
+              <Row label={share.name}>
+                <Show when={share.shared}><Users size={12} class="secondary" aria-label="Shared with others" /></Show>
+                <button class="button small" onClick={() => void fetchSpace(share).then((path) => path && setOverlay(null))}>
+                  <Download size={13} /> Download…
+                </button>
+              </Row>
+            )}
+          </For>
         </Section>
         <Section
           title="Shares"
