@@ -32,6 +32,7 @@ final class Workspace: EditorLanguage {
     let root: URL
     private(set) var tree: [FileNode] = []
     private(set) var isIndexing = false
+    private(set) var indexStartedAt: ContinuousClock.Instant?
     private(set) var indexProgress: SpaceIndex.Progress?
     private(set) var isRebuildingIndex = false
     @ObservationIgnored private var indexTask: Task<Void, Never>?
@@ -323,6 +324,7 @@ final class Workspace: EditorLanguage {
 
     private func startIndex() {
         isIndexing = true
+        indexStartedAt = .now
         indexProgress = SpaceIndex.Progress(phase: .loading)
         let root = root
         let useCache = tree.isEmpty
@@ -702,16 +704,47 @@ final class Workspace: EditorLanguage {
     }
 
     @discardableResult
-    func createFile(in dir: URL? = nil, named name: String? = nil) -> URL {
-        // A name without an extension becomes a Typst file.
-        let typed = name?.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "/", with: "-") ?? ""
-        let base = typed.isEmpty ? "untitled" : (typed as NSString).deletingPathExtension
-        let ext = typed.isEmpty || (typed as NSString).pathExtension.isEmpty ? "typ" : (typed as NSString).pathExtension
-        let url = Self.unique(in: dir ?? root, name: base, ext: ext)
-        FileManager.default.createFile(atPath: url.path, contents: Data())
+    func createFile(in dir: URL? = nil, named name: String? = nil) -> URL? {
+        guard let path = newFilePath(input: name ?? "") else {
+            PaletteDialog.message("Couldn't Create File", detail: "Enter a path relative to the space.")
+            return nil
+        }
+        let target = (dir ?? root).appendingPathComponent(path.path).standardizedFileURL
+        let folder = target.deletingLastPathComponent()
+        let resolved = folder.resolvingSymlinksInPath().path
+        let resolvedRoot = root.resolvingSymlinksInPath().path
+        guard resolved == resolvedRoot || spaceRelativePath(path: resolved, root: resolvedRoot) != nil else {
+            PaletteDialog.message("Couldn't Create File", detail: "Choose a folder inside the space.")
+            return nil
+        }
+        let url = Self.unique(in: folder, name: target.deletingPathExtension().lastPathComponent, ext: target.pathExtension)
+        var missing: [URL] = []
+        var parent = folder
+        while parent != root, !FileManager.default.fileExists(atPath: parent.path) {
+            missing.append(parent)
+            parent.deleteLastPathComponent()
+        }
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data().write(to: url, options: .withoutOverwriting)
+        } catch {
+            for folder in missing where (try? FileManager.default.contentsOfDirectory(atPath: folder.path).isEmpty) == true {
+                try? FileManager.default.removeItem(at: folder)
+            }
+            PaletteDialog.error(error)
+            return nil
+        }
+        parent = folder
+        while isInSpace(parent) {
+            expanded.insert(parent)
+            parent.deleteLastPathComponent()
+        }
         reloadTree()
         select(url)
-        recordCreation([url], name: "New File", verb: "Add")
+        if SpaceList.isInRepository(root) {
+            fileOps.performed(inverse: .deleteCreated(url, missing), name: "New File",
+                              message: "Add \(SpaceRepository.shared.messagePath(url))")
+        }
         return url
     }
 

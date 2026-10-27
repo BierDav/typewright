@@ -93,18 +93,11 @@ final class Opener {
         }
     }
 
-    func newFile(in state: WindowState? = nil) {
+    func newFile(in state: WindowState? = nil, folder: URL? = nil) {
         guard let state = state ?? keyState, let workspace = state.workspace else { return }
-        let folder = workspace.selectedFile.flatMap { workspace.isInSpace($0) ? $0.deletingLastPathComponent() : nil }
+        let folder = folder ?? workspace.selectedFile.flatMap { workspace.isInSpace($0) ? $0.deletingLastPathComponent() : nil }
             ?? workspace.root
-        state.ask(PalettePage(title: "New File in \(workspace.displayName(of: folder))",
-                              placeholder: "Name, e.g. chapter.typ", kind: .input(initial: "") { name in
-            withAnimation(.smooth(duration: 0.25)) {
-                if folder != workspace.root { workspace.expanded.insert(folder) }
-                workspace.createFile(in: folder, named: name)
-                state.setSpacesOpen(false)
-            }
-        }))
+        state.ask(.newFile(in: workspace, folder: folder) { state.setSpacesOpen(false) })
     }
 
     func closeSpace() {

@@ -5,6 +5,7 @@ import SwiftUI
 struct SidebarView: View {
     let workspace: Workspace
     let onShowSpaces: () -> Void
+    let onCreateFile: (URL) -> Void
     let onRenameSpace: (String) -> Void
     @State private var renaming: URL?
     @State private var scrolled = false
@@ -65,7 +66,6 @@ struct SidebarView: View {
                 }
                 HStack {
                     SpacesButton(active: false, action: onShowSpaces)
-                    BackgroundStatusArea(workspace: workspace)
                     Spacer(minLength: 0)
                     ZenMenuButton(systemName: "plus", size: 28, rotatesWhenOpen: true, idleFill: false) {
                         createItems(in: nil)
@@ -245,7 +245,7 @@ struct SidebarView: View {
 
     private func createItems(in dir: URL?) -> [SidebarMenuItem] {
         [
-            .init("New File", "doc.badge.plus") { create { workspace.createFile(in: dir) } },
+            .init("New File", "doc.badge.plus") { onCreateFile(dir ?? workspace.root) },
             .init("New Folder", "folder.badge.plus") { create { workspace.createFolder(in: dir) } },
         ]
     }
@@ -257,8 +257,8 @@ struct SidebarView: View {
     }
 
     /// Expands the parent and starts renaming the new item.
-    private func create(_ make: () -> URL) {
-        let url = make()
+    private func create(_ make: () -> URL?) {
+        guard let url = make() else { return }
         workspace.expanded.insert(url.deletingLastPathComponent().standardizedFileURL)
         renaming = url
     }
@@ -299,51 +299,6 @@ struct SidebarView: View {
             // The row's drag gesture sees every click, so a double click is read off the mouse-up.
             if node.isPreviewable, (NSApp.currentEvent?.clickCount ?? 1) >= 2 { workspace.previewSelectedFile(ifEnabled: true) }
         }
-    }
-}
-
-/// "Deleted ‘x’" with Undo and Show Recently Deleted; goes away on its own.
-struct FileNoticeBar: View {
-    let notice: FileNotice
-    let state: WindowState
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "trash").foregroundStyle(.secondary)
-            Text(notice.text).lineLimit(1).truncationMode(.middle)
-            Spacer(minLength: 4)
-            Button("Undo") {
-                state.undoDeletion()
-            }
-            if SpaceList.isInRepository(notice.folder) {
-                Menu {
-                    Button("Show Recently Deleted") {
-                        RecentlyDeleted.show(in: notice.folder)
-                        dismiss()
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .menuStyle(.button)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("More")
-            }
-        }
-        .buttonStyle(.borderless)
-        .font(.system(size: 12))
-        .padding(.horizontal, 10)
-        .frame(height: 32)
-        .frame(maxWidth: 480)
-        .glassEffect(.regular, in: .capsule)
-        .task(id: notice.id) {
-            try? await Task.sleep(for: .seconds(8))
-            if state.deletionNotice?.id == notice.id { dismiss() }
-        }
-    }
-
-    private func dismiss() {
-        withAnimation(.smooth(duration: 0.25)) { if state.deletionNotice?.id == notice.id { state.dismissDeletion() } }
     }
 }
 

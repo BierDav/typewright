@@ -14,6 +14,8 @@ enum FileOp {
     /// Moves across the library's edge, like importing by dragging from Finder.
     case moveExternal([Move])
     case delete([URL])
+    case deleteCreated(URL, [URL])
+    case restoreCreated([DeletedItem], [URL])
     /// Deleted items back at their own paths.
     case restore([DeletedItem])
     case restoreExternal([FileOp.Move])
@@ -153,6 +155,17 @@ final class FileOperations {
             workspace?.forgetRemoved(done.map(\.from))
             await commit(message)
             return .moveExternal(done.reversed().map(\.reversed))
+        case .deleteCreated(let file, let folders):
+            guard case .restore(let items)? = await execute(.delete([file]), message: message) else { return nil }
+            for folder in folders where (try? FileManager.default.contentsOfDirectory(atPath: folder.path).isEmpty) == true {
+                try? FileManager.default.removeItem(at: folder)
+            }
+            await commit(message)
+            workspace?.reloadTree()
+            return .restoreCreated(items, folders)
+        case .restoreCreated(let items, let folders):
+            guard case .delete(let files)? = await execute(.restore(items), message: message), let file = files.first else { return nil }
+            return .deleteCreated(file, folders)
         case .delete(let urls):
             workspace?.flushSaves()
             let urls = urls.filter { FileManager.default.fileExists(atPath: $0.path) || SpaceFolders.isLink($0) }

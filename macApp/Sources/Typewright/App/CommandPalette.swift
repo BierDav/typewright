@@ -150,6 +150,9 @@ struct PalettePage {
     let kind: Kind
     var onSelect: ((String) -> Void)? = nil
     var preview: (() -> AnyView)? = nil
+    var suggestions: ((String) -> [String])? = nil
+    var inputHint: ((String) -> String?)? = nil
+    var inputTitle: ((String) -> String?)? = nil
 }
 
 /// Linear-style command menu: type to filter commands and files, arrows to move, Return to run.
@@ -190,15 +193,24 @@ struct CommandPalette: View {
                     .onKeyPress(.downArrow) { move(1); return .handled }
                     .onKeyPress(.upArrow) { move(-1); return .handled }
                     .onKeyPress(.escape) { back(); return .handled }
+                    .onKeyPress(.tab) {
+                        guard let suggestions = page?.suggestions?(query), !suggestions.isEmpty else { return .ignored }
+                        query = suggestions[min(max(selection - 1, 0), suggestions.count - 1)]
+                        placePathCaret()
+                        return .handled
+                    }
                     .onKeyPress(.delete) {
                         guard query.isEmpty, !pages.isEmpty, !(prompted && pages.count == 1) else { return .ignored }
                         back()
                         return .handled
                     }
+                if let hint = page?.inputHint?(query) {
+                    Text(hint).font(.caption).foregroundStyle(.secondary).fixedSize()
+                }
             }
             .padding(.horizontal, 16)
             .frame(height: 52)
-            if case .input = page?.kind {
+            if case .input = page?.kind, page?.suggestions == nil {
                 EmptyView()
             } else {
                 Divider()
@@ -233,10 +245,12 @@ struct CommandPalette: View {
             } else if let startPage, case .page(let next)? = rootItems.first(where: { $0.id == startPage })?.action {
                 pages = [next]
             }
+            if case .input(let initial, _) = page?.kind { query = initial }
             // The editor holds on to first responder until it's released; then the field can take focus.
             NSApp.keyWindow?.makeFirstResponder(nil)
             try? await Task.sleep(for: .milliseconds(30))
             focused = true
+            placePathCaret()
         }
         .onChange(of: query) { selection = 0 }
     }
@@ -249,6 +263,17 @@ struct CommandPalette: View {
     }
 
     private var items: [PaletteItem] {
+        if case .input(_, let submit) = page?.kind, let suggestions = page?.suggestions {
+            let path = page?.inputTitle?(query)
+            var rows = [PaletteItem(id: "input.create", title: path.map { "Create \($0)" } ?? "Enter a path inside the space",
+                                    icon: "doc.badge.plus", section: "New File",
+                                    action: path == nil ? .stay { NSSound.beep() } : .run { submit(query) })]
+            rows += suggestions(query).map { folder in
+                PaletteItem(id: "folder:\(folder)", title: folder, icon: "folder", section: "Folders",
+                            action: .stay { query = folder; focused = true; placePathCaret() })
+            }
+            return rows
+        }
         guard case .list(let build)? = page?.kind ?? .list({ rootItems }) else { return [] }
         let all = build()
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -345,7 +370,11 @@ struct CommandPalette: View {
     private var footer: some View {
         HStack(spacing: 14) {
             hint("↑↓", "Navigate")
-            hint("↩", page.map { if case .input = $0.kind { "Create" } else { "Select" } } ?? "Run")
+            hint("↩", page.map {
+                if case .input = $0.kind { selection > 0 && $0.suggestions != nil ? "Complete" : "Create" }
+                else { "Select" }
+            } ?? "Run")
+            if page?.suggestions?(query).isEmpty == false { hint("⇥", "Complete") }
             hint("esc", pages.isEmpty || prompted && pages.count == 1 ? "Close" : "Back")
             Spacer()
             if let workspace { Text(workspace.name).foregroundStyle(.tertiary) }
@@ -367,6 +396,14 @@ struct CommandPalette: View {
 
     // MARK: Actions
 
+    private func placePathCaret() {
+        guard page?.suggestions != nil else { return }
+        DispatchQueue.main.async {
+            guard let editor = (state.window ?? NSApp.keyWindow)?.firstResponder as? NSTextView, editor.isFieldEditor else { return }
+            editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+        }
+    }
+
     private func move(_ delta: Int) {
         let count = items.count
         guard count > 0 else { return }
@@ -381,7 +418,7 @@ struct CommandPalette: View {
     }
 
     private func run() {
-        if case .input(_, let submit)? = page?.kind {
+        if case .input(_, let submit)? = page?.kind, page?.suggestions == nil {
             submit(query)
             return onClose()
         }
@@ -396,6 +433,7 @@ struct CommandPalette: View {
         case .page(let next):
             pages.append(next)
             if case .input(let initial, _) = next.kind { query = initial } else { query = "" }
+            placePathCaret()
             selection = 0
         }
     }
@@ -963,11 +1001,12 @@ struct CommandPalette: View {
     }
 
     private func namePage(_ kind: String, in dir: URL, _ ws: Workspace) -> PalettePage {
-        let placeholder = kind == "File" ? "Name, e.g. chapter.typ" : "Folder name"
+        if kind == "File" { return .newFile(in: ws, folder: dir) }
+        let placeholder = "Folder name"
         return PalettePage(title: "New \(kind) in \(ws.displayName(of: dir))", placeholder: placeholder, kind: .input(initial: "") { name in
             withAnimation(.smooth(duration: 0.25)) {
                 if dir != ws.root { ws.expanded.insert(dir) }
-                if kind == "File" { ws.createFile(in: dir, named: name) } else { ws.createFolder(in: dir, named: name) }
+                ws.createFolder(in: dir, named: name)
             }
         })
     }

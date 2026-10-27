@@ -31,7 +31,7 @@ final class LibraryWatcher {
         if let entry = external[root] {
             external[root] = (entry.watcher, entry.users + 1)
         } else {
-            let watcher = FolderWatcher(root, onPaths: { paths in
+            let watcher = FolderWatcher(root, contentChangesOnly: true, onPaths: { paths in
                 Workspace.filesChangedExternally(in: root, paths: paths.map { URL(fileURLWithPath: $0) })
             })
             external[root] = (watcher, 1)
@@ -83,7 +83,6 @@ final class LibraryWatcher {
             Workspace.movedExternally(itemMoves)
             for move in moves { SpaceRepository.shared.noteMoved(from: move.from, to: move.to) }
             Workspace.filesChangedExternally(in: SpaceList.repository, paths: [SpaceList.repository])
-            for root in external.keys { Workspace.filesChangedExternally(in: root, paths: [root]) }
         } while pending
     }
 

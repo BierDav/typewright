@@ -96,6 +96,52 @@ pub fn space_relative_path(path: &str, root: &str) -> Option<String> {
     path.strip_prefix(&prefix).map(str::to_string)
 }
 
+/// A new file's normalized path inside a space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct NewFilePath {
+    pub path: String,
+    pub adds_typ_extension: bool,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn new_file_path(input: &str) -> Option<NewFilePath> {
+    let input = input.trim();
+    if input.starts_with('/') || input.contains('\0') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in input.split('/') {
+        match part {
+            ".." => return None,
+            "" | "." => continue,
+            _ => parts.push(part),
+        }
+    }
+    if input.ends_with('/') || parts.is_empty() {
+        parts.push("untitled");
+    }
+    let name = parts.last()?;
+    let adds_typ_extension = !name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && !ext.is_empty());
+    let mut path = parts.join("/");
+    if adds_typ_extension {
+        path.push_str(".typ");
+    }
+    Some(NewFilePath { path, adds_typ_extension })
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn file_folder_suggestions(input: &str, folders: Vec<String>) -> Vec<String> {
+    let input = input.trim().to_lowercase();
+    let mut matches: Vec<_> = folders.into_iter().map(|folder| format!("{}/", folder.trim_matches('/')))
+        .filter(|folder| folder != "/" && folder.to_lowercase().starts_with(&input) && folder.to_lowercase() != input)
+        .collect();
+    matches.sort_by_key(|folder| folder.to_lowercase());
+    matches.dedup();
+    matches.truncate(20);
+    matches
+}
+
 /// The first free name for a new item: `name`, then `name 2` for folders or `name-2` for files.
 /// Returns the file name including `ext`.
 pub fn unique_name(name: &str, ext: Option<&str>, exists: impl Fn(&str) -> bool) -> String {
@@ -125,6 +171,29 @@ pub fn git_branch(head: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_file_paths_keep_folders_and_default_the_extension() {
+        assert_eq!(new_file_path("test/hello-world"), Some(NewFilePath {
+            path: "test/hello-world.typ".into(), adds_typ_extension: true,
+        }));
+        assert_eq!(new_file_path("test.v1/hello-world.txt"), Some(NewFilePath {
+            path: "test.v1/hello-world.txt".into(), adds_typ_extension: false,
+        }));
+        assert_eq!(new_file_path("test/").unwrap().path, "test/untitled.typ");
+        assert_eq!(new_file_path("").unwrap().path, "untitled.typ");
+        assert_eq!(new_file_path("./test//hello-world").unwrap().path, "test/hello-world.typ");
+        assert_eq!(new_file_path("test/../outside"), None);
+        assert_eq!(new_file_path("/outside"), None);
+    }
+
+    #[test]
+    fn folder_suggestions_complete_space_relative_prefixes() {
+        let folders = vec!["chapters".into(), "chapters/figures".into(), "fonts".into()];
+        assert_eq!(file_folder_suggestions("CH", folders.clone()), ["chapters/", "chapters/figures/"]);
+        assert_eq!(file_folder_suggestions("chapters/", folders.clone()), ["chapters/figures/"]);
+        assert!(file_folder_suggestions("chapters/new-file", folders).is_empty());
+    }
 
     #[test]
     fn names_and_paths() {

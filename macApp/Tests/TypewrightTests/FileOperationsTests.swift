@@ -326,4 +326,45 @@ final class FileOperationsTests: XCTestCase {
         XCTAssertTrue((undo as? ActionUndoManager)?.journal.redo.isEmpty == true)
     }
 
+    func testCreatingNestedFileCreatesFoldersAndRedoesTogether() async throws {
+        var created: URL?
+        await step { created = ws.createFile(named: "test/nested/hello-world") }
+        XCTAssertEqual(created, url("test/nested/hello-world.typ"))
+        XCTAssertTrue(exists("test/nested/hello-world.typ"))
+        XCTAssertTrue(ws.expanded.contains(url("test")))
+        XCTAssertTrue(ws.expanded.contains(url("test/nested")))
+        await undoStep()
+        XCTAssertFalse(exists("test"))
+        await redoStep()
+        XCTAssertTrue(exists("test/nested/hello-world.typ"))
+    }
+
+    func testCreatingFileInExistingFolderKeepsItsExtensionAndAvoidsOverwriting() async throws {
+        var created: URL?
+        await step { created = ws.createFile(named: "chapters/one.typ") }
+        XCTAssertEqual(created, url("chapters/one-2.typ"))
+        XCTAssertEqual(text("chapters/one.typ"), "One\n")
+        await undoStep()
+        XCTAssertTrue(exists("chapters"))
+        XCTAssertEqual(text("chapters/one.typ"), "One\n")
+    }
+
+    func testCreatingFileWithParentFileFailsWithoutChangingSelection() async throws {
+        let selection = ws.selectedFile
+        await step { XCTAssertNil(ws.createFile(named: "main.typ/child")) }
+        XCTAssertEqual(ws.selectedFile, selection)
+        XCTAssertEqual(text("main.typ"), "= Main\n#include \"chapters/one.typ\"\n")
+    }
+    func testUndoingNestedFileKeepsFilesAddedBySomeoneElse() async throws {
+        await step { ws.createFile(named: "test/hello-world") }
+        try "Keep me".write(to: url("test/other.txt"), atomically: true, encoding: .utf8)
+        await undoStep()
+        XCTAssertFalse(exists("test/hello-world.typ"))
+        XCTAssertEqual(text("test/other.txt"), "Keep me")
+        await redoStep()
+        XCTAssertTrue(exists("test/hello-world.typ"))
+        await undoStep()
+        XCTAssertEqual(text("test/other.txt"), "Keep me")
+    }
+
 }

@@ -47,10 +47,16 @@ final class WindowState {
     /// Recovery stays visible even after its space closes.
     var deletionNotice: FileNotice?
     @ObservationIgnored private var deletionUndo: (() -> Void)?
+    @ObservationIgnored private var deletionExpiry: Task<Void, Never>?
 
     func showDeletion(_ notice: FileNotice, undo: (() -> Void)? = nil) {
         deletionNotice = notice
         deletionUndo = undo ?? { [weak self] in self?.undoManager.undo() }
+        deletionExpiry?.cancel()
+        deletionExpiry = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(8)) } catch { return }
+            if self?.deletionNotice?.id == notice.id { self?.dismissDeletion() }
+        }
     }
 
     @discardableResult
@@ -62,6 +68,8 @@ final class WindowState {
     }
 
     func dismissDeletion() {
+        deletionExpiry?.cancel()
+        deletionExpiry = nil
         deletionNotice = nil
         deletionUndo = nil
     }
@@ -234,6 +242,9 @@ struct MainWindow: View {
         NavigationSplitView(columnVisibility: Binding(get: { state.sidebarVisible ? .all : .detailOnly },
                                                       set: { state.sidebarVisible = $0 != .detailOnly })) {
             SpacesSidebar(state: state, workspace: workspace)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if state.sidebarVisible { WindowNotifications(state: state, workspace: workspace, embedded: true) }
+                }
                 .navigationSplitViewColumnWidth(min: WindowState.minSidebarWidth, ideal: state.initialSidebarWidth)
         } detail: {
             Group {
@@ -264,11 +275,8 @@ struct MainWindow: View {
             if state.sidebarVisible || workspace == nil { SpacesOverlay(state: state, workspace: workspace) }
         }
         .overlay { WindowOverlayView(state: state, workspace: workspace) }
-        .overlay(alignment: .bottom) {
-            if let notice = state.deletionNotice {
-                FileNoticeBar(notice: notice, state: state)
-                    .padding(16)
-            }
+        .overlay(alignment: .bottomLeading) {
+            if !state.sidebarVisible { WindowNotifications(state: state, workspace: workspace) }
         }
         // The whole window moves below the menu bar instead of hiding under it.
         .padding(.top, state.menuBarInset)
@@ -373,7 +381,8 @@ private struct FloatingSidebar: View {
             }
             if available && state.floatingSidebar {
                 ZStack(alignment: .leading) {
-                    SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) }) { name in
+                    SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) },
+                                onCreateFile: { Opener.shared.newFile(in: state, folder: $0) }) { name in
                         Opener.shared.rename(space: workspace.root, to: name)
                     }
                     .padding(.top, state.fullScreenTop)

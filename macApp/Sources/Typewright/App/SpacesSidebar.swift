@@ -12,7 +12,8 @@ struct SpacesSidebar: View {
             let progress = workspace == nil ? 1 : state.spacesProgress
             ZStack {
                 if let workspace {
-                    SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) }) { name in
+                    SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) },
+                                onCreateFile: { Opener.shared.newFile(in: state, folder: $0) }) { name in
                         Opener.shared.rename(space: workspace.root, to: name)
                     }
                     .id(ObjectIdentifier(workspace))
@@ -280,7 +281,6 @@ struct SpacesPane: View {
             scrollList
             HStack {
                 if canClose { SpacesButton(active: true) { state.setSpacesOpen(false) } }
-                BackgroundStatusArea(workspace: workspace)
                 Spacer(minLength: 0)
             }
             .frame(height: 28)
