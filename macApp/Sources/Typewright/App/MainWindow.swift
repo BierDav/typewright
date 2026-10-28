@@ -419,6 +419,8 @@ private struct FloatingSidebar: View {
                     SidebarMaterial(blending: .withinWindow)
                         .clipShape(Self.shape)
                         .overlay(Self.shape.stroke(Color.primary.opacity(0.12)))
+                        // Otherwise the strip behind the traffic lights only drags and never zooms.
+                        .overlay(WindowMoveArea().clipShape(Self.shape))
                         .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
                         // The editor underneath would set its I-beam on every move.
                         .background(CursorArea())
