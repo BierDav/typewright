@@ -56,6 +56,62 @@ final class FileOperationsTests: XCTestCase {
         await ws.waitForIndex()
     }
 
+    func testCopyWithinSpaceKeepsOriginalAndUndoesAndRedoes() async {
+        await step { ws.importItems([url("chapters/one.typ")], into: space, copy: true) }
+        XCTAssertEqual(text("one.typ"), "One\n")
+        XCTAssertEqual(text("chapters/one.typ"), "One\n")
+        await undoStep()
+        XCTAssertFalse(exists("one.typ"))
+        XCTAssertTrue(exists("chapters/one.typ"))
+        await redoStep()
+        XCTAssertEqual(text("one.typ"), "One\n")
+    }
+
+    func testCopyFolderKeepsContentsAndRejectsDescendants() async {
+        XCTAssertFalse(ws.canCopy(url("chapters"), into: url("chapters")))
+        XCTAssertFalse(ws.canCopy(url("chapters"), into: url("chapters/nested")))
+        await step { ws.importItems([url("chapters")], into: space, copy: true) }
+        let copies = ws.tree.filter { $0.children != nil && $0.url != url("chapters") }
+        guard let copy = copies.first?.url else { return XCTFail("Expected a copied folder") }
+        XCTAssertEqual(try? String(contentsOf: copy.appendingPathComponent("one.typ"), encoding: .utf8), "One\n")
+        XCTAssertTrue(exists("chapters/one.typ"))
+        await undoStep()
+        XCTAssertFalse(fm.fileExists(atPath: copy.path))
+        XCTAssertTrue(exists("chapters/one.typ"))
+        await redoStep()
+        XCTAssertTrue(fm.fileExists(atPath: copy.appendingPathComponent("one.typ").path))
+    }
+
+    func testMovingBetweenSpacesKeepsUnsavedContentsAndUndoes() async throws {
+        let destination = repository.root.appendingPathComponent("Drop \(UUID().uuidString)")
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let other = Workspace(url: destination)
+        other.fileOps.undoManager = undo
+        defer { other.close(); try? fm.removeItem(at: destination) }
+        ws.updateBuffer(url("chapters/one.typ"), text: "Unsaved contents\n")
+        await step { other.importItems([url("chapters/one.typ")], into: destination, copy: false) }
+        await other.fileOps.settle()
+        XCTAssertFalse(exists("chapters/one.typ"))
+        XCTAssertEqual(try String(contentsOf: destination.appendingPathComponent("one.typ"), encoding: .utf8), "Unsaved contents\n")
+        await undoStep()
+        await other.fileOps.settle()
+        XCTAssertEqual(text("chapters/one.typ"), "Unsaved contents\n")
+        XCTAssertFalse(fm.fileExists(atPath: destination.appendingPathComponent("one.typ").path))
+    }
+
+    func testDropIntoEmptySpaceDoesNotSelectOrPreviewFile() async throws {
+        let destination = repository.root.appendingPathComponent("Empty \(UUID().uuidString)")
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let other = Workspace(url: destination)
+        defer { other.close(); try? fm.removeItem(at: destination) }
+        other.importItems([url("chapters/one.typ")], into: destination, copy: true)
+        await other.fileOps.settle()
+        await other.waitForIndex()
+        XCTAssertTrue(fm.fileExists(atPath: destination.appendingPathComponent("one.typ").path))
+        XCTAssertNil(other.selectedFile)
+        XCTAssertNil(other.previewFile)
+    }
+
     func testRenameUndoesAndRedoes() async {
         await step { ws.rename(url("chapters/one.typ"), to: "first.typ") }
         XCTAssertTrue(exists("chapters/first.typ"))

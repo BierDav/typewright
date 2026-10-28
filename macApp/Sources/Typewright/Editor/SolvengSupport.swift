@@ -103,7 +103,7 @@ enum SolvengSupport {
     }
 
     /// A problem solveng would report, found while typing, like an unknown unit.
-    struct Problem: Decodable {
+    struct Problem: Decodable, Sendable {
         let start: Int
         let end: Int
         let message: String
@@ -140,7 +140,7 @@ enum SolvengSupport {
 
     /// Every solveng token of a document (calculated code and math, its calls' strings and options), and `(start, end)`
     /// pairs of calculated code and call strings, plain under them.
-    struct Highlight: Decodable {
+    struct Highlight: Decodable, Sendable {
         let tokens: [Int32]
         let plain: [Int]
     }

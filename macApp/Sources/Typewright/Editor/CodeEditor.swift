@@ -295,9 +295,33 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// Recomputes what's concealed, e.g. once a compile tells whether solveng reads math.
     func refreshConceals() {
-        conceals = concealsMath ? Highlighter.conceals(in: string, context: solvengContext?() ?? "") : []
+        concealAnalysis.invalidate()
+        if !concealsMath {
+            conceals = []
+        } else if concealSource != string || conceals.isEmpty {
+            conceals = Highlighter.conceals(in: string, includeSolveng: false)
+        }
+        concealSource = string
+        scheduleConceals()
         invalidateGlyphs(in: NSRange(location: 0, length: (string as NSString).length))
         updateRevealedEquation()
+    }
+
+    private var concealSource = ""
+    let concealAnalysis = LatestAnalysis<(String, String), [Highlighter.Conceal]> {
+        Highlighter.conceals(in: $0.0, context: $0.1)
+    }
+
+    private func scheduleConceals() {
+        guard concealsMath else { return }
+        let source = string
+        concealAnalysis.submit((source, solvengContext?() ?? "")) { [weak self] result in
+            guard let self, self.concealsMath, self.string == source else { return }
+            let old = self.conceals
+            self.conceals = result
+            self.invalidateChangedConceals(from: old, delta: 0)
+            self.updateRevealedEquation()
+        }
     }
 
     /// Sorted by location; found again while each edit is processed, before anything is laid out with stale positions.
@@ -412,7 +436,23 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         guard concealsMath, let storage = textStorage, storage.editedMask.contains(.editedCharacters) else { return }
         let first = pendingConceals == nil
         pendingConceals = (pendingConceals?.old ?? conceals, (pendingConceals?.delta ?? 0) + storage.changeInLength)
-        conceals = Highlighter.conceals(in: storage.string, context: solvengContext?() ?? "")
+        // Keep unaffected folds aligned until background analysis catches up.
+        let edited = storage.editedRange
+        let delta = storage.changeInLength
+        let oldEnd = NSMaxRange(edited) - delta
+        func shifted(_ range: NSRange) -> NSRange {
+            let start = range.location >= oldEnd ? range.location + delta : min(range.location, edited.location)
+            let oldFinish = NSMaxRange(range)
+            let end = oldFinish >= oldEnd ? oldFinish + delta : oldFinish <= edited.location ? oldFinish : NSMaxRange(edited)
+            return NSRange(location: start, length: max(0, end - start))
+        }
+        conceals = conceals.compactMap { conceal in
+            guard NSMaxRange(conceal.range) <= edited.location || conceal.range.location >= oldEnd else { return nil }
+            return Highlighter.Conceal(range: shifted(conceal.range), replacement: conceal.replacement,
+                                       equation: shifted(conceal.equation))
+        }
+        concealSource = storage.string
+        scheduleConceals()
         // Other changed equations, like everything after a new `$`, once the layout manager caught up with the edit.
         guard first else { return }
         DispatchQueue.main.async { [weak self] in
@@ -434,6 +474,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     func updateRevealedEquation() {
         updateOperatorLigatures()
         reveal(piecesShown())
+        updateConcealedFonts()
     }
 
     /// The piece at the caret, or every piece a selection or column touches.
@@ -574,18 +615,16 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         var newGlyphs: [CGGlyph]?
         var newProperties: [NSLayoutManager.GlyphProperty] = []
         // A symbol the font can't draw keeps its name.
-        var symbolGlyphs: [Int: CGGlyph] = [:]
+        var symbolGlyphs: [Int: (font: NSFont, glyph: CGGlyph)] = [:]
         for i in 0..<glyphRange.length {
             let index = characterIndexes[i]
             guard let c = conceal(at: index) else { continue }
             var glyph: CGGlyph = 0
             if c.replacement != 0 {
-                if let known = symbolGlyphs[c.range.location] { glyph = known } else {
-                    var character = c.replacement
-                    if !CTFontGetGlyphsForCharacters(font, &character, &glyph, 1) { glyph = 0 }
-                    symbolGlyphs[c.range.location] = glyph
-                }
-                if glyph == 0 { continue }
+                let symbol = symbolGlyphs[c.range.location] ?? Highlighter.concealGlyph(c.replacement, font: font)
+                guard let symbol else { continue }
+                symbolGlyphs[c.range.location] = symbol
+                glyph = symbol.glyph
             }
             if newGlyphs == nil {
                 newGlyphs = Array(UnsafeBufferPointer(start: glyphs, count: glyphRange.length))
@@ -672,6 +711,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     /// Wraps at the guide, or at the edge when the view is narrower.
     private func updateWrapWidth() {
         guard let container = textContainer else { return }
+        if let container = container as? EditorTextContainer { container.wrapHintWidth = columnWidth }
         let available = max(bounds.width - textContainerInset.width * 2, 50)
         if wrapColumn > 0 {
             container.widthTracksTextView = false
@@ -1080,6 +1120,7 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawSoftWrapHints(in: dirtyRect)
         drawCollapsedSegmentUnderlines(in: dirtyRect)
         drawRemoteCursors(in: dirtyRect)
         for literal in swatches {
@@ -1737,7 +1778,7 @@ struct CodeEditor: NSViewRepresentable {
         let storage = NSTextStorage()
         let layout = EditorLayoutManager()
         storage.addLayoutManager(layout)
-        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        let container = EditorTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         container.widthTracksTextView = true
         layout.addTextContainer(container)
 
@@ -2008,6 +2049,9 @@ struct CodeEditor: NSViewRepresentable {
         var documentID = -1
         var font: NSFont?
         var solvengRevision = 0
+        private let highlightAnalysis = LatestAnalysis<(String, String), SolvengSupport.Highlight?> {
+            SolvengSupport.highlight($0.0, context: $0.1)
+        }
         var highlights = true
         var markdown = false
         var diagnostics: [Diagnostic] = []
@@ -2168,7 +2212,16 @@ struct CodeEditor: NSViewRepresentable {
             guard let font else { return }
             var swatches: [ColorLiteral] = []
             if highlights {
-                Highlighter.apply(to: storage, font: font, solvengContext: language?.solvengContext() ?? "")
+                Highlighter.apply(to: storage, font: font, includeSolveng: false)
+                let source = storage.string
+                highlightAnalysis.submit((source, language?.solvengContext() ?? "")) { [weak self] result in
+                    guard let self, let result, self.highlights, let storage = self.textView?.textStorage,
+                          storage.string == source, let font = self.font else { return }
+                    storage.beginEditing()
+                    Highlighter.apply(result, to: storage, range: NSRange(location: 0, length: storage.length), font: font)
+                    storage.endEditing()
+                    (self.textView as? TypstTextView)?.updateRevealedEquation()
+                }
                 let s = storage.string as NSString
                 // Literals at a line start have no character to kern, so they go without a swatch.
                 swatches = ColorLiteral.find(in: storage.string).filter {
@@ -2179,8 +2232,10 @@ struct CodeEditor: NSViewRepresentable {
                     storage.addAttribute(.kern, value: gap, range: NSRange(location: literal.range.location - 1, length: 1))
                 }
             } else if markdown {
+                highlightAnalysis.invalidate()
                 MarkdownHighlighter.apply(to: storage, font: font)
             } else {
+                highlightAnalysis.invalidate()
                 storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor],
                                       range: NSRange(location: 0, length: storage.length))
             }

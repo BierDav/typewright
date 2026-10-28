@@ -152,7 +152,9 @@ final class FileOperations {
                 }
             }
             guard !done.isEmpty else { return nil }
+            Workspace.movedExternally(done.map { FileMove(from: $0.from, to: $0.to) })
             workspace?.forgetRemoved(done.map(\.from))
+            Workspace.filesChangedExternally(in: repository.root, paths: done.flatMap { [$0.from, $0.to] })
             await commit(message)
             return .moveExternal(done.reversed().map(\.reversed))
         case .deleteCreated(let file, let folders):

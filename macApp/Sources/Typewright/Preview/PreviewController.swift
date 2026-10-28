@@ -57,19 +57,25 @@ final class PreviewController {
                 MainActor.assumeIsolated { self?.sync() }
             },
         ]
-        // Pinching zooms manually, so it ends fit-to-width before PDFView handles it.
         magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .smartMagnify, .scrollWheel]) { [weak self] event in
             let handled = MainActor.assumeIsolated {
-                guard let self, event.window === self.view.window, self.view.document != nil,
-                      self.view.bounds.contains(self.view.convert(event.locationInWindow, from: nil)) else { return false }
-                // ⌘-scroll zooms around the pointer, like pinching.
+                guard let self, let window = self.view.window, self.view.document != nil else { return false }
+                let screenPoint = NSEvent.mouseLocation
+                guard NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: 0) == window.windowNumber else { return false }
+                let point = window.convertPoint(fromScreen: screenPoint)
+                guard self.view.bounds.contains(self.view.convert(point, from: nil)) else { return false }
                 if let factor = event.commandZoomFactor {
-                    self.zoom(by: factor, at: event.locationInWindow)
+                    self.zoom(by: factor, at: point)
                     return true
                 }
-                guard event.type != .scrollWheel, self.view.autoScales else { return false }
-                self.view.autoScales = false
-                self.sync()
+                if event.type == .magnify {
+                    self.zoom(by: 1 + event.magnification, at: point)
+                    return true
+                }
+                if event.type == .smartMagnify {
+                    if self.view.autoScales { self.zoom(by: 2, at: point) } else { self.view.autoScales = true; self.sync() }
+                    return true
+                }
                 return false
             }
             return handled ? nil : event

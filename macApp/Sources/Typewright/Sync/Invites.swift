@@ -41,7 +41,7 @@ enum Invites {
             if account?.joined != true {
                 items.append(PaletteItem(id: "share.new", title: account?.shared == true ? "Create New Sharing Link…" : "Create Sharing Link",
                                          subtitle: account?.shared == true ? "Replace the old link and disconnect its participants" : "Anyone with the link can join and edit",
-                                         icon: "person.badge.plus", section: "Sharing Links", action: .run {
+                                         icon: "person.badge.plus", section: "Sharing Links", action: .stay {
                     Task { await createLink(url, replace: account?.shared == true) }
                 }))
             }

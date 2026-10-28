@@ -2,6 +2,17 @@ import SwiftUI
 import TypewrightCore
 
 @MainActor extension PalettePage {
+    static func newFolder(in workspace: Workspace, folder: URL, onCreate: @escaping () -> Void = {}) -> PalettePage {
+        PalettePage(title: "New Folder in \(workspace.displayName(of: folder))", placeholder: "Folder name",
+                    kind: .input(initial: "") { name in
+            withAnimation(.smooth(duration: 0.25)) {
+                if folder != workspace.root { workspace.expanded.insert(folder) }
+                workspace.createFolder(in: folder, named: name)
+                onCreate()
+            }
+        })
+    }
+
     static func newFile(in workspace: Workspace, folder: URL, onCreate: @escaping () -> Void = {}) -> PalettePage {
         let initial = folder == workspace.root ? "" : workspace.relativePath(of: folder) + "/"
         return PalettePage(title: "New File", placeholder: "Path relative to \(workspace.name)",

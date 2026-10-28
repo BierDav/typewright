@@ -187,7 +187,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         state.renameNewSpace = renameNewSpace
         let host = NSHostingController(rootView: MainWindow(state: state))
         host.sceneBridgingOptions = .all
-        let window = NSWindow(contentViewController: host)
+        let window = SpaceWindow(contentViewController: host)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.setContentSize(NSSize(width: 1280, height: 820))
         window.minSize = NSSize(width: 820, height: 560)
@@ -260,6 +260,15 @@ struct MainWindow: View {
             }
             // Shifted, not squeezed; the window's edge cuts off what moves past it.
             .offset(x: WindowState.spacesExtra * (workspace == nil ? 1 : state.sidebarVisible ? state.spacesProgress : 0))
+            .overlay {
+                if !state.sidebarVisible {
+                    GeometryReader { geo in
+                        WindowMoveArea()
+                            .frame(height: geo.safeAreaInsets.top)
+                            .ignoresSafeArea(.container, edges: .top)
+                    }
+                }
+            }
             .overlay { dimming }
         }
         .toolbar(removing: .sidebarToggle)
@@ -362,6 +371,7 @@ private struct FloatingSidebar: View {
     @State private var hideTask: Task<Void, Never>?
     @State private var spaces: [URL] = []
     @State private var hovering = false
+    @State private var dragging = false
 
     private static let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
 
@@ -374,16 +384,18 @@ private struct FloatingSidebar: View {
         ZStack(alignment: .leading) {
             if available {
                 // The strip that summons it; thin, so the editor's edge stays clickable.
-                Color.clear
-                    .frame(width: 6)
-                    .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onHover(perform: hover)
+                SidebarDropEdge(onHover: dragHover) { urls, copy in
+                    workspace.importItems(urls, into: workspace.root, copy: copy)
+                }
+                .frame(width: 12)
+                .frame(maxHeight: .infinity)
             }
             if available && state.floatingSidebar {
                 ZStack(alignment: .leading) {
                     SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) },
-                                onCreateFile: { Opener.shared.newFile(in: state, folder: $0) }) { name in
+                                onCreateFile: { Opener.shared.newFile(in: state, folder: $0) },
+                                onCreateFolder: { Opener.shared.newFolder(in: state, folder: $0) },
+                                onExternalDrag: dragHover, dropIDPrefix: "floatingFile") { name in
                         Opener.shared.rename(space: workspace.root, to: name)
                     }
                     .padding(.top, state.fullScreenTop)
@@ -414,13 +426,17 @@ private struct FloatingSidebar: View {
                         .ignoresSafeArea(edges: .top)
                 }
                 .padding([.leading, .bottom], 8)
-                .onHover(perform: hover)
                 .transition(.move(edge: .leading).combined(with: .opacity))
             }
         }
+        .frame(width: available && state.floatingSidebar ? width + 8 : 12, alignment: .leading)
+        .background { SidebarHoverRegion(onChange: hover).ignoresSafeArea(edges: .top) }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .animation(.smooth(duration: 0.25), value: state.floatingSidebar)
         .onAppear { spaces = SpaceList.all }
+        .onChange(of: FileDragSession.shared.isDragging) { _, active in
+            if !active { dragging = false; scheduleHide() }
+        }
         .onChange(of: workspace.root) { spaces = SpaceList.all }
         .onChange(of: state.keepsFloatingSidebarOpen) { _, open in
             if open { show() } else if !hovering { scheduleHide() }
@@ -436,6 +452,11 @@ private struct FloatingSidebar: View {
         if inside { show() } else { scheduleHide() }
     }
 
+    private func dragHover(_ inside: Bool) {
+        dragging = inside
+        if inside { show() } else { scheduleHide() }
+    }
+
     private func show() {
         hideTask?.cancel()
         hideTask = nil
@@ -444,14 +465,26 @@ private struct FloatingSidebar: View {
 
     /// A short grace period, so brushing past its edge doesn't close it.
     private func scheduleHide() {
-        hideTask?.cancel()
-        guard !state.keepsFloatingSidebarOpen else { return }
+        guard !state.keepsFloatingSidebarOpen, !hovering, !dragging else {
+            hideTask?.cancel()
+            hideTask = nil
+            return
+        }
+        guard hideTask == nil else { return }
         hideTask = Task {
             try? await Task.sleep(for: .seconds(0.35))
-            guard !Task.isCancelled, !state.keepsFloatingSidebarOpen else { return }
+            guard !Task.isCancelled else { return }
+            hideTask = nil
+            guard !state.keepsFloatingSidebarOpen, !hovering, !dragging else { return }
+            if let window = state.window {
+                let point = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+                let width = state.panelFrame.width + WindowState.spacesExtra * state.spacesProgress + 8
+                if point.x >= 0, point.x <= width, point.y >= 0, point.y <= window.frame.height { return }
+            }
             state.floatingSidebar = false
         }
     }
+
 }
 
 /// Grayscale icon and a hint while the window has no space.

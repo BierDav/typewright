@@ -627,6 +627,16 @@ struct CommandPalette: View {
                                      action: .page(PalettePage(title: "New \(kind)", placeholder: "Choose a folder…",
                                                                kind: .list { folderItems(kind, ws) }))))
         }
+        items.append(PaletteItem(id: "item.copy", title: "Copy File or Folder…", icon: "doc.on.doc", section: "File",
+                                 action: .page(PalettePage(title: "Copy File or Folder", placeholder: "Choose an item…",
+                                                           kind: .list {
+            Workspace.flatten(ws.tree).map { node in
+                PaletteItem(id: "copy.source:\(node.url.path)", title: node.url.lastPathComponent,
+                            subtitle: ws.relativePath(of: node.url), icon: node.children == nil ? "doc" : "folder", section: "Items",
+                            action: .page(PalettePage(title: "Copy \(node.url.lastPathComponent)", placeholder: "Choose a folder…",
+                                                      kind: .list { moveTargets(node.url, ws, copy: true) })))
+            }
+        }))))
         if let file {
             let name = file.lastPathComponent
             if ws.selectedKind?.isEditable == true {
@@ -677,6 +687,9 @@ struct CommandPalette: View {
             items.append(PaletteItem(id: "file.move", title: "Move \(name) to…", icon: "folder.badge.gearshape", shortcut: keys.moveFile.display, section: "File",
                                      action: .page(PalettePage(title: "Move \(name)", placeholder: "Choose a folder…",
                                                                kind: .list { moveTargets(file, ws) }))))
+            items.append(PaletteItem(id: "file.copy", title: "Copy \(name) to…", icon: "doc.on.doc", section: "File",
+                                     action: .page(PalettePage(title: "Copy \(name)", placeholder: "Choose a folder…",
+                                                               kind: .list { moveTargets(file, ws, copy: true) }))))
             if SpaceList.isInRepository(ws.root) {
                 items.append(PaletteItem(id: "file.invite", title: "Share Current File…", subtitle: name,
                                          icon: "person.badge.plus", section: "File", keywords: ["share", "invite", "collaborate", "link", "sync"],
@@ -850,13 +863,13 @@ struct CommandPalette: View {
         }
     }
 
-    /// Folders the file can move into; its own folder is left out.
-    private func moveTargets(_ file: URL, _ ws: Workspace) -> [PaletteItem] {
+    /// Copying also allows the current folder, with a unique name.
+    private func moveTargets(_ file: URL, _ ws: Workspace, copy: Bool = false) -> [PaletteItem] {
         let folders = [ws.root] + Workspace.flatten(ws.tree).filter { $0.children != nil }.map(\.url)
-        return folders.filter { ws.canMove(file, into: $0) }.map { dir in
+        return folders.filter { copy ? ws.canCopy(file, into: $0) : ws.canMove(file, into: $0) }.map { dir in
             PaletteItem(id: "move:\(dir.path)", title: ws.displayName(of: dir),
                         subtitle: dir == ws.root ? nil : ws.relativePath(of: dir), icon: "folder", section: "Folders",
-                        action: .run { withAnimation(.smooth(duration: 0.25)) { ws.move(file, into: dir) } })
+                        action: .run { withAnimation(.smooth(duration: 0.25)) { if copy { ws.importItems([file], into: dir, copy: true) } else { ws.move(file, into: dir) } } })
         }
     }
 
@@ -1009,13 +1022,7 @@ struct CommandPalette: View {
 
     private func namePage(_ kind: String, in dir: URL, _ ws: Workspace) -> PalettePage {
         if kind == "File" { return .newFile(in: ws, folder: dir) }
-        let placeholder = "Folder name"
-        return PalettePage(title: "New \(kind) in \(ws.displayName(of: dir))", placeholder: placeholder, kind: .input(initial: "") { name in
-            withAnimation(.smooth(duration: 0.25)) {
-                if dir != ws.root { ws.expanded.insert(dir) }
-                ws.createFolder(in: dir, named: name)
-            }
-        })
+        return .newFolder(in: ws, folder: dir)
     }
 }
 

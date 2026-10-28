@@ -813,6 +813,12 @@ final class Workspace: EditorLanguage {
             && !FileManager.default.fileExists(atPath: dir.appendingPathComponent(url.lastPathComponent).path)
     }
 
+    func canCopy(_ url: URL, into dir: URL) -> Bool {
+        let source = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let destination = dir.resolvingSymlinksInPath().standardizedFileURL.path
+        return destination != source && !destination.hasPrefix(source + "/")
+    }
+
     /// Moves a file or folder into `dir`, keeping its name.
     func move(_ url: URL, into dir: URL) {
         guard canMove(url, into: dir) else { return NSSound.beep() }
@@ -822,28 +828,49 @@ final class Workspace: EditorLanguage {
         recordMove(url, to: target, name: "Move “\(url.lastPathComponent)”", verb: "Move")
     }
 
+    static func importItems(_ urls: [URL], intoSpace root: URL, copy: Bool, undoManager: UndoManager?) {
+        let existing = open.compactMap(\.value).first { !$0.isClosed && $0.root.standardizedFileURL == root.standardizedFileURL }
+        let workspace = existing ?? Workspace(url: root)
+        workspace.importItems(urls, into: root, copy: copy, undoManager: undoManager)
+        if existing == nil {
+            Task {
+                await workspace.fileOps.settle()
+                workspace.close()
+            }
+        }
+    }
+
     /// Moves (or copies) files dropped from other apps into `dir`; name clashes get a number, like Finder.
-    func importItems(_ urls: [URL], into dir: URL, copy: Bool) {
+    func importItems(_ urls: [URL], into dir: URL, copy: Bool, undoManager: UndoManager? = nil) {
+        selectAfterIndex = false
+        previewAfterIndex = false
+        for workspace in Self.open.compactMap(\.value) where !workspace.isClosed { workspace.flushSaves() }
         let fm = FileManager.default
         var imported: [(url: URL, isDir: Bool)] = []
         var inverses: [FileOp] = []
         for url in urls.map(\.standardizedFileURL) {
             // Items already in the space move like tree drags.
-            if url.path.hasPrefix(root.path + "/") {
+            if !copy, url.path.hasPrefix(root.path + "/") {
                 if canMove(url, into: dir) {
                     let target = dir.appendingPathComponent(url.lastPathComponent).standardizedFileURL
                     if relocate(url, to: target) { inverses.append(.move([FileOp.Move(from: target, to: url)])) }
                 }
                 continue
             }
-            guard url.path != root.path, !root.path.hasPrefix(url.path + "/") else { continue }
+            guard url.path != root.path, !root.path.hasPrefix(url.path + "/"), canCopy(url, into: dir) else { continue }
             var isDir: ObjCBool = false
             fm.fileExists(atPath: url.path, isDirectory: &isDir)
             let ext = isDir.boolValue || url.pathExtension.isEmpty ? nil : url.pathExtension
             let target = Self.unique(in: dir, name: ext == nil ? url.lastPathComponent : url.deletingPathExtension().lastPathComponent,
                                      ext: ext)
             do {
-                if copy { try fm.copyItem(at: url, to: target) } else { try fm.moveItem(at: url, to: target) }
+                if copy {
+                    try fm.copyItem(at: url, to: target)
+                } else {
+                    try fm.moveItem(at: url, to: target)
+                    SpaceRepository.shared.noteMoved(from: url, to: target)
+                    Self.movedExternally([FileMove(from: url, to: target)])
+                }
                 imported.append((target, isDir.boolValue))
                 // Undo takes copies away and puts moved items back where they came from.
                 inverses.append(copy ? .delete([target]) : .moveExternal([FileOp.Move(from: target, to: url)]))
@@ -853,14 +880,14 @@ final class Workspace: EditorLanguage {
         }
         if dir.path != root.path, !inverses.isEmpty { expanded.insert(dir.standardizedFileURL) }
         reloadTree()
-        if imported.count == 1, let file = imported.first, !file.isDir { select(file.url) }
+        Self.filesChangedExternally(in: SpaceRepository.shared.root, paths: urls + imported.map(\.url))
         schedulePersist()
         guard SpaceList.isInRepository(root), !inverses.isEmpty else { return }
         let names = urls.map(\.lastPathComponent)
         let name = names.count == 1 ? "Add “\(names[0])”" : "Add \(names.count) Items"
         let paths = imported.map { SpaceRepository.shared.messagePath($0.url) }
         fileOps.performed(inverse: .batch(inverses.reversed()), name: name,
-                          message: paths.isEmpty ? "Move \(names.joined(separator: ", "))" : "Add \(paths.joined(separator: ", "))")
+                          message: paths.isEmpty ? "Move \(names.joined(separator: ", "))" : "Add \(paths.joined(separator: ", "))", undoManager: undoManager)
     }
 
     /// Saves images on the pasteboard next to the shown Typst or Markdown file and returns the text that shows them.
@@ -1114,7 +1141,6 @@ final class Workspace: EditorLanguage {
         }
         dirty.insert(url)
         scheduleAutosave()
-        // Incremental PDF pages and HTML both update without waiting for an idle pause.
         scheduleCompile(delay: 0)
     }
 
@@ -1281,7 +1307,10 @@ final class Workspace: EditorLanguage {
 
     func completions(at offset: Int) async -> [CompletionItem] {
         guard let file = selectedFile, selectedKind == .typst else { return [] }
-        let solveng = Self.solvengCompletions(in: text, context: solvengContext(), at: offset)
+        let source = text
+        let context = solvengContext()
+        let solveng = await Task.detached { Self.solvengCompletions(in: source, context: context, at: offset) }.value
+        guard !Task.isCancelled, selectedFile == file, text == source else { return [] }
         if let solveng, solveng.exclusive { return solveng.items }
         let packages = packageCompletions(at: offset)
         guard let client = languageClient() else { return (solveng?.items ?? []) + packages }
@@ -1297,7 +1326,9 @@ final class Workspace: EditorLanguage {
         let names = solveng?.items ?? []
         let named = Set(names.map(\.label))
         let all = names + items.filter { !named.contains($0.label) } + packages.filter { !labels.contains($0.label) }
-        guard let parameters = SolvengSupport.parameters(text, context: solvengContext(), offset: offset) else { return all }
+        let parameters = await Task.detached { SolvengSupport.parameters(source, context: context, offset: offset) }.value
+        guard let parameters else { return all }
+        guard !Task.isCancelled, selectedFile == file, text == source else { return [] }
         return Self.withParameters(parameters, all)
     }
 
@@ -1331,7 +1362,7 @@ final class Workspace: EditorLanguage {
 
     /// Inside solveng code and its calls' strings tinymist has nothing to offer; names, units and option values come
     /// from solveng. In math and argument lists they join tinymist's.
-    private static func solvengCompletions(in text: String, context: String, at offset: Int) -> (items: [CompletionItem], exclusive: Bool)? {
+    nonisolated private static func solvengCompletions(in text: String, context: String, at offset: Int) -> (items: [CompletionItem], exclusive: Bool)? {
         guard let result = SolvengSupport.complete(text, context: context, offset: offset), result.from <= offset else { return nil }
         let range = NSRange(location: result.from, length: max(offset, result.to ?? offset) - result.from)
         return (result.items.enumerated().map { index, item in
@@ -1354,7 +1385,17 @@ final class Workspace: EditorLanguage {
 
     @ObservationIgnored private var solvengContextCache: (key: [String], text: String)?
     /// solveng's report from the last built-in compile of the previewed file, see `tw_world_solveng`.
-    @ObservationIgnored private var solvengReport = ""
+    @ObservationIgnored private var solvengReport = "" {
+        didSet {
+            let data = Data(solvengReport.utf8)
+            let report = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let elements = report?["elements"] as? [[String: Any]] ?? []
+            solvengReportedFiles = Set(elements.compactMap { $0["path"] as? String })
+        }
+    }
+    @ObservationIgnored private var solvengReportedFiles: Set<String> = []
+    @ObservationIgnored private var solvengReportMain: URL?
+    @ObservationIgnored private var solvengReferenceCache: (text: String, paths: [String])?
     /// solveng's report on the shown file compiled on its own, when it isn't the previewed one.
     @ObservationIgnored private var solvengFileReport: (file: URL, report: String)?
     @ObservationIgnored private var solvengCheckTask: Task<Void, Never>?
@@ -1368,7 +1409,10 @@ final class Workspace: EditorLanguage {
         func references(_ text: String) -> [String] {
             SolvengSupport.references(text)
         }
-        let key = [file.path, previewFile?.path ?? "", String(solvengRevision)] + references(text)
+        if solvengReferenceCache?.text != text {
+            solvengReferenceCache = (text, references(text))
+        }
+        let key = [file.path, previewFile?.path ?? "", String(solvengRevision)] + (solvengReferenceCache?.paths ?? [])
         if let cache = solvengContextCache, cache.key == key { return cache.text }
         func resolve(_ path: String, from: URL) -> URL {
             path.hasPrefix("/") ? root.appendingPathComponent(String(path.dropFirst())).standardizedFileURL
@@ -1410,11 +1454,15 @@ final class Workspace: EditorLanguage {
         guard selectedKind == .typst, let file = selectedFile else { return }
         var changed = false
         if let main = previewFile, main.pathExtension == "typ", CompilerManager.shared.active != .builtin, let path = relative(main),
-           let report = await builtin.check(main: path, buffers: relativeBuffers()), !Task.isCancelled, report != solvengReport {
-            solvengReport = report
-            changed = true
+           let report = await builtin.check(main: path, buffers: relativeBuffers()), !Task.isCancelled {
+            solvengReportMain = main
+            if report != solvengReport {
+                solvengReport = report
+                changed = true
+            }
         }
-        if file != previewFile, let path = relative(file) {
+        if file != previewFile, let path = relative(file),
+           solvengReportMain != previewFile || !solvengReportedFiles.contains(path) {
             let report = await builtin.check(main: path, buffers: relativeBuffers())
             if let report, !Task.isCancelled, file == selectedFile, solvengFileReport?.file != file || solvengFileReport?.report != report {
                 solvengFileReport = (file, report)
@@ -1429,13 +1477,26 @@ final class Workspace: EditorLanguage {
     /// Problems solveng finds in the shown file while typing, like unknown units; the compile may report them later.
     private(set) var solvengDiagnostics: [Diagnostic] = []
 
+    @ObservationIgnored private let diagnosticAnalysis = LatestAnalysis<(String, String), [SolvengSupport.Problem]> {
+        SolvengSupport.diagnostics($0.0, context: $0.1)
+    }
+
     private func updateSolvengDiagnostics() {
+        diagnosticAnalysis.invalidate()
         guard selectedKind == .typst, let file = selectedFile, let path = relative(file) else {
             if !solvengDiagnostics.isEmpty { solvengDiagnostics = [] }
             return
         }
+        let text = self.text
+        diagnosticAnalysis.submit((text, solvengContext())) { [weak self] problems in
+            guard let self, self.selectedFile == file, self.text == text else { return }
+            self.applySolvengDiagnostics(problems, text: text, path: path)
+        }
+    }
+
+    private func applySolvengDiagnostics(_ problems: [SolvengSupport.Problem], text: String, path: String) {
         let source = text as NSString
-        let found = SolvengSupport.diagnostics(text, context: solvengContext()).compactMap { p -> Diagnostic? in
+        let found = problems.compactMap { p -> Diagnostic? in
             guard p.start <= p.end, p.end <= source.length else { return nil }
             let (line, column) = Self.lineAndColumn(of: p.start, in: source)
             return Diagnostic(path: path, line: line + 1, column: column + 1,
@@ -1517,7 +1578,11 @@ final class Workspace: EditorLanguage {
 
     func hover(at offset: Int) async -> (markdown: String, range: NSRange?)? {
         guard let file = selectedFile, selectedKind == .typst else { return nil }
-        if let solveng = SolvengSupport.hover(text, context: solvengContext(), offset: offset) {
+        let source = text
+        let context = solvengContext()
+        let solveng = await Task.detached { SolvengSupport.hover(source, context: context, offset: offset) }.value
+        guard !Task.isCancelled, selectedFile == file, text == source else { return nil }
+        if let solveng {
             let range = NSRange(location: solveng.start, length: solveng.end - solveng.start)
             // One of solveng's functions: the docs its completion shows.
             let name = (text as NSString).substring(with: range)
@@ -1605,7 +1670,12 @@ final class Workspace: EditorLanguage {
     func occurrences(at offset: Int) async -> [NSRange] {
         guard let file = selectedFile, selectedKind == .typst else { return [] }
         // A solveng name: what belongs to the same definition, in this file.
-        let solveng = SolvengSupport.usages(text, context: solvengContext(), offset: offset).filter { $0.path == nil }
+        let source = text
+        let context = solvengContext()
+        let solveng = await Task.detached {
+            SolvengSupport.usages(source, context: context, offset: offset).filter { $0.path == nil }
+        }.value
+        guard !Task.isCancelled, selectedFile == file, text == source else { return [] }
         if !solveng.isEmpty { return solveng.map { NSRange(location: $0.start, length: $0.end - $0.start) } }
         guard let client = languageClient() else { return [] }
         return await client.occurrences(in: file, text: text as NSString, at: offset)
@@ -1701,7 +1771,7 @@ final class Workspace: EditorLanguage {
         let source = text
         let context = solvengContext()
         let edits = await languageClient()?.format(file, text: source as NSString) ?? []
-        return SolvengSupport.formattingEdits(source, context: context, preceding: edits)
+        return await Task.detached { SolvengSupport.formattingEdits(source, context: context, preceding: edits) }.value
     }
 
     func renameTarget(at offset: Int) async -> (range: NSRange, name: String)? {
@@ -1865,6 +1935,7 @@ final class Workspace: EditorLanguage {
 
     func scheduleCompile(delay: TimeInterval) {
         invalidateCompile()
+        updateSolvengDiagnostics()
         scheduleSolvengCheck(delay: max(delay, 0.25))
         compileTask?.cancel()
         compileTask = Task { [weak self] in
@@ -1972,9 +2043,12 @@ final class Workspace: EditorLanguage {
         diagnostics = result.diagnostics
         defer { updateSolvengDiagnostics() }
         // A failed compile keeps the last report; external compilers have none, `checkSolveng` fills in.
-        if let report = result.solveng, report != solvengReport {
-            solvengReport = report
-            solvengRevision += 1
+        if let report = result.solveng {
+            solvengReportMain = previewFile
+            if report != solvengReport {
+                solvengReport = report
+                solvengRevision += 1
+            }
         }
         // Missing fonts are looked up on Google Fonts; fetch the list before anyone hovers them.
         if diagnostics.contains(where: { QuickFixes.missingFont(in: $0.message) != nil }) {
@@ -2035,6 +2109,7 @@ final class Workspace: EditorLanguage {
         persist()
         compileTask?.cancel()
         solvengCheckTask?.cancel()
+        diagnosticAnalysis.invalidate()
         stopWatcher()
         exportRunner.cancel()
         if let fontObserver { NotificationCenter.default.removeObserver(fontObserver) }

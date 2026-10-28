@@ -10,8 +10,11 @@ final class ColumnSelectionTests: XCTestCase {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled],
                           backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
-        tv.textContainer?.replaceLayoutManager(EditorLayoutManager())
+        let storage = NSTextStorage(), layout = EditorLayoutManager()
+        storage.addLayoutManager(layout)
+        let container = EditorTextContainer(size: NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude))
+        layout.addTextContainer(container)
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), textContainer: container)
         tv.allowsUndo = true
         window.contentView = tv
         window.makeFirstResponder(tv)
@@ -150,6 +153,95 @@ final class ColumnSelectionTests: XCTestCase {
                        "a column inside the text still skips short lines")
     }
 
+    func testDraggingLeftAndUpIncludesShortLinesInsideRectangle() {
+        let tv = editor("ab\na\nabcdef")
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        let x = tv.textContainerOrigin.x + tv.textContainer!.lineFragmentPadding
+        let start = point(tv, at: 8, x: x + 4 * tv.columnWidth)
+        let end = point(tv, at: 0, x: x + tv.columnWidth)
+        let found = tv.columnCarets(from: start, to: end)
+        XCTAssertEqual(found.carets, [.init(anchor: 2, head: 1), .init(anchor: 9, head: 6)])
+        XCTAssertEqual(found.primary, 0)
+        let reverse = tv.columnCarets(from: end, to: start)
+        XCTAssertEqual(reverse.carets, [.init(anchor: 1, head: 2), .init(anchor: 6, head: 9)])
+        XCTAssertEqual(reverse.primary, 1)
+    }
+
+    func testDraggingFromFirstSliceSkipsSoftWraps() {
+        let text = String(repeating: "a", count: 55) + "\n" + String(repeating: "b", count: 55) + "\nshort"
+        let tv = editor(text)
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.wrapColumn = 20
+        let x = tv.textContainerOrigin.x + tv.textContainer!.lineFragmentPadding
+        let start = point(tv, at: 1, x: x + tv.columnWidth)
+        let end = point(tv, at: 113, x: x + 3 * tv.columnWidth)
+        let found = tv.columnCarets(from: start, to: end)
+        XCTAssertEqual(found.carets, [.init(anchor: 1, head: 3), .init(anchor: 57, head: 59), .init(anchor: 113, head: 115)])
+        XCTAssertEqual(found.primary, 2)
+        let reverse = tv.columnCarets(from: end, to: start)
+        XCTAssertEqual(reverse.carets, [.init(anchor: 3, head: 1), .init(anchor: 59, head: 57), .init(anchor: 115, head: 113)])
+        XCTAssertEqual(reverse.primary, 0)
+        let continuation = point(tv, at: 30, x: end.x)
+        let withinLine = tv.columnCarets(from: start, to: continuation)
+        XCTAssertEqual(withinLine.carets, [.init(anchor: 1, head: 3)])
+    }
+
+    func testDraggingFromSoftWrapKeepsStartingColumnAndSelectsLeft() {
+        let text = String(repeating: "a", count: 55) + "\n" + String(repeating: "b", count: 55) + "\nshort"
+        let tv = editor(text)
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.wrapColumn = 20
+        let x = tv.textContainerOrigin.x + tv.textContainer!.lineFragmentPadding
+        let start = insertionPoint(tv, at: 30)
+        let end = point(tv, at: 113, x: x + 3 * tv.columnWidth)
+        XCTAssertEqual(tv.columnCarets(from: start, to: start).carets, [.init(30)])
+        let found = tv.columnCarets(from: start, to: end)
+        XCTAssertEqual(found.carets, [.init(anchor: 30, head: 3), .init(anchor: 86, head: 59), .init(anchor: 117, head: 115)])
+        XCTAssertEqual(found.primary, 2)
+        let reverse = tv.columnCarets(from: insertionPoint(tv, at: 86), to: point(tv, at: 30, x: end.x))
+        XCTAssertEqual(reverse.carets, [.init(anchor: 30, head: 3), .init(anchor: 86, head: 59)])
+        XCTAssertEqual(reverse.primary, 0)
+        let withinLine = tv.columnCarets(from: start, to: point(tv, at: 50, x: end.x))
+        XCTAssertEqual(withinLine.carets, [.init(anchor: 30, head: 3)])
+        let rightward = tv.columnCarets(from: start, to: point(tv, at: 85, x: start.x + 2 * tv.columnWidth))
+        XCTAssertTrue(rightward.carets.allSatisfy { $0.head <= $0.anchor })
+        XCTAssertEqual(rightward.carets.map(\.anchor), [30, 86])
+    }
+
+    func testWrappedDragSkipsEmptyAndShortLinesWhenRectangleFindsText() {
+        let tv = editor("\nabc\nabcdefghij\n" + String(repeating: "x", count: 55))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.wrapColumn = 20
+        let start = insertionPoint(tv, at: 46)
+        let x = tv.textContainerOrigin.x + tv.textContainer!.lineFragmentPadding
+        let end = point(tv, at: 0, x: x + 6 * tv.columnWidth)
+        let found = tv.columnCarets(from: start, to: end)
+        XCTAssertEqual(found.carets, [.init(anchor: 15, head: 11), .init(anchor: 46, head: 22)])
+        XCTAssertEqual(found.primary, 0)
+    }
+
+    func testPastEndDragSkipsEmptyLinesWhenOtherRowsHavePositions() {
+        let tv = editor("\nabcdefghij\nabc")
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        let x = tv.textContainerOrigin.x + tv.textContainer!.lineFragmentPadding
+        let start = point(tv, at: 13, x: x + 8 * tv.columnWidth)
+        let found = tv.columnCarets(from: start, to: point(tv, at: 0, x: x + 6 * tv.columnWidth))
+        XCTAssertEqual(found.carets, [.init(anchor: 9, head: 7)])
+        XCTAssertEqual(found.primary, 0)
+        let missed = tv.columnCarets(from: point(tv, at: 13, x: x + 12 * tv.columnWidth),
+                                     to: point(tv, at: 0, x: x + 14 * tv.columnWidth))
+        XCTAssertEqual(missed.carets, [.init(0), .init(11), .init(15)])
+    }
+
+    private func insertionPoint(_ tv: TypstTextView, at index: Int) -> NSPoint {
+        let layout = tv.layoutManager!, container = tv.textContainer!
+        layout.ensureLayout(for: container)
+        let glyph = layout.glyphIndexForCharacter(at: index)
+        let line = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        return NSPoint(x: tv.textContainerOrigin.x + line.minX + layout.location(forGlyphAt: glyph).x,
+                       y: tv.textContainerOrigin.y + line.midY)
+    }
+
     /// One gesture: the tracker reads the drags the run loop posts while the mouse button is down.
     private func mouse(_ tv: TypstTextView, from start: NSPoint, to end: NSPoint,
                        modifiers: NSEvent.ModifierFlags = []) {
@@ -283,6 +375,29 @@ final class ColumnSelectionTests: XCTestCase {
         XCTAssertEqual(boxes[2].width, tv.columnWidth, accuracy: 0.01)
         let partial = tv.selectionBoxes(for: NSRange(location: 0, length: 3))
         XCTAssertEqual(boxes[0].maxX, partial[0].maxX, accuracy: 0.01)
+    }
+
+    func testWrappedSelectionStaysJoinedAfterCollapsedSymbols() throws {
+        for prefix in ["$Omega$ ", "$ a := b $ $Omega$ ", "$\"pytagoras\"(a)$ "] {
+            let tv = editor(prefix + String(repeating: "abcdefgh ", count: 6))
+            tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            tv.wrapColumn = 20
+            Highlighter.apply(to: tv.textStorage!, font: tv.font!)
+            tv.textStorage!.addAttribute(.font, value: NSFont.systemFont(ofSize: 20), range: NSRange(location: 0, length: prefix.utf16.count))
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            tv.concealsMath = true
+            let range = NSRange(location: prefix.utf16.count, length: (tv.string as NSString).length - prefix.utf16.count - 4)
+            tv.setSelectedRange(range)
+            let boxes = tv.selectionBoxes(for: range)
+            XCTAssertGreaterThan(boxes.count, 1)
+            for pair in zip(boxes, boxes.dropFirst()) {
+                XCTAssertEqual(pair.0.maxY, pair.1.minY, accuracy: 0.01)
+            }
+            let path = tv.selectionPath(for: boxes)
+            let outlines = (0..<path.elementCount).filter { path.element(at: $0) == .closePath }
+            XCTAssertEqual(outlines.count, 1, "A selection across soft wraps must have one continuous outline: \(prefix) \(boxes)")
+            window.close()
+        }
     }
 
     func testInactiveSelectionDoesNotDrawAnAppKitBackground() throws {

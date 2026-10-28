@@ -1,6 +1,37 @@
 import AppKit
 
 extension TypstTextView {
+    func updateConcealedFonts() {
+        guard let storage = textStorage, storage.length > 0 else { return }
+        let key = Highlighter.concealedFontKey
+        var desired: [NSRange: (original: NSFont, replacement: NSFont)] = [:]
+        for conceal in conceals where conceal.replacement != 0 && self.conceal(at: conceal.range.location) != nil {
+            let original = (storage.attribute(key, at: conceal.range.location, effectiveRange: nil) as? NSFont)
+                ?? (storage.attribute(.font, at: conceal.range.location, effectiveRange: nil) as? NSFont)
+            guard let original, let replacement = Highlighter.concealGlyph(conceal.replacement, font: original),
+                  replacement.font != original else { continue }
+            desired[conceal.range] = (original, replacement.font)
+        }
+        var restore: [(NSRange, NSFont)] = []
+        storage.enumerateAttribute(key, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if let original = value as? NSFont, desired[range] == nil { restore.append((range, original)) }
+        }
+        let apply = desired.filter { range, fonts in
+            storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont != fonts.replacement
+        }
+        guard !restore.isEmpty || !apply.isEmpty else { return }
+        // Drawing reads the text attributes, so fallback glyphs need their font there too.
+        storage.beginEditing()
+        for (range, original) in restore {
+            storage.addAttribute(.font, value: original, range: range)
+            storage.removeAttribute(key, range: range)
+        }
+        for (range, fonts) in apply {
+            storage.addAttributes([.font: fonts.replacement, key: fonts.original], range: range)
+        }
+        storage.endEditing()
+    }
+
     func collapsedSegmentBoxes(in rect: NSRect) -> [(range: NSRange, box: NSRect)] {
         guard concealsMath, let layout = layoutManager, let container = textContainer else { return [] }
         let glyphs = layout.glyphRange(forBoundingRect: rect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y),
@@ -19,15 +50,15 @@ extension TypstTextView {
         for glyph in glyphs.location..<NSMaxRange(glyphs) {
             let index = layout.characterIndexForGlyph(at: glyph)
             guard let conceal = conceal(at: index) else { continue }
+            // A typographic minus changes its shape without hiding source.
+            if conceal.range.length == 1, source.character(at: index) == 0x2D, conceal.replacement == 0x2212 { continue }
             if layout.propertyForGlyph(at: glyph).contains(.null) { return true }
             guard conceal.replacement != 0, index == conceal.range.location,
                   conceal.range.length > 1 || source.character(at: index) != conceal.replacement,
                   let font = (textStorage?.attribute(.font, at: index, effectiveRange: nil) as? NSFont) ?? self.font else { continue }
             // Unsupported symbols keep their original spelling and need no marker.
-            var character = conceal.replacement
-            var replacement: CGGlyph = 0
-            if CTFontGetGlyphsForCharacters(font, &character, &replacement, 1), replacement != 0,
-               layout.glyph(at: glyph) == replacement { return true }
+            if let replacement = Highlighter.concealGlyph(conceal.replacement, font: font),
+               layout.glyph(at: glyph) == replacement.glyph { return true }
         }
         return false
     }

@@ -12,7 +12,14 @@ final class BuiltinCompiler: @unchecked Sendable {
 
     // The world is only touched on this queue.
     private let queue = DispatchQueue(label: "dev.bierdav.Typewright.typst", qos: .userInitiated)
-    private let world: OpaquePointer
+    private let root: URL
+    private var loadedWorld: OpaquePointer?
+    private var world: OpaquePointer {
+        if let loadedWorld { return loadedWorld }
+        let world = tw_world_new(root.path)
+        loadedWorld = world
+        return world
+    }
     private var overlays: Set<String> = []
     private struct PreviewPageID: Hashable {
         let high: UInt64
@@ -21,12 +28,11 @@ final class BuiltinCompiler: @unchecked Sendable {
     private var previewCache: [PreviewPageID: CompiledPage] = [:]
 
     init(root: URL) {
-        world = tw_world_new(root.path)
+        self.root = root
     }
 
     deinit {
-        let world = world
-        queue.async { tw_world_free(world) }
+        if let world = loadedWorld { queue.async { tw_world_free(world) } }
     }
 
     /// Rescans the folders searched for fonts; `onChange` runs on the main queue if the fonts differ.
@@ -56,14 +62,25 @@ final class BuiltinCompiler: @unchecked Sendable {
 
     /// solveng's report on `main` compiled without output, or nil if it fails; for files the preview doesn't compile.
     func check(main: String, buffers: [String: String]) async -> String? {
-        await withCheckedContinuation { cont in
-            queue.async { [self] in
-                load(main: main, buffers: buffers)
-                let result = tw_world_compile(world, TWFormatCheck)
-                defer { tw_result_free(result) }
-                cont.resume(returning: result.data != nil ? Self.solvengReport(world) : nil)
+        let cancellation = Cancellation()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                queue.async { [self] in
+                    guard !cancellation.isCancelled else { cont.resume(returning: nil); return }
+                    load(main: main, buffers: buffers)
+                    let result = tw_world_compile(world, TWFormatCheck)
+                    defer { tw_result_free(result) }
+                    cont.resume(returning: result.data != nil ? Self.solvengReport(world) : nil)
+                }
             }
-        }
+        } onCancel: { cancellation.cancel() }
+    }
+
+    private final class Cancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        var isCancelled: Bool { lock.withLock { cancelled } }
+        func cancel() { lock.withLock { cancelled = true } }
     }
 
     private func load(main: String, buffers: [String: String]) {

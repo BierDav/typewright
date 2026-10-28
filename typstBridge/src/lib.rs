@@ -172,8 +172,9 @@ pub(crate) fn solveng_report(world: &dyn World, introspector: &dyn typst::intros
             let range = world.range(span)?;
             let source = world.source(id).ok()?;
             let code = source.text().get(range.clone())?;
-            let start = source.text()[..range.start].encode_utf16().count();
-            Some((display_path(id), start, start + code.encode_utf16().count(), code.to_string()))
+            let start = source.lines().byte_to_utf16(range.start)?;
+            let end = source.lines().byte_to_utf16(range.end)?;
+            Some((display_path(id), start, end, code.to_string()))
         })();
         if kind == "error" {
             let (path, start, end, code) = origin.unwrap_or_default();
@@ -577,7 +578,7 @@ fn conceal_escape(node: &LinkedNode, group: (u32, u32), utf16: &[u32], out: &mut
     }
 }
 
-/// The single BMP character a math symbol name like `Omega` or `arrow` with `["r"]` stands for.
+/// The single character a math symbol name like `Omega` or `arrow` with `["r"]` stands for.
 fn math_symbol(name: &str, modifiers: &[&str]) -> Option<u32> {
     let Value::Symbol(symbol) = LIBRARY.math.scope().get(name)?.read() else { return None };
     let mut symbol = symbol.clone();
@@ -586,7 +587,7 @@ fn math_symbol(name: &str, modifiers: &[&str]) -> Option<u32> {
     }
     let mut chars = symbol.get().chars();
     let c = chars.next()? as u32;
-    (chars.next().is_none() && c <= 0xFFFF).then_some(c)
+    chars.next().is_none().then_some(c)
 }
 
 // MARK: - Refactoring
@@ -697,8 +698,8 @@ mod conceal_tests {
         for run in runs.chunks(5) {
             let (start, len, c) = (run[0] as usize, run[1] as usize, run[2]);
             result.extend_from_slice(&units[i..start]);
-            if c != 0 {
-                result.push(c as u16);
+            if let Some(c) = char::from_u32(c).filter(|&c| c != '\0') {
+                result.extend(c.encode_utf16(&mut [0; 2]).iter().copied());
             }
             i = start + len;
         }
@@ -714,6 +715,13 @@ mod conceal_tests {
         assert_eq!(shown("$cos(pi*t)$"), "$cos(π*t)$");
         assert_eq!(shown("$x < 0 and x > 2 or x = 1$"), "$x < 0 ∧ x > 2 ∨ x = 1$");
         assert_eq!(shown(r"1\. Rechenübung \# \u{2014} $a \$ b$ #raw(`\.`) \"), r"1. Rechenübung # — $a $ b$ #raw(`\.`) \");
+    }
+
+    #[test]
+    fn conceals_number_sets() {
+        assert_eq!(shown("$NN ZZ QQ RR CC HH PP AA BB DD$"), "$ℕ ℤ ℚ ℝ ℂ ℍ ℙ 𝔸 𝔹 𝔻$");
+        assert_eq!(shown("$assume(a in RR)$"), "$assume(a ∈ ℝ)$");
+        assert_eq!(shown("#let RR = 1\n$RR$"), "#let RR = 1\n$RR$");
     }
 
     #[test]

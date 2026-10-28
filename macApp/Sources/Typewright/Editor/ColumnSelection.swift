@@ -13,7 +13,7 @@ final class EditorLayoutManager: NSLayoutManager {
 
 /// Several carets or selections edited at once: ⌥-drag selects a column, ⌥⇧-click toggles a caret, ⌃⇧↑ and ⌃⇧↓ add
 /// one on the line above or below, like Xcode. In column selection mode (⇧⌘8, like IntelliJ) a plain drag selects a
-/// column and ⇧↑ and ⇧↓ add lines to it. A column started past the end of its line puts carets at the end of shorter lines.
+/// column and ⇧↑ and ⇧↓ add lines to it. A column missing all text puts carets at line ends.
 extension TypstTextView {
     /// A selection that grows from `anchor` towards `head`, where its caret is.
     struct ColumnCaret: Equatable {
@@ -81,12 +81,16 @@ extension TypstTextView {
         lm.ensureLayout(for: container)
         let glyphs = lm.glyphRange(forBoundingRect: NSRect(x: 0, y: top, width: container.size.width, height: max(bottom - top, 1)),
                                    in: container)
-        var lines: [(caret: ColumnCaret, end: Int, isStart: Bool)] = []
-        lm.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, glyphRange, _ in
-            guard rect.maxY > top, rect.minY <= bottom else { return }
+        guard glyphs.length > 0 else { return ([], 0) }
+        let logicalLines = s.lineRange(for: lm.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil))
+        let startGlyph = lm.glyphIndex(for: NSPoint(x: start.x - origin.x, y: start.y - origin.y), in: container)
+        var startFragment = NSRange()
+        lm.lineFragmentRect(forGlyphAt: startGlyph, effectiveRange: &startFragment)
+        let startChars = lm.characterRange(forGlyphRange: startFragment, actualGlyphRange: nil)
+        let startLine = s.lineRange(for: NSRange(location: startChars.location, length: 0))
+        let startsWrapped = startChars.location > startLine.location
+        func insertionPoints(in glyphRange: NSRange, rect: NSRect) -> [(x: CGFloat, index: Int)] {
             let chars = lm.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-            var lineEnd = NSMaxRange(chars)
-            if lineEnd > chars.location, s.character(at: lineEnd - 1) == 10 { lineEnd -= 1 }
             var positions = [CGFloat](repeating: 0, count: chars.length + 1)
             var indexes = [Int](repeating: 0, count: chars.length + 1)
             let count = lm.getLineFragmentInsertionPoints(forCharacterAt: chars.location, alternatePositions: false,
@@ -107,20 +111,46 @@ extension TypstTextView {
                     indexes[i] = NSMaxRange(conceal.range)
                 }
             }
-            func index(_ x: CGFloat) -> Int {
-                let x = x - origin.x - rect.minX
-                let closest = (0..<count).filter { indexes[$0] <= lineEnd }.min {
-                    let a = abs(positions[$0] - x), b = abs(positions[$1] - x)
-                    return a == b ? indexes[$0] < indexes[$1] : a < b
-                }
-                return closest.map { self.insertionIndexForConceals(indexes[$0]) } ?? lineEnd
-            }
-            let isStart = start.y - origin.y >= rect.minY && start.y - origin.y < rect.maxY
-            lines.append((ColumnCaret(anchor: index(start.x), head: index(end.x)), lineEnd, isStart))
+            return (0..<count).map { (origin.x + rect.minX + positions[$0], self.insertionIndexForConceals(indexes[$0])) }
         }
-        // Starting past the end of its line puts carets at the end of shorter lines; otherwise those get none.
-        let pastEnd = lines.contains { $0.isStart && $0.caret.anchor == $0.end }
-        let carets = lines.filter { pastEnd || $0.caret.anchor != $0.end }.map(\.caret)
+        func nearest(_ x: CGFloat, in points: [(x: CGFloat, index: Int)], fallback: Int) -> Int {
+            points.min {
+                let a = abs($0.x - x), b = abs($1.x - x)
+                return a == b ? $0.index < $1.index : a < b
+            }?.index ?? fallback
+        }
+        let startRect = lm.lineFragmentRect(forGlyphAt: startGlyph, effectiveRange: nil)
+        var startEnd = 0
+        s.getLineStart(nil, end: nil, contentsEnd: &startEnd, for: NSRange(location: startLine.location, length: 0))
+        let startPoints = insertionPoints(in: startFragment, rect: startRect).filter { $0.index <= startEnd }
+        let startIndex = nearest(start.x, in: startPoints, fallback: startChars.location)
+        if start == end { return ([ColumnCaret(startIndex)], 0) }
+        let startColumn = startIndex - startLine.location
+        var lines: [(caret: ColumnCaret, hasPosition: Bool)] = []
+        let logicalGlyphs = lm.glyphRange(forCharacterRange: logicalLines, actualCharacterRange: nil)
+        lm.enumerateLineFragments(forGlyphRange: logicalGlyphs) { rect, _, _, glyphRange, _ in
+            let chars = lm.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+            let line = s.lineRange(for: NSRange(location: chars.location, length: 0))
+            // Soft wraps belong to one selection, measured on its first slice.
+            guard chars.location == line.location else { return }
+            var lineEnd = 0
+            s.getLineStart(nil, end: nil, contentsEnd: &lineEnd, for: NSRange(location: line.location, length: 0))
+            let points = insertionPoints(in: glyphRange, rect: rect).filter { $0.index <= lineEnd }
+            let anchor = startsWrapped ? self.insertionIndexForConceals(min(line.location + startColumn, lineEnd))
+                : nearest(start.x, in: points, fallback: lineEnd)
+            let target = nearest(end.x, in: points, fallback: lineEnd)
+            let head = startsWrapped ? min(anchor, target) : target
+            let left = startsWrapped ? end.x : min(start.x, end.x)
+            let right = startsWrapped ? CGFloat.greatestFiniteMagnitude : max(start.x, end.x)
+            let hasPosition = points.contains {
+                ($0.index < lineEnd || lineEnd == line.location) && $0.x >= left - 0.01 && $0.x <= right + 0.01
+                    && (!startsWrapped || $0.index <= anchor)
+            }
+            lines.append((ColumnCaret(anchor: anchor, head: head), hasPosition))
+        }
+        // Fall back to line ends only when the entire rectangle misses insertion positions.
+        let hasPositions = lines.contains { $0.hasPosition }
+        let carets = lines.filter { !hasPositions || $0.hasPosition }.map(\.caret)
         return (carets, end.y >= start.y ? carets.count - 1 : 0)
     }
 
@@ -400,14 +430,24 @@ extension TypstTextView {
         let origin = textContainerOrigin
         let glyphs = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
         var boxes: [NSRect] = []
-        lm.enumerateLineFragments(forGlyphRange: glyphs) { _, used, _, lineGlyphs, _ in
+        lm.enumerateLineFragments(forGlyphRange: glyphs) { line, used, _, lineGlyphs, _ in
             let selected = NSIntersectionRange(glyphs, lineGlyphs)
-            lm.enumerateEnclosingRects(forGlyphRange: selected, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                                       in: container) { box, _ in
-                // Newlines stop at the text; empty lines keep one character selected.
-                let end = max(used.maxX - container.lineFragmentPadding, box.minX + self.columnWidth)
-                let clipped = NSRect(x: box.minX, y: box.minY, width: min(box.maxX, end) - box.minX, height: box.height)
-                boxes.append(clipped.offsetBy(dx: origin.x, dy: origin.y))
+            var visible: NSRect?
+            for glyph in selected.location..<NSMaxRange(selected) {
+                // Hidden spelling retains source bounds but contributes no selection width.
+                guard !lm.propertyForGlyph(at: glyph).contains(.null) else { continue }
+                let box = lm.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+                guard box.width > 0 else { continue }
+                visible = visible.map { $0.union(box) } ?? box
+            }
+            if let visible {
+                let end = max(used.maxX - container.lineFragmentPadding, visible.minX + self.columnWidth)
+                boxes.append(NSRect(x: visible.minX + origin.x, y: line.minY + origin.y,
+                                    width: min(visible.maxX, end) - visible.minX, height: line.height))
+            } else {
+                // An empty selected line still needs a visible background.
+                boxes.append(NSRect(x: used.minX + origin.x, y: line.minY + origin.y,
+                                    width: self.columnWidth, height: line.height))
             }
         }
         return boxes

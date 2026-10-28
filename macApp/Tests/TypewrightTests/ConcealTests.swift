@@ -19,6 +19,7 @@ final class ConcealTests: XCTestCase {
         tv.solvengContext = { context }
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         func check() {
             let expected = tv.string.replacingOccurrences(of: "op(\"tri\")", with: "tri")
                 .replacingOccurrences(of: "\n", with: "?")
@@ -30,18 +31,18 @@ final class ConcealTests: XCTestCase {
             tv.setSelectedRange(NSRange(location: at, length: 0))
             tv.insertText(addition, replacementRange: tv.selectedRange())
             check()
-            await Task.yield()
+            await tv.concealAnalysis.task?.value
             check()
         }
         let name = (tv.string as NSString).range(of: "$y")
         tv.setSelectedRange(NSRange(location: name.location + 1, length: 1))
         tv.insertText("longer", replacementRange: tv.selectedRange())
-        check()
-        await Task.yield()
+        await tv.concealAnalysis.task?.value
         check()
         let boxes = tv.collapsedSegmentBoxes(in: tv.bounds).map(\.box)
         context = SolvengSupport.context(files: [], report: "{\"blocks\":1,\"elements\":[]}", path: "main.typ", main: true)
         tv.refreshConceals()
+        await tv.concealAnalysis.task?.value
         check()
         XCTAssertEqual(tv.collapsedSegmentBoxes(in: tv.bounds).map(\.box), boxes)
         let constructor = (tv.string as NSString).range(of: "op(\"tri\")")
@@ -51,16 +52,17 @@ final class ConcealTests: XCTestCase {
         check()
     }
 
-    func testUnsupportedReplacementHasNoCollapsedSourceMarker() throws {
+    func testUnsupportedReplacementHasNoCollapsedSourceMarker() async throws {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.font = font
         tv.string = "$ triangle + Omega + arrow.r.double + integral.cont $"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let unsupported = try XCTUnwrap(tv.conceals.first { conceal in
             guard conceal.replacement != 0 else { return false }
-            var character = conceal.replacement
+            var character = unichar(clamping: conceal.replacement)
             var glyph: CGGlyph = 0
             return !CTFontGetGlyphsForCharacters(font, &character, &glyph, 1) || glyph == 0
         })
@@ -70,24 +72,88 @@ final class ConcealTests: XCTestCase {
         XCTAssertTrue(shown(tv).contains(spelling))
     }
 
-    func testSingleCharacterReplacementHasCollapsedSourceMarker() throws {
-        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
-        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        tv.string = "$ a - b $"
-        tv.setSelectedRange(NSRange(location: 0, length: 0))
+    func testRealNumbersSymbolActuallyDrawsWithFallbackFont() async throws {
+        EditorFont.register()
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        let original = NSFont.monospacedSystemFont(ofSize: 28, weight: .regular)
+        tv.font = original
+        let replacement = try XCTUnwrap(Highlighter.concealGlyph(0x211D, font: original))
+        XCTAssertNotEqual(replacement.font, original, "This regression must exercise font fallback")
+        tv.backgroundColor = .white
+        tv.string = "$assume(a in RR, )$"
+        let range = (tv.string as NSString).range(of: "RR")
+        tv.textStorage?.addAttribute(.foregroundColor, value: NSColor.black, range: NSRange(location: 0, length: (tv.string as NSString).length))
+        tv.setSelectedRange(NSRange(location: (tv.string as NSString).length - 1, length: 0))
         tv.concealsMath = true
-        let minus = (tv.string as NSString).range(of: "-")
-        XCTAssertTrue(tv.collapsedSegmentBoxes(in: tv.bounds).contains { $0.range == minus })
-        tv.setSelectedRange(NSRange(location: minus.location, length: 0))
-        XCTAssertFalse(tv.collapsedSegmentBoxes(in: tv.bounds).contains { $0.range == minus })
+        await tv.concealAnalysis.task?.value
+        XCTAssertEqual(tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont, replacement.font)
+        let box = try XCTUnwrap(tv.highlightBoxes(for: range).first)
+        let bitmap = try XCTUnwrap(tv.bitmapImageRepForCachingDisplay(in: tv.bounds))
+        tv.cacheDisplay(in: tv.bounds, to: bitmap)
+        let scale = CGFloat(bitmap.pixelsWide) / tv.bounds.width
+        let area = NSRect(x: box.minX, y: box.minY + 1, width: box.width, height: max(box.height - 5, 0))
+        var ink = 0
+        for y in Int(area.minY * scale)..<Int(area.maxY * scale) {
+            for x in Int(area.minX * scale)..<Int(area.maxX * scale) {
+                if let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                   color.redComponent < 0.5, color.greenComponent < 0.5, color.blueComponent < 0.5 { ink += 1 }
+            }
+        }
+        XCTAssertGreaterThan(ink, 10, "The concealed RR must draw a visible ℝ above its underline")
     }
 
-    func testUnchangedFunctionAliasHasNoCollapsedSourceMarker() throws {
+    func testNumberSetsAndMembershipUseTheirSymbolsAndRevealOnSelection() async throws {
+        EditorFont.register()
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 800, height: 200))
+        tv.font = try XCTUnwrap(NSFont(name: "JetBrainsMono-Regular", size: 13))
+        let names = ["NN", "ZZ", "QQ", "RR", "CC", "HH", "PP", "AA", "BB", "DD", "in"]
+        let symbols = Array("ℕℤℚℝℂℍℙ𝔸𝔹𝔻∈".unicodeScalars)
+        tv.string = "$ " + names.joined(separator: " ") + " $"
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
+        let source = tv.string as NSString
+        let layout = try XCTUnwrap(tv.layoutManager)
+        for (name, symbol) in zip(names, symbols) {
+            let range = source.range(of: name)
+            let conceal = try XCTUnwrap(tv.conceals.first { $0.range == range })
+            XCTAssertEqual(conceal.replacement, symbol.value)
+            let replacement = try XCTUnwrap(Highlighter.concealGlyph(symbol.value, font: tv.font!))
+            let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            XCTAssertEqual(layout.glyph(at: glyphs.location), NSGlyph(replacement.glyph), name)
+            XCTAssertTrue(layout.propertyForGlyph(at: NSMaxRange(glyphs) - 1).contains(.null), name)
+            XCTAssertTrue(tv.collapsedSegmentBoxes(in: tv.bounds).contains { $0.range == range }, name)
+            tv.setSelectedRange(NSRange(location: range.location + 1, length: 0))
+            XCTAssertEqual(tv.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont, tv.font)
+            XCTAssertFalse(tv.collapsedSegments.contains(range))
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+        }
+    }
+
+    func testMinusHasNoCollapsedSourceMarker() async throws {
+        for text in ["$t-t$", "$ a - b $", "#show: worksheet\n$t-t$"] {
+            let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+            tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            tv.string = text
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            tv.concealsMath = true
+            await tv.concealAnalysis.task?.value
+            let minus = (tv.string as NSString).range(of: "-")
+            XCTAssertFalse(tv.collapsedSegmentBoxes(in: tv.bounds).contains { NSIntersectionRange($0.range, minus).length > 0 })
+            let conceal = try XCTUnwrap(tv.conceals.first { $0.range == minus })
+            XCTAssertEqual(conceal.replacement, 0x2212)
+            let box = try XCTUnwrap(tv.highlightBoxes(for: minus).first)
+            XCTAssertNil(tv.collapsedSegment(at: NSPoint(x: box.midX, y: box.midY)))
+        }
+    }
+
+    func testUnchangedFunctionAliasHasNoCollapsedSourceMarker() async throws {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = NSFont(name: "JetBrainsMono-Regular", size: 13) ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "#let triangle = math.op(\"tri\")\n$t := triangle(x) $"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let alias = (tv.string as NSString).range(of: "triangle(x)")
         XCTAssertTrue(shown(tv).contains("triangle(x)"))
         XCTAssertFalse(tv.collapsedSegmentBoxes(in: tv.bounds).contains { NSIntersectionRange($0.range, alias).length > 0 })
@@ -95,12 +161,13 @@ final class ConcealTests: XCTestCase {
         XCTAssertNil(tv.collapsedSegment(at: NSPoint(x: box.midX, y: box.midY)))
     }
 
-    func testBindingHashCollapsesIntoItsName() throws {
+    func testBindingHashCollapsesIntoItsName() async throws {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "#import units: cm\n#let inch = unit($2.54 #cm$)\n#show: worksheet\n$1#inch =$"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let source = tv.string as NSString
         let reference = source.range(of: "#inch", options: .backwards)
         let segment = try XCTUnwrap(tv.collapsedSegmentBoxes(in: tv.bounds).first { $0.range == reference })
@@ -112,12 +179,13 @@ final class ConcealTests: XCTestCase {
         XCTAssertFalse(tv.collapsedSegments.contains(reference))
     }
 
-    func testCollapsedIndicatorsFollowVisiblePieces() throws {
+    func testCollapsedIndicatorsFollowVisiblePieces() async throws {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$ Omega + \"km\" $"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let source = tv.string as NSString
         let omega = source.range(of: "Omega")
         let quoted = source.range(of: "\"km\"")
@@ -152,12 +220,13 @@ final class ConcealTests: XCTestCase {
         return result
     }
 
-    func testHighlightBoxesFollowVisibleGlyphsAndRevealedNames() throws {
+    func testHighlightBoxesFollowVisibleGlyphsAndRevealedNames() async throws {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
         tv.string = "$ \"pytagoras\"(a) + Omega $"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let source = tv.string as NSString
         let quoted = source.range(of: "\"pytagoras\"")
         let letters = source.range(of: "pytagoras")
@@ -181,12 +250,13 @@ final class ConcealTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(tv.highlightBoxes(for: omega).first).width, collapsed.width)
     }
 
-    func testMathShowsRenderedUntilTheCaretTouchesIt() {
+    func testMathShowsRenderedUntilTheCaretTouchesIt() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "R = $12\"k\"Omega$ ok"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         XCTAssertEqual(shown(tv), "R = $12k?$ ok")
         // Only the piece at the caret reveals: the string, then the symbol.
         tv.setSelectedRange(NSRange(location: 8, length: 0))
@@ -203,13 +273,14 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "R = $12k?$ ok")
     }
 
-    func testInlineConstructorsRevealAsAWhole() {
+    func testInlineConstructorsRevealAsAWhole() async {
         for constructor in ["op(\"tri\")", "op(\"rect\")"] {
             let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
             tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
             tv.string = "#show: worksheet\n$y := 1" + constructor + "$"
             tv.setSelectedRange(NSRange(location: 0, length: 0))
             tv.concealsMath = true
+            await tv.concealAnalysis.task?.value
             let range = (tv.string as NSString).range(of: constructor)
             let collapsed = shown(tv)
             XCTAssertFalse(collapsed.contains("op("))
@@ -222,36 +293,39 @@ final class ConcealTests: XCTestCase {
         }
     }
 
-    func testEmptyStringsGlueNeighboursAndRevealWithThem() {
+    func testEmptyStringsGlueNeighboursAndRevealWithThem() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$Delta\"\"Gamma\"\"Omega + a\"\"b$"
         tv.setSelectedRange(NSRange(location: 21, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         XCTAssertEqual(shown(tv), "$??? + ab$")
         tv.setSelectedRange(NSRange(location: 10, length: 0))
         tv.updateRevealedEquation()
         XCTAssertEqual(shown(tv), "$Delta\"\"Gamma\"\"Omega + ab$", "all five reveal together")
     }
 
-    func testEmptyStringsGlueLiteralGreekLetters() {
+    func testEmptyStringsGlueLiteralGreekLetters() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$ Sigma\"\"r $ and $ Σ\"\"r $"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         XCTAssertEqual(shown(tv), "$ ?r $ and $ Σr $")
         tv.setSelectedRange(NSRange(location: 20, length: 0))
         tv.updateRevealedEquation()
         XCTAssertEqual(shown(tv), "$ ?r $ and $ Σ\"\"r $")
     }
 
-    func testSelectionRevealsThePieceItTouches() {
+    func testSelectionRevealsThePieceItTouches() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a Omega b$"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         XCTAssertEqual(shown(tv), "$a ? b$")
         // Dragging into Omega keeps the endpoints where they are and uncollapses it.
         tv.setSelectedRange(NSRange(location: 1, length: 4))
@@ -269,11 +343,12 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "$a Omega b$")
     }
 
-    func testShrinkingADragCollapsesPiecesBeforeMouseUp() {
+    func testShrinkingADragCollapsesPiecesBeforeMouseUp() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a Omega b$"
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         tv.setSelectedRanges([NSValue(range: NSRange(location: 1, length: 4))],
                              affinity: .downstream, stillSelecting: true)
         XCTAssertEqual(shown(tv), "$a Omega b$")
@@ -289,11 +364,12 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "$a ? b$")
     }
 
-    func testShrinkingADragKeepsOnlyTheSymbolsItStillTouches() {
+    func testShrinkingADragKeepsOnlyTheSymbolsItStillTouches() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a Omega Gamma b$"
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         func select(_ location: Int, _ length: Int) {
             tv.setSelectedRanges([NSValue(range: NSRange(location: location, length: length))],
                                  affinity: .downstream, stillSelecting: true)
@@ -310,7 +386,7 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "$a ? ? b$")
     }
 
-    func testMouseDragCanEndInsideAnExpandedSymbol() {
+    func testMouseDragCanEndInsideAnExpandedSymbol() async {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -323,6 +399,7 @@ final class ConcealTests: XCTestCase {
         tv.string = "$a Omega b$"
         tv.setSelectedRange(NSRange(location: 1, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let lm = tv.layoutManager!, container = tv.textContainer!
         func point(_ index: Int) -> NSPoint {
             lm.ensureLayout(for: container)
@@ -361,11 +438,12 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(tv.selectedRange(), NSRange(location: 1, length: 4))
     }
 
-    func testShrinkingAColumnDragCollapsesNamesBeforeMouseUp() {
+    func testShrinkingAColumnDragCollapsesNamesBeforeMouseUp() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a Omega b$\n$c Omega d$"
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         tv.setColumns([.init(anchor: 1, head: 4), .init(anchor: 12, head: 16)], primary: 1)
         XCTAssertEqual(tv.selectedRange(), tv.columnCarets[1].range)
         for _ in 0..<4 {
@@ -379,12 +457,13 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "$a ? b$?$c ? d$")
     }
 
-    func testCaretEntersPiecesAtTheHiddenQuote() {
+    func testCaretEntersPiecesAtTheHiddenQuote() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a \"abc\" b$"
         tv.setSelectedRange(NSRange(location: 2, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         tv.moveRight(nil)
         XCTAssertEqual(tv.selectedRange().location, 3, "in front of the invisible opening quote")
         tv.updateRevealedEquation()
@@ -397,12 +476,13 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(tv.selectedRange().location, 4)
     }
 
-    func testUpAndDownLandUnderTheCaretOnceThePieceShows() {
+    func testUpAndDownLandUnderTheCaretOnceThePieceShows() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "xxxxxx\n$\"abc\"$\nxxxxxx"
         tv.setSelectedRange(NSRange(location: 3, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         tv.moveDown(nil)
         // Under column 3 once the quotes show: `$"a|bc"$`.
         XCTAssertEqual(tv.selectedRange().location, 10)
@@ -414,7 +494,7 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(tv.selectedRange().location, 10)
     }
 
-    func testOperatorsUseBoldLigaturesWithoutFolds() {
+    func testOperatorsUseBoldLigaturesWithoutFolds() async {
         let text = "$ x := 1 -> $"
         XCTAssertTrue(Highlighter.conceals(in: text).isEmpty)
         let storage = NSTextStorage(string: text)
@@ -438,7 +518,7 @@ final class ConcealTests: XCTestCase {
         XCTAssertNotEqual(glyphs(ligature: 2), glyphs(ligature: 0), "the arrow uses the font's ligature")
     }
 
-    func testOperatorLigaturesRevealAtTheCaretWithoutFolds() {
+    func testOperatorLigaturesRevealAtTheCaretWithoutFolds() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.string = "$x -> y$"
         let storage = tv.textStorage!
@@ -466,7 +546,7 @@ final class ConcealTests: XCTestCase {
         XCTAssertTrue(tv.conceals.isEmpty)
     }
 
-    func testColumnSelectionBreaksOperatorsOnlyBetweenTheirCharacters() {
+    func testColumnSelectionBreaksOperatorsOnlyBetweenTheirCharacters() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.string = "$x -> y$\n$x -> y$"
         let storage = tv.textStorage!
@@ -479,7 +559,7 @@ final class ConcealTests: XCTestCase {
                        "an endpoint between the characters breaks it")
     }
 
-    func testDraggingExpandsOperatorsOnlyWhileAnEndpointIsInside() {
+    func testDraggingExpandsOperatorsOnlyWhileAnEndpointIsInside() async {
         let cases: [(NSRange, Bool)] = [
             (NSRange(location: 0, length: 4), true),
             (NSRange(location: 0, length: 7), false),
@@ -510,23 +590,25 @@ final class ConcealTests: XCTestCase {
         }
     }
 
-    func testEscapesShowTheirCharacter() {
+    func testEscapesShowTheirCharacter() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "1\\. Übung \\#"
         tv.setSelectedRange(NSRange(location: 6, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         XCTAssertEqual(shown(tv), "1? Übung ?")
         tv.setSelectedRange(NSRange(location: 1, length: 0))
         tv.updateRevealedEquation()
         XCTAssertEqual(shown(tv), "1\\. Übung ?", "the escape at the caret shows its source")
     }
 
-    func testHiddenQuotesTakeNoSpace() {
+    func testHiddenQuotesTakeNoSpace() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$\"V\", x$"
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         tv.setSelectedRange(NSRange(location: 9, length: 0))
         let lm = tv.layoutManager!, container = tv.textContainer!
         lm.ensureLayout(for: container)
@@ -538,12 +620,13 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(x(4) - x(2), width, accuracy: 0.5, "the comma follows the V directly")
     }
 
-    func testColumnDragExpandsTheMathItTouches() {
+    func testColumnDragExpandsTheMathItTouches() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a Omega b$\n$c Omega d$"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let lm = tv.layoutManager!, container = tv.textContainer!
         lm.ensureLayout(for: container)
         func box(_ range: NSRange) -> NSRect {
@@ -568,13 +651,14 @@ final class ConcealTests: XCTestCase {
         }
     }
 
-    func testColumnHitTestingStaysStableNearHiddenOpeningQuotes() {
+    func testColumnHitTestingStaysStableNearHiddenOpeningQuotes() async {
         for (step, delta) in (-40...80).flatMap({ step in [-0.4, -0.2, 0, 0.2, 0.4].map { (step, $0) } }) {
             let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
             tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
             tv.string = "#worksheet(\n  $ \"pytagoras\"(a, b) $\n  $ \"circle\"(x, r) $\n  $ r := 3 $\n)"
             Highlighter.apply(to: tv.textStorage!, font: tv.font!)
             tv.concealsMath = true
+            await tv.concealAnalysis.task?.value
             let lm = tv.layoutManager!, container = tv.textContainer!
             lm.ensureLayout(for: container)
             let source = tv.string as NSString
@@ -597,12 +681,13 @@ final class ConcealTests: XCTestCase {
         }
     }
 
-    func testColumnDragRevealsQuotesOnlyAfterCrossingTheirMidpoint() {
+    func testColumnDragRevealsQuotesOnlyAfterCrossingTheirMidpoint() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$ \"p\" $\n$ \"p\" $"
         Highlighter.apply(to: tv.textStorage!, font: tv.font!)
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let lm = tv.layoutManager!, container = tv.textContainer!
         lm.ensureLayout(for: container)
         func box(_ index: Int) -> NSRect {
@@ -623,7 +708,7 @@ final class ConcealTests: XCTestCase {
         }
     }
 
-    func testRegularMouseDragCanStopBeforeAnOpeningQuote() {
+    func testRegularMouseDragCanStopBeforeAnOpeningQuote() async {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -635,6 +720,7 @@ final class ConcealTests: XCTestCase {
         tv.string = "$ \"pytagoras\"(a, b) $"
         Highlighter.apply(to: tv.textStorage!, font: tv.font!)
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         let lm = tv.layoutManager!, container = tv.textContainer!
         lm.ensureLayout(for: container)
         func point(_ index: Int) -> NSPoint {
@@ -675,13 +761,14 @@ final class ConcealTests: XCTestCase {
         XCTAssertTrue(history.suffix(3).allSatisfy { $0 == NSRange(location: 0, length: 2) }, "\(history)")
     }
 
-    func testRegularDragHitTestingStaysStableAtHiddenQuotes() {
+    func testRegularDragHitTestingStaysStableAtHiddenQuotes() async {
         for fraction in [-0.25, 0, 0.25, 0.49, 0.51, 0.75] {
             let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
             tv.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
             tv.string = "$ \"pytagoras\"(a, b) $"
             Highlighter.apply(to: tv.textStorage!, font: tv.font!)
             tv.concealsMath = true
+            await tv.concealAnalysis.task?.value
             let lm = tv.layoutManager!, container = tv.textContainer!
             lm.ensureLayout(for: container)
             let letter = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: NSRange(location: 3, length: 1),
@@ -702,12 +789,13 @@ final class ConcealTests: XCTestCase {
         }
     }
 
-    func testColumnSelectsIntoAPieceAndUncollapsesIt() {
+    func testColumnSelectsIntoAPieceAndUncollapsesIt() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$a Omega b$\n$c Omega d$"
         tv.setSelectedRange(NSRange(location: 0, length: 0))
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         XCTAssertEqual(shown(tv), "$a ? b$?$c ? d$")
         // The endpoints stay inside the collapsed names instead of snapping to them whole.
         tv.setColumns([.init(anchor: 1, head: 4), .init(anchor: 12, head: 16)], primary: 0)
@@ -718,16 +806,33 @@ final class ConcealTests: XCTestCase {
         XCTAssertEqual(shown(tv), "$a ? b$?$c ? d$")
     }
 
-    func testEditingOneEquationKeepsTheOthersRight() {
+    func testDeletingAcrossConcealsKeepsRangesInBoundsWhileAnalysisRuns() async {
+        let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = String(repeating: "prefix ", count: 10) + "$Omega \"x\"$"
+        tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
+        let length = (tv.string as NSString).length
+        tv.insertText("", replacementRange: NSRange(location: 0, length: length - 4))
+        for conceal in tv.conceals {
+            XCTAssertLessThanOrEqual(NSMaxRange(conceal.range), (tv.string as NSString).length)
+            XCTAssertLessThanOrEqual(NSMaxRange(conceal.equation), (tv.string as NSString).length)
+        }
+        await tv.concealAnalysis.task?.value
+    }
+
+    func testEditingOneEquationKeepsTheOthersRight() async {
         let tv = TypstTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         tv.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         tv.string = "$240 \"V\" Omeg$ and $9 \"V\", 228 \"A\"$"
         tv.concealsMath = true
+        await tv.concealAnalysis.task?.value
         tv.setSelectedRange(NSRange(location: 13, length: 0))
         tv.updateRevealedEquation()
         _ = shown(tv)
         // Typing in the first equation shifts every later conceal.
         tv.insertText("a", replacementRange: NSRange(location: 13, length: 0))
+        await tv.concealAnalysis.task?.value
         tv.layoutManager?.ensureGlyphs(forCharacterRange: NSRange(location: 0, length: (tv.string as NSString).length))
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertEqual(shown(tv), "$240 V Omega$ and $9 V, 228 A$")

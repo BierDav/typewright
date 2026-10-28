@@ -100,6 +100,11 @@ final class Opener {
         state.ask(.newFile(in: workspace, folder: folder) { state.setSpacesOpen(false) })
     }
 
+    func newFolder(in state: WindowState, folder: URL) {
+        guard let workspace = state.workspace else { return }
+        state.ask(.newFolder(in: workspace, folder: folder) { state.setSpacesOpen(false) })
+    }
+
     func closeSpace() {
         keyState?.space = nil
     }

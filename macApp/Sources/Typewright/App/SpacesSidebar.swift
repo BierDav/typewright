@@ -13,7 +13,8 @@ struct SpacesSidebar: View {
             ZStack {
                 if let workspace {
                     SidebarView(workspace: workspace, onShowSpaces: { state.setSpacesOpen(true) },
-                                onCreateFile: { Opener.shared.newFile(in: state, folder: $0) }) { name in
+                                onCreateFile: { Opener.shared.newFile(in: state, folder: $0) },
+                                onCreateFolder: { Opener.shared.newFolder(in: state, folder: $0) }) { name in
                         Opener.shared.rename(space: workspace.root, to: name)
                     }
                     .id(ObjectIdentifier(workspace))
@@ -212,6 +213,8 @@ struct SpacesPane: View {
     /// Shows each row's ⌘ number while ⌘ is held.
     @State private var shortcutHints = SpaceShortcutHints()
     @State private var scrolled = false
+    @State private var springSpace: URL?
+    @State private var springTask: Task<Void, Never>?
     private let sync = SyncService.shared
 
     private static let rowHeight: CGFloat = 42
@@ -259,6 +262,7 @@ struct SpacesPane: View {
         }
         .onDisappear {
             shortcutHints.stop()
+            springTask?.cancel()
         }
         .animation(.easeOut(duration: 0.12), value: shortcutHints.visible)
     }
@@ -287,39 +291,49 @@ struct SpacesPane: View {
             .padding(10)
         }
         .contentShape(Rectangle())
-        .gesture(WindowDragGesture())
+        .background(WindowMoveArea())
     }
 
     private var scrollList: some View {
         ScrollView {
             LazyVStack(spacing: 2) {
                 ForEach(Array(spaces.enumerated()), id: \.element) { index, url in
-                    SpaceRow(url: url, isCurrent: url.path == current, isHighlighted: focused && highlighted == url,
-                             isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url), status: sync.status(for: url),
-                             isRenaming: renaming == url, shortcut: shortcutHints.visible && index < 9 ? index + 1 : nil) {
-                        open(url)
-                    } onStartRename: {
-                        renaming = url
-                    } onRename: { name in
-                        guard renaming == url else { return }
-                        renaming = nil
-                        if let name, Opener.shared.rename(space: url, to: name) != nil {
-                            withAnimation(.smooth(duration: 0.2)) { onChange() }
+                    FileDropArea(id: "spaceDrop:\(url.path)", onMove: { _ in springOpen(url) }, onExit: {
+                        springTask?.cancel()
+                        springTask = nil
+                        springSpace = nil
+                    }, onDrop: { urls, _, copy in
+                        springTask?.cancel()
+                        Workspace.importItems(urls, intoSpace: url, copy: copy, undoManager: state.undoManager)
+                    }) {
+                        SpaceRow(url: url, isCurrent: url.path == current, isHighlighted: focused && highlighted == url,
+                                 isDragged: drag?.url == url, isSynced: sync.isSynced(url), isShared: sync.isShared(url), status: sync.status(for: url),
+                                 isRenaming: renaming == url, shortcut: shortcutHints.visible && index < 9 ? index + 1 : nil) {
+                            open(url)
+                        } onStartRename: {
+                            renaming = url
+                        } onRename: { name in
+                            guard renaming == url else { return }
+                            renaming = nil
+                            if let name, Opener.shared.rename(space: url, to: name) != nil {
+                                withAnimation(.smooth(duration: 0.2)) { onChange() }
+                            }
+                        } onForget: {
+                            if SpaceList.isInRepository(url) {
+                                Opener.shared.deleteSpace(url, in: state)
+                                withAnimation(.smooth(duration: 0.3)) { onChange() }
+                            } else {
+                                Opener.shared.forgetSpace(url, in: state)
+                            }
+                        } onInvite: {
+                            Invites.share(url)
+                        } onDrag: { offset in
+                            drag = (url, offset)
+                        } onDrop: {
+                            drop()
                         }
-                    } onForget: {
-                        if SpaceList.isInRepository(url) {
-                            Opener.shared.deleteSpace(url, in: state)
-                            withAnimation(.smooth(duration: 0.3)) { onChange() }
-                        } else {
-                            Opener.shared.forgetSpace(url, in: state)
-                        }
-                    } onInvite: {
-                        Invites.share(url)
-                    } onDrag: { offset in
-                        drag = (url, offset)
-                    } onDrop: {
-                        drop()
                     }
+                    .frame(height: Self.rowHeight)
                     .offset(y: offset(of: index))
                     .zIndex(drag?.url == url ? 1 : 0)
                     .transition(.asymmetric(insertion: .opacity,
@@ -419,7 +433,7 @@ struct SpacesPane: View {
     }
 
     /// Dropped folders become spaces at the drop position; dropped files add their folder.
-    private func addDropped(_ urls: [URL], at location: CGPoint) {
+    private func addDropped(_ urls: [URL], at location: CGPoint, copy: Bool) {
         externalDrop = nil
         var index = index(at: location)
         var outside: [(url: URL, at: Int)] = []
@@ -506,6 +520,17 @@ struct SpacesPane: View {
         }
         onChange()
         if share.kind == .space { Opener.shared.open(joined, in: state) } else { Invites.reveal(joined) }
+    }
+
+    private func springOpen(_ url: URL) {
+        guard springSpace != url else { return }
+        springTask?.cancel()
+        springSpace = url
+        springTask = Task {
+            try? await Task.sleep(for: .seconds(0.6))
+            guard !Task.isCancelled else { return }
+            open(url)
+        }
     }
 
     private func open(_ url: URL) {

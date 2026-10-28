@@ -8,14 +8,18 @@ final class CompilerTests: XCTestCase {
         }
         let file = URL(fileURLWithPath: path)
         let source = try String(contentsOf: file, encoding: .utf8)
-        let compiler = BuiltinCompiler(root: file.deletingLastPathComponent())
-        for mode in [RenderMode.html, .pdf, .svg] {
+        let root = ProcessInfo.processInfo.environment["TYPEWRIGHT_PERF_ROOT"].map { URL(fileURLWithPath: $0) }
+            ?? file.deletingLastPathComponent()
+        let main = String(file.path.dropFirst(root.path.count + 1))
+        let compiler = BuiltinCompiler(root: root)
+        let modes: [RenderMode] = ProcessInfo.processInfo.environment["TYPEWRIGHT_PERF_MODE"] == "pdf" ? [.pdf] : [.html, .pdf, .svg]
+        for mode in modes {
             for revision in 0..<3 {
-                let result = await compiler.compile(main: file.lastPathComponent,
-                    buffers: [file.lastPathComponent: source + "\nPerformance revision \(revision)"], format: mode)
+                let result = await compiler.compile(main: main,
+                    buffers: [main: source + "\nPerformance revision \(revision)"], format: mode, incremental: true)
                 let bytes = result.previewPages?.reduce(0) { $0 + $1.byteCount } ?? result.output?.count ?? 0
                 print("Document \(mode), revision \(revision): \(result.duration) s, \(bytes) bytes")
-                XCTAssertNotNil(result.output, result.log)
+                XCTAssertNotNil(result.output, result.log + result.diagnostics.map { "\($0.path):\($0.line): \($0.message)" }.joined(separator: "\n"))
                 XCTAssertFalse(result.diagnostics.contains { $0.severity == .error })
             }
         }
@@ -45,6 +49,18 @@ final class CompilerTests: XCTestCase {
         XCTAssertTrue(String(decoding: edited.output ?? Data(), as: UTF8.self).contains("Unsaved"))
         let reverted = await compiler.compile(main: "main.typ", buffers: [:], format: .html)
         XCTAssertTrue(String(decoding: reverted.output ?? Data(), as: UTF8.self).contains("Hello"))
+    }
+
+    func testCancelledReportCheckDoesNotCompile() async {
+        let compiler = BuiltinCompiler(root: root)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await compiler.check(main: "main.typ", buffers: [:])
+        }
+        let cancelled = await task.value
+        XCTAssertNil(cancelled)
+        let report = await compiler.check(main: "main.typ", buffers: [:])
+        XCTAssertNotNil(report)
     }
 
     func testReportsDiagnosticsWithUTF16Columns() async {

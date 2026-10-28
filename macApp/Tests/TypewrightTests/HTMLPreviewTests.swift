@@ -234,6 +234,22 @@ final class HTMLPreviewTests: XCTestCase {
         try await waitFor(atBottom)
     }
 
+    func testBottomPinJumpsImmediatelyWhenDocumentUsesSmoothScrolling() async throws {
+        let html = "<style>html { scroll-behavior: smooth; }</style><div style='height: 3000px'>Content</div>"
+        preview.show(html, baseURL: base)
+        try await waitFor("document.querySelector('div') !== null")
+        let jumped = try await preview.view.evaluateJavaScript("""
+            (() => {
+            scrollTo({ top: 1e9, behavior: 'instant' });
+            tw.setPin({ bottom: true });
+            tw.update('<style>html { scroll-behavior: smooth; }</style>' + document.body.innerHTML
+                      + '<div style="height: 1000px">New content</div>');
+            return tw.atBottom();
+            })()
+            """) as! Bool
+        XCTAssertTrue(jumped, "Following the bottom must finish synchronously even with smooth document scrolling")
+    }
+
     func testFollowsNewLinesAndObjectsAsAShortDocumentGrows() async throws {
         var html = "<p>First line</p>"
         preview.show(html, baseURL: base)

@@ -13,8 +13,10 @@ export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-26.0}
 BUILT_PRODUCTS_DIR=$out ARCHS=$archs "$root/scripts/build-rust-bridge.sh" sharedCore typewright_core
 export SDKROOT=$(env -u SDKROOT xcrun --sdk macosx --show-sdk-path)
 
-tmp="$root/.build/core-tmp"
-rm -rf "$tmp" && mkdir -p "$tmp/TypewrightCore.swiftmodule"
+# Parallel Xcode builds must not replace each other's generated bindings.
+tmp=$(mktemp -d "$root/.build/core-tmp.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/TypewrightCore.swiftmodule"
 # The generator reads uniffi.toml through cargo metadata of the current folder.
 (cd "$root/sharedCore" && cargo run --release --quiet --features bindgen --bin uniffi-bindgen \
   --target-dir "$root/.build/cargo" -- generate --library "$out/libtypewright_core.a" --language swift --out-dir "$tmp/bindings")

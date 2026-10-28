@@ -468,7 +468,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             if (!pin || (!pin.bottom && (performance.now() > pin.until || !pin.el.isConnected))) return this.pin = null;
             const delta = pin.bottom ? document.documentElement.scrollHeight - innerHeight - scrollY
                                      : pin.el.getBoundingClientRect().top - pin.top;
-            if (Math.abs(delta) > 0.5) scrollBy(0, delta);
+            if (Math.abs(delta) > 0.5) scrollBy({ top: delta, left: 0, behavior: 'instant' });
           },
 
           // Parsed scripts never run, so typst's are swapped for fresh copies once in the page; GitHub runs none.
