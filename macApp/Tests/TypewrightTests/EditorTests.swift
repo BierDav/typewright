@@ -466,6 +466,50 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(color(math, "I :="), Highlighter.paramColor)
     }
 
+    @MainActor func testDeferredHighlightingKeepsColoursUntilReplacementIsReady() async throws {
+        let view = TypstTextView(frame: .zero)
+        view.string = "#show: worksheet\n$I := 30$"
+        let storage = try XCTUnwrap(view.textStorage)
+        let coordinator = CodeEditor.Coordinator()
+        coordinator.textView = view
+        coordinator.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        Highlighter.apply(to: storage, font: try XCTUnwrap(coordinator.font))
+        let index = (view.string as NSString).range(of: "I :=").location
+        func color() -> NSColor? { storage.attribute(.foregroundColor, at: index, effectiveRange: nil) as? NSColor }
+        XCTAssertEqual(color(), Highlighter.paramColor)
+
+        storage.append(NSAttributedString(string: "\n#let fresh = 2"))
+        coordinator.style(storage)
+        XCTAssertEqual(color(), Highlighter.paramColor, "Scheduling analysis must preserve solveng colours")
+        let keyword = (storage.string as NSString).range(of: "let fresh").location
+        XCTAssertEqual(storage.attribute(.foregroundColor, at: keyword, effectiveRange: nil) as? NSColor,
+                       Highlighter.keywordColor, "New Typst syntax must be coloured before deferred analysis finishes")
+        storage.replaceCharacters(in: NSRange(location: 0, length: 1), with: "/")
+        coordinator.style(storage)
+        XCTAssertEqual(color(), Highlighter.paramColor, "Existing colours stay visible during analysis")
+        for _ in 0..<100 {
+            if color() == Highlighter.mathColor { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(color(), Highlighter.mathColor, "The completed pass must remove obsolete solveng colours")
+    }
+
+    @MainActor func testPreservedSolvengStylesFollowEdits() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let storage = NSTextStorage(string: "#show: worksheet\n$I := 30$\n#let old = 1")
+        Highlighter.apply(to: storage, font: font)
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "😀\n")
+        let old = (storage.string as NSString).range(of: "#let old = 1")
+        storage.replaceCharacters(in: old, with: "// changed")
+        Highlighter.apply(to: storage, font: font, includeSolveng: false, preservingSolveng: true)
+        let variable = (storage.string as NSString).range(of: "I :=").location
+        XCTAssertEqual(storage.attribute(.foregroundColor, at: variable, effectiveRange: nil) as? NSColor,
+                       Highlighter.paramColor, "Cached semantic styles must shift with UTF-16 edits")
+        let comment = (storage.string as NSString).range(of: "// changed").location
+        XCTAssertEqual(storage.attribute(.foregroundColor, at: comment, effectiveRange: nil) as? NSColor,
+                       Highlighter.commentColor, "Unrelated syntax must refresh immediately")
+    }
+
     func testArithmeticOperatorsUseTextColor() {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         for prefix in ["", "#show: worksheet\n"] {

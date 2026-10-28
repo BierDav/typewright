@@ -5,6 +5,7 @@ import TypstBridge
 
 /// Typst syntax colouring from typst's own parser, in IntelliJ's palette.
 enum Highlighter {
+    private static let solvengStyleKey = NSAttributedString.Key("TypewrightSolvengStyle")
     static let concealedFontKey = NSAttributedString.Key("TypewrightConcealedOriginalFont")
 
     private static let operatorFonts = NSCache<NSString, NSFont>()
@@ -179,10 +180,24 @@ enum Highlighter {
     }
 
     /// `solvengContext` is the text of the files around, see `EditorLanguage.solvengContext`.
-    static func apply(to storage: NSTextStorage, font: NSFont, code: Bool = false, solvengContext: String = "", includeSolveng: Bool = true) {
+    static func apply(to storage: NSTextStorage, font: NSFont, code: Bool = false, solvengContext: String = "", includeSolveng: Bool = true, preservingSolveng: Bool = false) {
+        var previous: [(NSRange, [NSAttributedString.Key: Any])] = []
+        if preservingSolveng {
+            storage.enumerateAttribute(solvengStyleKey, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+                if let attributes = value as? [NSAttributedString.Key: Any] { previous.append((range, attributes)) }
+            }
+        }
         storage.beginEditing()
         apply(to: storage, range: NSRange(location: 0, length: storage.length), font: font, code: code, depth: 0,
               solvengContext: solvengContext, includeSolveng: includeSolveng)
+        for (range, attributes) in previous {
+            var attributes = attributes
+            if let oldFont = attributes[.font] as? NSFont {
+                attributes[.font] = NSFontManager.shared.convert(oldFont, toSize: font.pointSize)
+            }
+            storage.addAttributes(attributes, range: range)
+            storage.addAttribute(solvengStyleKey, value: attributes, range: range)
+        }
         storage.endEditing()
     }
 
@@ -229,6 +244,23 @@ enum Highlighter {
                                   range: NSRange(location: range.location + solveng.plain[i], length: solveng.plain[i + 1] - solveng.plain[i]))
         }
         InjectedLanguages.color(solveng.tokens, in: storage, at: range.location, length: range.length, font: font)
+        var ranges: [NSRange] = []
+        for i in stride(from: 0, to: solveng.plain.count - 1, by: 2) {
+            ranges.append(NSRange(location: solveng.plain[i], length: solveng.plain[i + 1] - solveng.plain[i]))
+        }
+        for i in stride(from: 0, to: solveng.tokens.count - 2, by: 3) {
+            ranges.append(NSRange(location: Int(solveng.tokens[i]), length: Int(solveng.tokens[i + 1])))
+        }
+        let keys: Set<NSAttributedString.Key> = [.font, .foregroundColor, .ligature, .strokeWidth, .strokeColor, .underlineStyle]
+        for r in ranges where r.location >= 0 && r.length > 0 && NSMaxRange(r) <= range.length {
+            let absolute = NSRange(location: range.location + r.location, length: r.length)
+            var styles: [(NSRange, [NSAttributedString.Key: Any])] = []
+            storage.enumerateAttributes(in: absolute) { attributes, span, _ in
+                styles.append((span, attributes.filter { keys.contains($0.key) }))
+            }
+            // Attribute ranges follow text edits while the next semantic analysis runs.
+            for (span, attributes) in styles { storage.addAttribute(solvengStyleKey, value: attributes, range: span) }
+        }
     }
 
     /// Colours the body of a ```` ```lang ```` raw block in its language; solveng code is coloured with the document.

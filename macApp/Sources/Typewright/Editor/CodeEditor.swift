@@ -2210,27 +2210,25 @@ struct CodeEditor: NSViewRepresentable {
 
         func style(_ storage: NSTextStorage) {
             guard let font else { return }
-            var swatches: [ColorLiteral] = []
             if highlights {
-                Highlighter.apply(to: storage, font: font, includeSolveng: false)
+                Highlighter.apply(to: storage, font: font, includeSolveng: false, preservingSolveng: true)
                 let source = storage.string
                 highlightAnalysis.submit((source, language?.solvengContext() ?? "")) { [weak self] result in
-                    guard let self, let result, self.highlights, let storage = self.textView?.textStorage,
+                    guard let self, self.highlights, let storage = self.textView?.textStorage,
                           storage.string == source, let font = self.font else { return }
                     storage.beginEditing()
-                    Highlighter.apply(result, to: storage, range: NSRange(location: 0, length: storage.length), font: font)
+                    // Replace both layers together so deferred colours never flash back to basic Typst.
+                    Highlighter.apply(to: storage, font: font, includeSolveng: false)
+                    if let result {
+                        Highlighter.apply(result, to: storage, range: NSRange(location: 0, length: storage.length), font: font)
+                    }
+                    self.styleSwatches(storage, font: font)
                     storage.endEditing()
                     (self.textView as? TypstTextView)?.updateRevealedEquation()
                 }
-                let s = storage.string as NSString
-                // Literals at a line start have no character to kern, so they go without a swatch.
-                swatches = ColorLiteral.find(in: storage.string).filter {
-                    $0.range.location > 0 && s.character(at: $0.range.location - 1) != 10
-                }
-                let gap = TypstTextView.swatchGap(for: font)
-                for literal in swatches {
-                    storage.addAttribute(.kern, value: gap, range: NSRange(location: literal.range.location - 1, length: 1))
-                }
+                styleSwatches(storage, font: font)
+                (textView as? TypstTextView)?.updateRevealedEquation()
+                return
             } else if markdown {
                 highlightAnalysis.invalidate()
                 MarkdownHighlighter.apply(to: storage, font: font)
@@ -2239,8 +2237,24 @@ struct CodeEditor: NSViewRepresentable {
                 storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor],
                                       range: NSRange(location: 0, length: storage.length))
             }
-            (textView as? TypstTextView)?.swatches = swatches
+            (textView as? TypstTextView)?.swatches = []
             (textView as? TypstTextView)?.updateRevealedEquation()
+        }
+
+        private func styleSwatches(_ storage: NSTextStorage, font: NSFont) {
+            let s = storage.string as NSString
+            // Literals at a line start have no character to kern, so they go without a swatch.
+            let swatches = ColorLiteral.find(in: storage.string).filter {
+                $0.range.location > 0 && s.character(at: $0.range.location - 1) != 10
+            }
+            storage.beginEditing()
+            storage.removeAttribute(.kern, range: NSRange(location: 0, length: storage.length))
+            let gap = TypstTextView.swatchGap(for: font)
+            for literal in swatches {
+                storage.addAttribute(.kern, value: gap, range: NSRange(location: literal.range.location - 1, length: 1))
+            }
+            storage.endEditing()
+            (textView as? TypstTextView)?.swatches = swatches
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
