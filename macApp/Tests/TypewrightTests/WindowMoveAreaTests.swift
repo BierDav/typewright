@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class WindowMoveAreaTests: XCTestCase {
+    func testWindowEdgesStayAvailableForNativeResizing() throws {
+        let window = SpaceWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                                 styleMask: [.titled, .resizable, .fullSizeContentView],
+                                 backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = WindowMoveArea.MoveView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        defer { window.close() }
+        let size = window.frame.size
+
+        XCTAssertNotNil(window.moveArea(at: NSPoint(x: size.width / 2, y: size.height - 12)))
+        for point in [NSPoint(x: 1, y: size.height / 2),
+                      NSPoint(x: size.width - 1, y: size.height / 2),
+                      NSPoint(x: size.width / 2, y: 1),
+                      NSPoint(x: size.width / 2, y: size.height - 1),
+                      NSPoint(x: 1, y: size.height - 1),
+                      NSPoint(x: size.width - 1, y: size.height - 1)] {
+            XCTAssertNil(window.moveArea(at: point), "Resize edge must bypass window dragging: \(point)")
+        }
+    }
+
     func testHiddenSidebarExposesMoveAreaAtTopOfDetail() async throws {
         let controller = MainWindowController(space: nil)
         controller.state.sidebarVisible = false

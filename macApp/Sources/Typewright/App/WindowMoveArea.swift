@@ -29,7 +29,11 @@ final class SpaceWindow: NSWindow {
         super.sendEvent(event)
     }
 
-    private func moveArea(at point: NSPoint) -> WindowMoveArea.MoveView? {
+    func moveArea(at point: NSPoint) -> WindowMoveArea.MoveView? {
+        // Leave the perimeter to AppKit's native window resizing.
+        let bounds = NSRect(origin: .zero, size: frame.size)
+        if styleMask.contains(.resizable), !styleMask.contains(.fullScreen),
+           !bounds.insetBy(dx: 8, dy: 8).contains(point) { return nil }
         guard let content = contentView, let frame = content.superview else { return nil }
         var hit = frame.hitTest(frame.convert(point, from: nil))
         while let view = hit {

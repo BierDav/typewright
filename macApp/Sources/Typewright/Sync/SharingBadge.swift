@@ -12,11 +12,16 @@ struct SharingBadge: View {
 
     var body: some View {
         if let indicator = SyncService.shared.sharingIndicator(for: url) {
-            Image(systemName: indicator.symbol)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .help(indicator.title)
-                .accessibilityLabel(indicator.title)
+            Button { Invites.share(url) } label: {
+                Image(systemName: indicator.symbol)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(ZenPressStyle())
+            .help("\(indicator.title) — Sharing…")
+            .accessibilityLabel("\(indicator.title) — Sharing…")
         }
     }
 }
