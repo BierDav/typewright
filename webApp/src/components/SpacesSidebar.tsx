@@ -210,15 +210,8 @@ export default function SpacesSidebar() {
       <footer class="spaces-footer">
         <button class="sync-status" onClick={() => setOverlay({ type: "settings", tab: "devices" })} title="Devices and syncing">
           <Show when={identity.account} fallback={<><CloudOff size={14} /> <span>Sign in to sync</span></>}>
-            <Show
-              when={sync.status === "running"}
-              fallback={<><CloudOff size={14} /> <span>{sync.status === "elsewhere" ? "Syncing in another tab" : sync.status === "starting" ? "Starting sync…" : "Sync off"}</span></>}
-            >
-              <Cloud size={14} />
-              <span>
-                {sync.connected.length > 0 ? `${sync.connected.length} connected` : "Synced"}
-              </span>
-            </Show>
+            <Cloud size={14} />
+            <span>{syncService.statusSummary()}</span>
           </Show>
         </button>
         <button class="icon-button" title="Join a shared space" onClick={async () => {

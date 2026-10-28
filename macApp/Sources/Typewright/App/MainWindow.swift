@@ -338,7 +338,8 @@ struct MainWindow: View {
 
     /// Blurs and darkens the space behind the selector; clicking it returns to the space.
     private var dimming: some View {
-        let progress = workspace == nil || !state.sidebarVisible ? 0 : state.spacesProgress
+        let visible = state.sidebarVisible || (state.floatingSidebar && state.overlay == nil)
+        let progress = workspace == nil || !visible ? 0 : state.spacesProgress
         // A material rather than `.blur`, which can't reach the AppKit editor and PDF views underneath.
         // Its blur strength is fixed, so a half-transparent material reads as a light blur.
         return Rectangle()
@@ -353,7 +354,7 @@ struct MainWindow: View {
             .overlay {
                 if progress > 0 {
                     CursorArea(isModal: true)
-                        .padding(.leading, WindowState.spacesExtra * progress)
+                        .padding(.leading, state.sidebarVisible ? WindowState.spacesExtra * progress : 0)
                         .ignoresSafeArea()
                 }
             }

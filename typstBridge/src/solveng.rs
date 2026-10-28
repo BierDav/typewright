@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn completes_and_documents_new_calculation_builtins() {
-        for name in ["sum", "det", "tr", "integrate"] {
+        for name in ["sum", "det", "tr", "integrate", "sinc", "cosc", "tanc"] {
             let doc = format!("#import operations: *\n#value(${name}$)");
             let at = doc.find(name).unwrap() as u32;
             let result: Value = serde_json::from_str(&call("complete", &doc, "", at + name.len() as u32)).unwrap();
@@ -193,6 +193,18 @@ mod tests {
             assert!(item["documentation"].as_str().unwrap().contains("### Parameters"), "{item}");
             let hover: Value = serde_json::from_str(&call("hover", &doc, "", at + 1)).unwrap();
             assert!(hover["markdown"].as_str().unwrap().contains("### Parameters"), "{hover}");
+        }
+    }
+
+    #[test]
+    fn completes_solveng_module_import_lists() {
+        for (module, imported, wanted) in [("operations", "dirac", "sinc"), ("units", "mA", "km"), ("constants", "pi", "e"), ("modifiers", "solve", "digits")] {
+            let doc = format!("#import {module}: {imported}, ");
+            let result: Value = serde_json::from_str(&call("complete", &doc, "", doc.len() as u32)).unwrap();
+            assert_eq!(result["exclusive"], true);
+            let items = result["items"].as_array().unwrap();
+            assert!(items.iter().any(|i| i["label"] == wanted && i["insert"] == wanted));
+            assert!(!items.iter().any(|i| i["label"] == imported));
         }
     }
 

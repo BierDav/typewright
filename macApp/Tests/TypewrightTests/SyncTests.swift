@@ -310,6 +310,10 @@ final class SyncNetworkTests: XCTestCase {
         // Nothing else of a's space travels.
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: b.repository.url(of: "Inbox").path), ["shopping.typ"])
         try await eventually("shared on both") { a.isShared(file) && b.isShared(destination) }
+        XCTAssertEqual(a.sharingIndicator(for: file), SharingIndicator(joined: false))
+        XCTAssertEqual(b.sharingIndicator(for: destination), SharingIndicator(joined: true))
+        XCTAssertNil(b.sharingIndicator(for: destination.deletingLastPathComponent()))
+        XCTAssertTrue(b.elsewhere.isEmpty)
     }
 
     func testDeviceSyncCanBeUnlinkedWhileSharingContinues() async throws {
@@ -512,7 +516,15 @@ final class SyncNetworkTests: XCTestCase {
         let share = b.elsewhere[0]
         XCTAssertEqual(share.kind, .folder)
         let rootB = try XCTUnwrap(b.join(share, at: b.repository.url(of: "Chapters")))
+        XCTAssertFalse(b.elsewhere.contains { $0.id == share.id })
         try await eventually("files on b") { read(rootB.appendingPathComponent("one.typ")) == "one\n" }
+        XCTAssertNotNil(a.inviteLink(for: chaptersA))
+        try await eventually("folder shared on both") { a.isShared(chaptersA) && b.isShared(rootB) }
+        XCTAssertNotNil(a.sharingIndicator(for: chaptersA))
+        XCTAssertNotNil(b.sharingIndicator(for: rootB))
+        XCTAssertNil(a.sharingIndicator(for: chaptersA.deletingLastPathComponent()))
+        XCTAssertNil(a.sharingIndicator(for: chaptersA.appendingPathComponent("one.typ")))
+        XCTAssertNil(b.sharingIndicator(for: rootB.appendingPathComponent("one.typ")))
 
         // A renames the shared folder, as the file tree does, and keeps editing: b keeps getting the edits.
         let partsA = a.repository.url(of: "Thesis/parts")

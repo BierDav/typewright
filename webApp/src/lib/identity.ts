@@ -8,7 +8,7 @@ const PASSKEY_DOMAIN: string = import.meta.env.VITE_PASSKEY_DOMAIN || "bierdav.g
 const KEY = "typewright.account";
 const encoder = new TextEncoder();
 
-export type Kind = "passkey" | "key";
+export type Kind = "passkey" | "key" | "temporary";
 
 type Stored = { secret: string; name: string; kind?: Kind };
 
@@ -50,7 +50,14 @@ async function fingerprintOf(account: Uint8Array): Promise<string> {
   return `${text.slice(0, 4)}-${text.slice(4)}`;
 }
 
+let prepareChange: ((account: Uint8Array) => Promise<void>) | undefined;
+
+export function onIdentityChange(prepare: (account: Uint8Array) => Promise<void>) {
+  prepareChange = prepare;
+}
+
 async function adopt(secret: Uint8Array, name: string, kind: Kind) {
+  await prepareChange?.(secret);
   localStorage.setItem(KEY, JSON.stringify({ secret: hex(secret), name, kind } satisfies Stored));
   setIdentity({ account: secret, name, kind, fingerprint: await fingerprintOf(secret), error: null });
 }
@@ -58,6 +65,11 @@ async function adopt(secret: Uint8Array, name: string, kind: Kind) {
 /** The account's secret as eight groups of eight hexadecimal digits, to sign in on a device without the passkey. */
 export function accountKey(): string | null {
   return identity.account ? (hex(identity.account).match(/.{8}/g) ?? []).join("-") : null;
+}
+
+/** Guest credentials survive reloads until the user signs in. */
+export function createTemporaryIdentity() {
+  return adopt(random(32), "", "temporary");
 }
 
 /** Creates an account without a passkey; its key is the only way to sign in elsewhere. */

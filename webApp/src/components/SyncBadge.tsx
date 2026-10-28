@@ -17,8 +17,8 @@ export function SyncBadge(props: { path: string }) {
         <Match when={state() === "Conflicts"}>
           <span title="Conflicts to resolve"><TriangleAlert size={13} class="warning" aria-label="Conflicts" /></span>
         </Match>
-        <Match when={state() === "Syncing"}>
-          <span title="Syncing…"><RefreshCw size={13} class="secondary syncing" aria-label="Syncing" /></span>
+        <Match when={["Syncing", "Looking for peers", "Downloading", "Uploading", "Applying changes"].includes(state() ?? "")}>
+          <span title={`${state()}…`}><RefreshCw size={13} class="secondary syncing" aria-label={state()} /></span>
         </Match>
         <Match when={state() === "Offline"}>
           <span title="None of the other devices is connected"><CloudOff size={13} class="secondary" aria-label="Offline" /></span>

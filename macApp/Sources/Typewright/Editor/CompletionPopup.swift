@@ -56,7 +56,9 @@ final class CompletionController: NSObject, NSTableViewDataSource, NSTableViewDe
             return
         }
         guard let last = typed.last else { return }
-        if Self.triggers.contains(last) {
+        let spacedTrigger = (last == " " || last == "\t") && (tv.string as NSString).substring(to: cursor)
+            .last(where: { $0 != " " && $0 != "\t" }).map { ["(", ",", ":"].contains($0) } == true
+        if Self.triggers.contains(last) || spacedTrigger {
             request(force: false)
         } else if last.unicodeScalars.allSatisfy({ Self.identifier.contains($0) || $0.properties.isEmoji }) {
             if isVisible { refilter() }

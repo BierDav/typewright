@@ -116,7 +116,10 @@ final class SyncService {
     var isRunning: Bool { node != nil }
     /// Account shares that another device syncs and this one doesn't.
     var elsewhere: [AccountShare] {
-        accountShares.filter { share in share.devices && shares[share.id] == nil && share.members.contains { $0 != deviceID } }
+        accountShares.filter { share in
+            share.devices && shares[share.id] == nil && !share.members.contains { $0 == deviceID }
+                && share.members.contains { $0 != deviceID }
+        }
     }
 
     let repository: SpaceRepository
@@ -270,12 +273,9 @@ final class SyncService {
     }
 
     func sharingIndicator(for url: URL) -> SharingIndicator? {
-        guard let path = repository.relativePath(of: url) else { return nil }
-        let shared = sharePaths.filter { share in accountShares.contains { $0.id == share.id && $0.shared } }
-        let exact = shared.first { $0.path == path }
-        guard let id = exact?.id ?? sharePlace(shares: shared, path: path)?.id,
-              let account = accountShares.first(where: { $0.id == id }) else { return nil }
-        return SharingIndicator(joined: account.joined, inherited: exact == nil)
+        guard let id = shareID(for: url), isActive(id),
+              let account = accountShares.first(where: { $0.id == id && $0.shared }) else { return nil }
+        return SharingIndicator(joined: account.joined)
     }
 
     func status(for url: URL) -> ShareStatus? {

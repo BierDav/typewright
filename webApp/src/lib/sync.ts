@@ -12,14 +12,14 @@ import init, { generateDeviceKey, SyncNode } from "~/wasm/sync/sync.js";
 import syncWasm from "~/wasm/sync/sync_bg.wasm?url";
 import * as core from "./core";
 import type { PeerHead, SharePath, SpaceInvite } from "./core";
-import { identity } from "./identity";
+import { hex, identity, onIdentityChange } from "./identity";
 import * as jj from "./jj";
 import { settings } from "./settings";
 import { refreshSpaces, SPACES, uniqueName } from "./spaces";
 import * as fs from "./storage";
 
 export type ShareKind = "space" | "folder" | "file";
-export type ShareStatus = "Synced" | "Syncing" | "Conflicts" | "Offline";
+export type ShareStatus = "Synced" | "Syncing" | "Conflicts" | "Offline" | "Looking for peers" | "Downloading" | "Uploading" | "Applying changes";
 
 /** A share listed by the account, possibly not on this device yet. */
 export type AccountShare = { id: string; name: string; kind: ShareKind; members: string[]; shared: boolean; joined?: boolean; devices?: boolean; host?: string };
@@ -42,6 +42,7 @@ export type LiveResult = {
 export const LIVE_LIMIT = 512 * 1024;
 const SHARES_KEY = "typewright.syncedShares";
 const PARKED_KEY = "typewright.syncParkedShares";
+const TRANSFER_KEY = "typewright.guestShareTransfer";
 const REJOINING_KEY = "typewright.syncRejoiningShares";
 /** Spaces synced path by path before shares: id → folder. */
 const OLD_SPACES_KEY = "typewright.syncedSpaces";
@@ -87,6 +88,7 @@ type Runtime = {
   /** The other devices' heads. */
   heads: Map<string, { node: string; name: string | null }>;
   working: number;
+  activity?: ShareStatus;
 };
 
 type Manifest = {
@@ -109,6 +111,25 @@ const livePaths = new Set<string>();
 const willChange = new Set<(folder: string) => Promise<void> | void>();
 const liveListeners = new Set<(folder: string, path: string) => void>();
 let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
+
+type ShareTransfer = { account: string; invites: { invite: SpaceInvite; share: LocalShare }[] };
+let transfer = load<ShareTransfer | null>(TRANSFER_KEY, null);
+
+onIdentityChange(async (account) => {
+  if (identity.kind !== "temporary" || !identity.account || hex(identity.account) === hex(account)) return;
+  if (!node) throw new Error("Wait for guest sync to connect before signing in.");
+  const invites = Object.entries(sync.shares).filter(([, share]) => share).map(([id, share]) => ({
+    share: { ...share },
+    invite: {
+      id, name: fs.basename(share.path), file: share.kind === "file",
+      secret: node!.shareInvite(id, fs.basename(share.path), share.kind),
+      hints: [...new Set([...(sync.shared[id] ?? []), ...sync.connected])].filter((peer) => peer !== sync.deviceId),
+    },
+  }));
+  transfer = { account: hex(account), invites };
+  localStorage.setItem(TRANSFER_KEY, JSON.stringify(transfer));
+  await stop();
+});
 
 migrateSpaces();
 
@@ -207,6 +228,19 @@ export function status(path: string): ShareStatus | undefined {
   return id ? sync.statuses[id] : undefined;
 }
 
+export function statusSummary(): string {
+  if (sync.status === "error") return "Sync error";
+  if (sync.status === "elsewhere") return "Syncing in another tab";
+  if (sync.status === "starting") return "Connecting…";
+  if (sync.status !== "running") return "Sync off";
+  const states = Object.values(sync.statuses);
+  for (const state of ["Conflicts", "Downloading", "Applying changes", "Uploading", "Syncing", "Looking for peers"] as ShareStatus[]) {
+    if (states.includes(state)) return state === "Conflicts" ? "Conflicts to resolve" : `${state}…`;
+  }
+  if (!sync.connected.length) return "Looking for peers…";
+  return states.includes("Offline") ? "Waiting for peers…" : "Synced";
+}
+
 /** Account shares another device syncs and this one doesn't. */
 export function elsewhere(): AccountShare[] {
   return sync.accountShares.filter((s) => s.devices !== false && !sync.shares[s.id] && s.members.some((m) => m !== sync.deviceId));
@@ -277,6 +311,13 @@ async function start(account: Uint8Array, fingerprint: string, run: number) {
     }
     node = started;
     setSync({ status: "running", deviceId: node.deviceId() });
+    if (transfer?.account === hex(account)) {
+      for (const { invite, share } of transfer.invites) {
+        setSync("shares", invite.id, share);
+        node.joinShare(invite.id, invite.name, share.kind, invite.secret, invite.hints, settings.deviceName);
+      }
+      persist();
+    }
     for (const id of Object.keys(sync.shares)) if (sync.shares[id]) open(id);
   } catch (err) {
     setSync({ status: "error", lastError: `Couldn't start syncing: ${(err as Error).message ?? err}` });
@@ -296,6 +337,7 @@ export async function stop() {
   publishTimers.clear();
   runtimes.clear();
   queues.clear();
+  clearTimeout(snapshotTimer);
   livePaths.clear();
   setSync({ status: "off", deviceId: null, connected: [], devices: [], accountShares: [], shared: {}, statuses: {} });
   releaseLock?.();
@@ -323,8 +365,16 @@ if (typeof window !== "undefined") {
 
 async function saveSnapshot(target: SyncNode) {
   try {
+    const pending = transfer;
+    const transferred = target === node && pending && identity.account && pending.account === hex(identity.account)
+      && pending.invites.every(({ invite }) => sync.accountShares.some((s) => s.id === invite.id && s.joined));
+    const path = `${dataDir}/replicas.bin`;
     const bytes = await target.snapshot();
-    await fs.writeFile(`${dataDir}/replicas.bin`, bytes, true);
+    await fs.writeFile(path, bytes, true);
+    if (transferred && transfer === pending && target === node) {
+      localStorage.removeItem(TRANSFER_KEY);
+      transfer = null;
+    }
   } catch (err) {
     console.warn("Sync snapshot:", err);
   }
@@ -677,6 +727,7 @@ function enqueue(id: string, work: () => Promise<void>) {
     .then(() => (run === generation && runtimes.get(id) === r ? work() : undefined))
     .catch((err) => { if (runtimes.get(id) === r) setSync("lastError", `Sync: ${(err as Error).message ?? err}`); })
     .finally(() => {
+      r.activity = undefined;
       r.working--;
       updateStatus(id);
     });
@@ -743,6 +794,8 @@ async function publish(id: string) {
       if (bytes) seeds.push([file.blake3!, bytes]);
     }
     if (node !== current || !isActive(id) || runtimes.get(id) !== r) return;
+    r.activity = "Uploading";
+    updateStatus(id);
     await current.publishNode(id, JSON.stringify(manifest), objects, seeds);
     seeds.forEach(([hash]) => r.seeded.add(hash));
     r.published = manifest.node;
@@ -780,6 +833,8 @@ async function merge(id: string, device: string) {
   const head = r?.heads.get(device);
   const current = node;
   if (!current || !share || !r || !head || !core.needsMerge(r.head ?? undefined, r.ancestry, head.node)) return;
+  r.activity = "Downloading";
+  updateStatus(id);
   const fetched = (await current.fetchNode(id, device, [...r.lfs])) as {
     manifest: string;
     objects: [string, Uint8Array][];
@@ -792,6 +847,8 @@ async function merge(id: string, device: string) {
   if (!isActive(id) || runtimes.get(id) !== r) return;
   const sp = sharePath(id)!;
   const keep = [...livePaths].filter((k) => k.startsWith(`${id}/`)).map((k) => core.shareFilePath(sp, k.slice(id.length + 1)));
+  r.activity = "Applying changes";
+  updateStatus(id);
   let merged: jj.MergeResult;
   try {
     merged = await jj.mergeNode({
@@ -829,7 +886,9 @@ function updateStatus(id: string) {
   members.delete(sync.deviceId ?? "");
   const conflicted = jj.repository.conflicted.some((p) => p === share.path || p.startsWith(`${share.path}/`));
   const working = (r?.working ?? 0) > 0 || publishTimers.has(id);
-  const next = core.shareStatus(r?.head ?? undefined, peers, members.size, conflicted, working) as ShareStatus;
+  const base = core.shareStatus(r?.head ?? undefined, peers, members.size, conflicted, working) as ShareStatus;
+  const connected = peers.some((p) => p.connected) || (sync.shared[id] ?? []).some((p) => sync.connected.includes(p));
+  const next: ShareStatus = conflicted ? "Conflicts" : r?.activity ?? (!r?.head && !working ? connected ? "Syncing" : "Looking for peers" : base);
   if (sync.statuses[id] !== next) setSync("statuses", id, next);
 }
 

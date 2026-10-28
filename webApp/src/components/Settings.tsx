@@ -3,7 +3,7 @@ import { confirm, openSpace, overlay, prompt, setOverlay, type SettingsTab, show
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import * as fontLib from "~/lib/fonts";
-import { accountKey, createPasskey, createWithKey, identity, passkeysSupported, relyingParty, sharesMacPasskeys, signInWithKey, signInWithPasskey, signOut } from "~/lib/identity";
+import { accountKey, createPasskey, createWithKey, identity, setIdentity, passkeysSupported, relyingParty, sharesMacPasskeys, signInWithKey, signInWithPasskey, signOut } from "~/lib/identity";
 import { DEFAULT_RETENTION, type RetentionPolicy, setSettings, settings } from "~/lib/settings";
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
@@ -452,6 +452,17 @@ function short(id: string | null): string {
 function Devices() {
   const [name, setName] = createSignal("");
   const [key, setKey] = createSignal("");
+  async function signIn(action: () => Promise<void>) {
+    setIdentity({ working: true, error: null });
+    try {
+      await action();
+      await syncService.restart();
+    } catch (err) {
+      setIdentity("error", (err as Error).message);
+    } finally {
+      setIdentity("working", false);
+    }
+  }
   const synced = createMemo(() =>
     Object.entries(sync.shares)
       .filter(([, share]) => share)
@@ -463,7 +474,9 @@ function Devices() {
       <Section
         title="Account"
         footer={
-          identity.account
+          identity.kind === "temporary"
+            ? "Your guest identity is saved only in this browser. Sign in or create an account below to keep these shares on your account automatically. Your files stay here."
+            : identity.account
             ? "Anyone with the account key can sign in to your account; keep it like a password."
             : (sharesMacPasskeys()
                 ? "Create a passkey once, then sign in with it on each device, here and in the Mac app; your password manager brings it along. Synced spaces then show up on all of them, with nothing to exchange."
@@ -471,8 +484,9 @@ function Devices() {
               " Without a passkey, create an account key and paste it on your other devices."
         }
       >
+        <Show when={identity.kind === "temporary"}><div class="form-row">Using a temporary guest identity</div></Show>
         <Show
-          when={identity.account}
+          when={identity.account && identity.kind !== "temporary"}
           fallback={
             <>
               <Show when={passkeysSupported()} fallback={<div class="form-row secondary">This browser can't use passkeys here (it needs a secure context).</div>}>
@@ -481,10 +495,10 @@ function Devices() {
                 </Row>
                 <Row label="Passkey">
                   <div class="button-row">
-                    <button class="button small" disabled={identity.working} onClick={() => void createPasskey(name()).then(syncService.restart)}>
+                    <button class="button small" disabled={identity.working} onClick={() => void signIn(() => createPasskey(name()))}>
                       <KeyRound size={13} /> Create…
                     </button>
-                    <button class="button small" disabled={identity.working} onClick={() => void signInWithPasskey().then(syncService.restart)}>
+                    <button class="button small" disabled={identity.working} onClick={() => void signIn(signInWithPasskey)}>
                       Sign In…
                     </button>
                   </div>
@@ -493,10 +507,10 @@ function Devices() {
               <Row label="Account Key">
                 <div class="button-row">
                   <input class="text-field mono" value={key()} placeholder="Key from another device" onInput={(e) => setKey(e.currentTarget.value)} />
-                  <button class="button small" disabled={identity.working || !key().trim()} onClick={() => void signInWithKey(key()).then(syncService.restart)}>
+                  <button class="button small" disabled={identity.working || !key().trim()} onClick={() => void signIn(() => signInWithKey(key()))}>
                     Sign In
                   </button>
-                  <button class="button small" disabled={identity.working} onClick={() => void createWithKey().then(syncService.restart)}>
+                  <button class="button small" disabled={identity.working} onClick={() => void signIn(createWithKey)}>
                     Create
                   </button>
                 </div>

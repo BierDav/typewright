@@ -2,7 +2,7 @@
 import { openSearchPanel } from "@codemirror/search";
 import type { EditorView } from "@codemirror/view";
 import { alert, choose, confirm, copyText, editorView, prompt, setOverlay, toast, workspace } from "./app";
-import { identity } from "./identity";
+import { createTemporaryIdentity, identity } from "./identity";
 import { goToDefinition, showDocs, type LanguageContext } from "./editor/language";
 import * as refactor from "./editor/refactor";
 import * as solveng from "./editor/solveng";
@@ -194,11 +194,15 @@ export async function joinFromLink(text?: string): Promise<string | null> {
     await alert("This invite link isn't valid.", "It may have been cut off when it was sent; ask for a new one.");
     return null;
   }
+  if (!identity.account) {
+    await createTemporaryIdentity();
+    void syncService.restart();
+  }
   // Links that open the page arrive while the node is still starting.
   const waiting = () => syncService.sync.status === "starting" || (!!identity.account && syncService.sync.status === "off");
   for (let i = 0; i < 150 && waiting(); i++) await new Promise((r) => setTimeout(r, 100));
   if (!syncService.isRunning()) {
-    await alert(`Sign in to join “${invite.name}”`, "Shared spaces sync through a Typewright account. Create a passkey or sign in with yours in Settings › Devices, then open the link again.");
+    await alert(`Couldn’t connect to “${invite.name}”`, syncService.sync.lastError ?? "Sync is still starting or running in another tab. Try opening the link again in a moment.");
     return null;
   }
   const existing = syncService.pathOf(invite.id);
