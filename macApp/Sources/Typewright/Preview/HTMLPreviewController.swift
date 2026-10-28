@@ -249,6 +249,11 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
           root: { nodes: [], sources: [], shells: [], kids: new Map() }, head: [], headSource: null, markdown: false, mermaid: null,
           htmlAttrs: [], bodyAttrs: [], pin: null, pinning: null,
 
+          atBottom() {
+            const tolerance = 1 + 1 / devicePixelRatio;
+            return Math.abs(Math.max(document.documentElement.scrollHeight - innerHeight, 0) - scrollY) <= tolerance;
+          },
+
           // Eases the reflowing text to its new size, keeping the same spot of the document in view.
           setTextSize(px, animated) {
             const root = document.documentElement;
@@ -280,6 +285,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
           },
 
           update(html) {
+            const atBottom = this.pin?.bottom || (this.root.nodes.length > 0 && this.atBottom());
             const doc = new DOMParser().parseFromString(html, 'text/html');
             this.htmlAttrs = [...doc.documentElement.attributes].map(a => [a.name, a.value]);
             this.bodyAttrs = [...doc.body.attributes].map(a => [a.name, a.value]);
@@ -303,7 +309,10 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
               added.push(...kept);
             }
             this.root = root;
-            this.keepMark(marks, added);
+            if (atBottom) {
+              this.setPin({ bottom: true });
+              this.holdPin();
+            } else this.keepMark(marks, added);
             if (this.markdown) this.renderDiagrams(added);
             if (window.twReport) twReport();
           },
@@ -425,22 +434,40 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
               if (!el) continue;
               scrollBy(0, el.getBoundingClientRect().top - m.top);
               // Images and diagrams load later; the mark holds until the user scrolls.
-              this.pin = { el, top: m.top, until: performance.now() + 3000 };
-              if (!this.pinning) {
-                this.pinning = new ResizeObserver(() => this.holdPin());
-                this.pinning.observe(document.body);
-                for (const type of ['wheel', 'keydown', 'mousedown']) {
-                  addEventListener(type, () => this.pin = null, { capture: true, passive: true });
-                }
-              }
+              this.setPin({ el, top: m.top });
               return;
             }
           },
 
+          setPin(pin) {
+            this.pin = { ...pin, until: performance.now() + 3000 };
+            if (!this.pinning) {
+              this.pinning = new ResizeObserver(() => this.holdPin());
+              this.pinning.observe(document.body);
+              this.pinning.observe(document.documentElement);
+              for (const type of ['wheel', 'keydown', 'mousedown']) {
+                addEventListener(type, () => this.pin = null, { capture: true, passive: true });
+              }
+            }
+            this.followPin();
+          },
+
+          followPin() {
+            if (!this.pin || this.pinFrame) return;
+            // WebKit can update its scroll limits after resize observers and graph animations finish.
+            const step = () => {
+              this.pinFrame = null;
+              this.holdPin();
+              if (this.pin?.bottom) this.pinFrame = requestAnimationFrame(step);
+            };
+            this.pinFrame = requestAnimationFrame(step);
+          },
+
           holdPin() {
             const pin = this.pin;
-            if (!pin || performance.now() > pin.until || !pin.el.isConnected) return this.pin = null;
-            const delta = pin.el.getBoundingClientRect().top - pin.top;
+            if (!pin || (!pin.bottom && (performance.now() > pin.until || !pin.el.isConnected))) return this.pin = null;
+            const delta = pin.bottom ? document.documentElement.scrollHeight - innerHeight - scrollY
+                                     : pin.el.getBoundingClientRect().top - pin.top;
             if (Math.abs(delta) > 0.5) scrollBy(0, delta);
           },
 
@@ -484,6 +511,10 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             }
           },
         };
+        // Arm following before newly visible graphs or images change the page's height.
+        addEventListener('scroll', () => {
+          if (tw.atBottom()) tw.setPin({ bottom: true });
+        }, { passive: true });
         """
 
     // MARK: - WKNavigationDelegate

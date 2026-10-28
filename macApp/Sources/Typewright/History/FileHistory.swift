@@ -1,4 +1,5 @@
 import SwiftUI
+import TypewrightCore
 
 /// Routes history and conflicts from menus, the palette and the sidebar.
 @MainActor
@@ -6,8 +7,18 @@ enum FileHistory {
     static let showHistory = Notification.Name("FileHistoryShowHistory")
     static let showConflict = Notification.Name("FileHistoryShowConflict")
 
-    static func show(_ file: URL, in workspace: Workspace) {
-        NotificationCenter.default.post(name: showHistory, object: workspace, userInfo: ["file": file])
+    static func show(_ file: URL, in workspace: Workspace, selectedLines: Range<Int>? = nil) {
+        var info: [String: Any] = ["file": file]
+        info["lines"] = selectedLines
+        NotificationCenter.default.post(name: showHistory, object: workspace, userInfo: info)
+    }
+
+    static func selectedLines(in workspace: Workspace) -> Range<Int>? {
+        guard let tv = workspace.find.textView, tv.selectedRange().length > 0 else { return nil }
+        let selection = tv.selectedRange()
+        let start = textPosition(offset: Int32(clamping: selection.location), text: tv.string).line
+        let end = textPosition(offset: Int32(clamping: NSMaxRange(selection) - 1), text: tv.string).line
+        return Int(start)..<(Int(end) + 1)
     }
 
     static func resolve(_ file: URL, in workspace: Workspace) {
@@ -59,6 +70,7 @@ struct HistoryPresenter: ViewModifier {
                 guard note.object as? Workspace === workspace, let url = note.userInfo?["file"] as? URL else { return }
                 if let state = Opener.shared.keyState, state.workspace === workspace {
                     state.historyFile = url
+                    state.historyLines = note.userInfo?["lines"] as? Range<Int>
                     state.overlay = .palette(page: "file.history")
                 }
             }

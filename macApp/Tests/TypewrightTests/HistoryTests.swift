@@ -94,6 +94,64 @@ final class HistoryTests: XCTestCase {
         try await waitFor { model.hunks?.map(\.kind) == [.added] }
     }
 
+    func testSelectionHistoryTracksLinesAcrossRenamesAndSkipsUnrelatedChanges() async throws {
+        let list = try versions("""
+        [{"commit": "4", "time": 4, "kind": "modified"},
+         {"commit": "3", "time": 3, "kind": "renamed", "from": "S/old.typ"},
+         {"commit": "2", "time": 2, "kind": "modified"},
+         {"commit": "1", "time": 1, "kind": "added"}]
+        """)
+        let contents = ["4": "intro\na\nnew\nz", "3": "a\nnew\nz", "2": "a\nnew\nz", "1": "a\nold\nz"]
+        var requested: [String] = []
+        let model = FileHistoryModel(
+            file: URL(fileURLWithPath: "/r/S/new.typ"), path: "S/new.typ",
+            source: .init(versions: { list }, content: { path, commit in
+                requested.append("\(path)@\(commit)")
+                return .text(contents[commit]!)
+            }), currentText: { contents["4"] }, selectedLines: 2..<3
+        )
+        await model.load()
+        XCTAssertEqual(model.visibleVersions.map(\.commit), ["2", "1"])
+        XCTAssertEqual(model.selection, "2")
+        XCTAssertTrue(requested.contains("S/old.typ@1"))
+        try await waitFor { model.rows != nil }
+        XCTAssertEqual(model.rows.map { self.lines($0).map(\.text) }, ["old", "new"])
+        XCTAssertEqual(model.rows.map { self.lines($0).compactMap(\.new) }, [2])
+        model.comparison = .current
+        try await waitFor { model.hunks != nil }
+        XCTAssertEqual(model.rows.map { self.lines($0).map(\.text) }, ["new"])
+    }
+
+    func testSelectionHistoryStopsBeforeSelectedLinesWereAdded() async throws {
+        let list = try versions("""
+        [{"commit": "2", "time": 2, "kind": "modified"},
+         {"commit": "1", "time": 1, "kind": "added"}]
+        """)
+        let model = FileHistoryModel(
+            file: URL(fileURLWithPath: "/r/S/a.typ"), path: "S/a.typ",
+            source: .init(versions: { list }, content: { _, commit in
+                .text(commit == "2" ? "a\nselected\nz" : "a\nz")
+            }), currentText: { "a\nselected\nz" }, selectedLines: 1..<2
+        )
+        await model.load()
+        XCTAssertEqual(model.visibleVersions.map(\.commit), ["2"])
+        try await waitFor { model.rows != nil }
+        XCTAssertEqual(model.rows.map { self.lines($0).map(\.text) }, ["selected"])
+    }
+
+    func testUnsavedNewSelectionHasNoSavedHistory() async throws {
+        let list = try versions(#"[{"commit": "1", "time": 1, "kind": "added"}]"#)
+        let model = FileHistoryModel(
+            file: URL(fileURLWithPath: "/r/S/a.typ"), path: "S/a.typ",
+            source: .init(versions: { list }, content: { _, _ in .text("a\nz") }),
+            currentText: { "a\nunsaved\nz" }, selectedLines: 1..<2
+        )
+        await model.load()
+        XCTAssertTrue(model.visibleVersions.isEmpty)
+        XCTAssertNil(model.selection)
+        XCTAssertFalse(model.isLoading)
+    }
+
     func testBinaryVersionsGetNoDiff() async throws {
         let list = try versions(#"[{"commit": "1", "time": 1, "kind": "added"}]"#)
         let model = FileHistoryModel(

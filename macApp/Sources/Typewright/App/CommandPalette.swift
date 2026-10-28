@@ -241,7 +241,9 @@ struct CommandPalette: View {
                 pages = [prompt.page]
             } else if startPage == "file.history", let file = state.historyFile, let workspace {
                 state.historyFile = nil
-                pages = [historyPage(file, workspace)]
+                let lines = state.historyLines
+                state.historyLines = nil
+                pages = [historyPage(file, workspace, selectedLines: lines)]
             } else if let startPage, case .page(let next)? = rootItems.first(where: { $0.id == startPage })?.action {
                 pages = [next]
             }
@@ -530,10 +532,10 @@ struct CommandPalette: View {
         return items
     }
 
-    private func historyPage(_ file: URL, _ ws: Workspace) -> PalettePage {
-        let model = FileHistoryModel(file: file, workspace: ws)
-        return PalettePage(title: "History of \(file.lastPathComponent)", placeholder: "Filter versions…", kind: .list {
-            model.versions.map { version in
+    private func historyPage(_ file: URL, _ ws: Workspace, selectedLines: Range<Int>? = nil) -> PalettePage {
+        let model = FileHistoryModel(file: file, workspace: ws, selectedLines: selectedLines)
+        return PalettePage(title: selectedLines == nil ? "History of \(file.lastPathComponent)" : "History for Selection in \(file.lastPathComponent)", placeholder: "Filter versions…", kind: .list {
+            model.visibleVersions.map { version in
                 PaletteItem(id: version.id, title: version.description,
                             subtitle: version.time.formatted(date: .abbreviated, time: .shortened),
                             icon: "clock.arrow.circlepath", section: FileHistoryView.dayTitle(Calendar.current.startOfDay(for: version.time)),
@@ -653,6 +655,11 @@ struct CommandPalette: View {
                                      action: .page(PalettePage(title: "Usages of \(name)", placeholder: "Filter usages…",
                                                                kind: .list { usageItems(of: file, ws) }))))
             if FileHistory.isAvailable(for: file) {
+                if let lines = FileHistory.selectedLines(in: ws) {
+                    items.append(PaletteItem(id: "file.history.selection", title: "Show History for Selection…", icon: "clock.arrow.circlepath",
+                                             section: "File", keywords: ["versions", "lines", "diff"],
+                                             action: .page(historyPage(file, ws, selectedLines: lines))))
+                }
                 items.append(PaletteItem(id: "file.history", title: "Show History of \(name)…", icon: "clock.arrow.circlepath",
                                          section: "File", keywords: ["versions", "restore", "diff", "time machine"],
                                          action: .page(historyPage(file, ws))))

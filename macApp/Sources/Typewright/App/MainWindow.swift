@@ -79,6 +79,7 @@ final class WindowState {
     /// A file to select once the window opened its space, keeping its saved caret.
     var pendingFile: URL?
     var historyFile: URL?
+    var historyLines: Range<Int>?
     var pendingSession: WorkspaceSession?
     var renameNewSpace = false
     var relocatingSpace = false

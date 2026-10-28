@@ -5,7 +5,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 app="$root/.build/Build/Products/Debug/Typewright.app"
 
 xcodebuild -project "$root/macApp/Typewright.xcodeproj" -scheme Typewright -configuration Debug \
-  -derivedDataPath "$root/.build" -quiet build
+  -derivedDataPath "$root/.build" -allowProvisioningUpdates -allowProvisioningDeviceRegistration -quiet build
 
 # One dev instance at a time; an installed release keeps running.
 pkill -f "$app/Contents/MacOS/Typewright" && sleep 1 || true

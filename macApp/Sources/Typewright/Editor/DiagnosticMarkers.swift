@@ -27,6 +27,7 @@ final class DiagnosticMarkers: NSView {
     private var hovered: Int?
     private var panel: NSPanel?
     private var dismissal: (any NSObjectProtocol)?
+    private var refreshPending = false
 
     init(textView: NSTextView) {
         self.textView = textView
@@ -66,8 +67,19 @@ final class DiagnosticMarkers: NSView {
         refresh()
     }
 
-    /// Lines map onto the strip like the scroll bar maps the document onto its track.
     @objc func refresh() {
+        guard !refreshPending else { return }
+        refreshPending = true
+        // Frame notifications can arrive inside TextKit layout, so wait until it unwinds.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.updateMarkers()
+            self.refreshPending = false
+        }
+    }
+
+    /// Lines map onto the strip like the scroll bar maps the document onto its track.
+    private func updateMarkers() {
         defer { layoutMarkers(animated: false) }
         guard let tv = textView, let lm = tv.layoutManager, tv.frame.height > 0, bounds.height > 0 else { return markers = [] }
         let length = (tv.string as NSString).length

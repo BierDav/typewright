@@ -1179,6 +1179,13 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
         Popups.onDismiss(menu, in: window) { $0.cancelTrackingWithoutAnimation() }
+        if let workspace = (window?.windowController as? MainWindowController)?.state.workspace,
+           let file = workspace.selectedFile, FileHistory.isAvailable(for: file), selectedRange().length > 0 {
+            let history = NSMenuItem(title: "Show History for Selection…", action: #selector(showSelectionHistory(_:)), keyEquivalent: "")
+            history.target = self
+            menu.addItem(.separator())
+            menu.addItem(history)
+        }
         guard onDefinition != nil else { return menu }
         let index = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
         let item = NSMenuItem(title: "Go to Definition", action: #selector(goToDefinition(_:)), keyEquivalent: "b")
@@ -1291,6 +1298,12 @@ final class TypstTextView: NSTextView, NSLayoutManagerDelegate {
         default: super.performTextFinderAction(sender)
         }
     }
+    @objc private func showSelectionHistory(_ sender: Any?) {
+        guard let workspace = (window?.windowController as? MainWindowController)?.state.workspace,
+              let file = workspace.selectedFile, let lines = FileHistory.selectedLines(in: workspace) else { return }
+        FileHistory.show(file, in: workspace, selectedLines: lines)
+    }
+
     @objc private func formatDocument(_ sender: Any?) { onFormat?() }
 
     @objc private func goToDefinition(_ sender: NSMenuItem) {

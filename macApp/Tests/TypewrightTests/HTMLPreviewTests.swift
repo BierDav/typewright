@@ -41,6 +41,30 @@ final class HTMLPreviewTests: XCTestCase {
         XCTFail("Timed out: \(condition)")
     }
 
+    func testLocalDocumentFollowsBottom() async throws {
+        guard let path = ProcessInfo.processInfo.environment["TYPEWRIGHT_HTML_DOCUMENT"] else {
+            throw XCTSkip("Set TYPEWRIGHT_HTML_DOCUMENT to check an exported document")
+        }
+        window.orderFront(nil)
+        let html = try String(contentsOfFile: path, encoding: .utf8)
+        preview.show(html, baseURL: base)
+        try await waitFor("tw.root.nodes.length > 0")
+        _ = try await preview.view.callAsyncJavaScript("await document.fonts.ready;", arguments: [:], in: nil, in: .page)
+        try await Task.sleep(for: .seconds(1))
+        for zoom in [1.0, 0.7, 1.25, 2.0] {
+            preview.view.pageZoom = zoom
+            _ = try await preview.view.evaluateJavaScript("tw.pin = null; scrollTo(0, 1e9); true")
+            try await Task.sleep(for: .milliseconds(200))
+            try await waitFor("Math.abs(document.documentElement.scrollHeight - innerHeight - scrollY) <= 1 + 1 / devicePixelRatio")
+            let next = html.replacingOccurrences(of: "</body>", with: "<div id='new-tail' style='height: 400px'>New content</div></body>")
+            preview.show(next, baseURL: base)
+            try await waitFor("document.getElementById('new-tail') !== null")
+            try await waitFor("Math.abs(document.documentElement.scrollHeight - innerHeight - scrollY) <= 1 + 1 / devicePixelRatio")
+            preview.show(html, baseURL: base)
+            try await waitFor("document.getElementById('new-tail') === null")
+        }
+    }
+
     func testShowsTheHTMLWithTheBrowsersDefaultsOnly() async throws {
         preview.show("<h1>Heading</h1><p>Paragraph</p>", baseURL: base)
         try await waitFor("document.querySelector('p') !== null")
@@ -186,6 +210,80 @@ final class HTMLPreviewTests: XCTestCase {
 
         preview.show(html, baseURL: dir)
         try await waitFor("document.querySelector('img')?.complete && document.querySelector('img').naturalWidth === 200")
+    }
+
+    func testViewStaysAtTheBottomWhenContentChanges() async throws {
+        let lines = (0..<100).map { "<p>Line \($0)</p>" }
+        preview.show(lines.joined(), baseURL: base)
+        try await waitFor("document.querySelectorAll('p').length === 100")
+        _ = try await preview.view.evaluateJavaScript("scrollTo(0, document.documentElement.scrollHeight); true")
+        let atBottom = "Math.abs(document.documentElement.scrollHeight - innerHeight - scrollY) <= 1 + 1 / devicePixelRatio"
+        try await waitFor(atBottom)
+
+        preview.show((lines + ["<div id='tail' style='height: 200px'>End</div>"]).joined(), baseURL: base)
+        try await waitFor("document.getElementById('tail') !== null")
+        try await waitFor(atBottom)
+
+        // Objects can finish loading long after the HTML update.
+        try await Task.sleep(for: .milliseconds(3200))
+        _ = try await preview.view.evaluateJavaScript("document.getElementById('tail').style.height = '600px'; true")
+        try await waitFor(atBottom)
+
+        preview.show(lines.prefix(60).joined(), baseURL: base)
+        try await waitFor("document.querySelectorAll('p').length === 60")
+        try await waitFor(atBottom)
+    }
+
+    func testFollowsNewLinesAndObjectsAsAShortDocumentGrows() async throws {
+        var html = "<p>First line</p>"
+        preview.show(html, baseURL: base)
+        try await waitFor("document.querySelector('p') !== null")
+
+        for i in 0..<8 {
+            html += "<p>New line \(i)</p><div style='height: 150px'>Object \(i)</div>"
+            preview.show(html, baseURL: base)
+            try await waitFor("document.querySelectorAll('div').length === \(i + 1)")
+            try await waitFor("Math.abs(Math.max(document.documentElement.scrollHeight - innerHeight, 0) - scrollY) <= 1")
+            let visible = try await preview.view.evaluateJavaScript("document.body.lastElementChild.getBoundingClientRect().bottom <= innerHeight + 1") as! Bool
+            XCTAssertTrue(visible)
+        }
+    }
+
+    func testFollowsAnObjectThatChangesHeightWhenScrolledIntoView() async throws {
+        window.orderFront(nil)
+        let html = """
+            <div style='height: 2000px'>Earlier content</div>
+            <div style='height: 200px; position: relative'>
+              <div id='graph' style='height: 200px; position: absolute'>Graph</div>
+            </div>
+            <footer style='height: 100px'>End</footer>
+            <script>
+              const graph = document.getElementById('graph');
+              const observer = new IntersectionObserver(entries => {
+                if (!entries.some(e => e.isIntersecting)) return;
+                observer.disconnect();
+                graph.style.height = '0px';
+                requestAnimationFrame(() => requestAnimationFrame(() => graph.style.height = '500px'));
+              });
+              observer.observe(graph);
+            </script>
+            """
+        preview.show(html, baseURL: base)
+        try await waitFor("document.getElementById('graph') !== null")
+        _ = try await preview.view.evaluateJavaScript("scrollTo(0, 1e9); true")
+        try await waitFor("document.getElementById('graph').style.height === '500px'")
+        let atBottom = "Math.abs(document.documentElement.scrollHeight - innerHeight - scrollY) <= 1 + 1 / devicePixelRatio"
+        try await waitFor(atBottom)
+
+        preview.show(html + "<p id='new-line'>New line</p>", baseURL: base)
+        try await waitFor("document.getElementById('new-line') !== null")
+        try await waitFor(atBottom)
+
+        _ = try await preview.view.evaluateJavaScript("dispatchEvent(new WheelEvent('wheel')); scrollTo(0, 300); true")
+        preview.show(html + "<p id='new-line'>Another line</p>", baseURL: base)
+        try await waitFor("document.getElementById('new-line')?.textContent === 'Another line'")
+        let y = try await preview.view.evaluateJavaScript("scrollY") as! Double
+        XCTAssertEqual(y, 300, accuracy: 1)
     }
 
     func testViewStaysOnTheSameContentWhenBlocksChangeAboveAndBelow() async throws {

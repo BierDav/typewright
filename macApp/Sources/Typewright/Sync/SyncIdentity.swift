@@ -175,8 +175,7 @@ final class SyncIdentity: NSObject {
 
     // MARK: - Keychain
 
-    /// The data protection keychain never prompts, unlike the file keychain after each re-signed build, but it needs
-    /// the signed app's identifier; ad-hoc builds, which only have account keys, fall back to the file keychain.
+    // Ad-hoc builds lack the entitlement needed by the data protection keychain.
     private static func query(dataProtection: Bool) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "account",
          kSecUseDataProtectionKeychain as String: dataProtection]
@@ -188,6 +187,8 @@ final class SyncIdentity: NSObject {
             query[kSecReturnData as String] = true
             var result: AnyObject?
             if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data, data.count == 32 {
+                // Copy legacy credentials once so subsequent launches need no file-keychain approval.
+                if !dataProtection { _ = storeSecret(data, dataProtection: true) }
                 return data
             }
         }
@@ -196,14 +197,18 @@ final class SyncIdentity: NSObject {
 
     private static func storeSecret(_ secret: Data) -> Bool {
         for dataProtection in [true, false] {
-            var item = query(dataProtection: dataProtection)
-            item[kSecValueData as String] = secret
-            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            let status = SecItemAdd(item as CFDictionary, nil)
+            let status = storeSecret(secret, dataProtection: dataProtection)
             if status == errSecSuccess { return true }
             if status != errSecMissingEntitlement { return false }
         }
         return false
+    }
+
+    private static func storeSecret(_ secret: Data, dataProtection: Bool) -> OSStatus {
+        var item = query(dataProtection: dataProtection)
+        item[kSecValueData as String] = secret
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(item as CFDictionary, nil)
     }
 
     private static func deleteSecret() {

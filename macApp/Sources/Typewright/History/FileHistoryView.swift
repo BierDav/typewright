@@ -38,9 +38,9 @@ struct FileHistoryView: View {
 
     @ViewBuilder
     private var versionList: some View {
-        if model.isLoading && model.versions.isEmpty {
+        if model.isLoading && model.visibleVersions.isEmpty {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if model.versions.isEmpty {
+        } else if model.visibleVersions.isEmpty {
             ContentUnavailableView {
                 Label("No History", systemImage: "clock.arrow.circlepath")
             } description: {
@@ -62,6 +62,7 @@ struct FileHistoryView: View {
     }
 
     private var emptyDescription: String {
+        if model.selectedLines != nil { return "No saved changes affect the selected lines." }
         if FileHistory.isAvailable(for: model.file) || workspace == nil {
             return FileHistory.isLFS(model.file)
                 ? "Whole-file versions are saved after changes. Versions from before recording began aren't available."
@@ -84,7 +85,9 @@ struct FileHistoryView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if model.selected == nil, !model.isLoading {
+        if model.isLoading {
+            ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.selected == nil {
             ContentUnavailableView("No History", systemImage: "clock.arrow.circlepath",
                                    description: Text(emptyDescription))
         } else if let version = model.selected {
@@ -116,7 +119,7 @@ struct FileHistoryView: View {
                 Divider()
                 content(version)
             }
-        } else if !model.versions.isEmpty {
+        } else if !model.visibleVersions.isEmpty {
             ContentUnavailableView("No Version Selected", systemImage: "clock")
         }
     }
@@ -150,7 +153,7 @@ struct FileHistoryView: View {
                 .disabled(!hasContent)
                 .help("Open this version in its default app, without changing the file")
             Spacer()
-            Button("Restore…") {
+            Button(model.selectedLines == nil ? "Restore…" : "Restore Entire File…") {
                 guard PaletteDialog.choose("Restore “\(model.file.lastPathComponent)” to this version?",
                                            detail: "The current content stays in history. Undo brings it back too.",
                                            choices: [.init(id: "restore", title: "Restore", icon: "clock.arrow.circlepath"),

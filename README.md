@@ -39,6 +39,10 @@ The CLI uses the bundled compiler, package cache and configured font folders, an
 
 Install Rust (`cargo`), then open `macApp/Typewright.xcodeproj` in Xcode and run the `Typewright` scheme.
 
+Debug builds use Apple Development signing with team `G5K3D2J5Y9` and the data protection keychain, so rebuilding preserves account access without repeated keychain prompts. Sign in to the team in Xcode Settings > Accounts; `scripts/run-macApp.sh` registers the Mac and manages development provisioning automatically. An existing account may require one final keychain approval to migrate.
+
+To build without a developer account, use `xcodebuild -project macApp/Typewright.xcodeproj -scheme Typewright -derivedDataPath .build CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual TYPEWRIGHT_DEBUG_ENTITLEMENTS= build`. Ad-hoc builds use the legacy keychain and may prompt again after rebuilding.
+
 For the web app, also install [Bun](https://bun.sh) and Homebrew's `llvm`, then:
 
 ```sh

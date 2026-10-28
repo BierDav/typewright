@@ -114,6 +114,10 @@ final class FileHistoryModel {
     let path: String
     private(set) var versions: [FileVersion] = []
     private(set) var isLoading = true
+    private(set) var visibleVersions: [FileVersion] = []
+    let selectedLines: Range<Int>?
+    @ObservationIgnored private var versionLines: [String: Range<Int>] = [:]
+    @ObservationIgnored private var cachedContent: [String: FileContent] = [:]
     var selection: FileVersion.ID? { didSet { if selection != oldValue { loadSelection() } } }
     var comparison = Comparison.current { didSet { if comparison != oldValue { loadSelection() } } }
     /// The selected version's content and what it's compared against.
@@ -128,14 +132,16 @@ final class FileHistoryModel {
     @ObservationIgnored private var paths: [String] = []
     @ObservationIgnored private var loadTask: Task<Void, Never>?
 
-    init(file: URL, path: String, source: Source, currentText: @escaping () -> String?) {
+    init(file: URL, path: String, source: Source, currentText: @escaping () -> String?, selectedLines: Range<Int>? = nil) {
         self.file = file
         self.path = path
         self.source = source
         self.currentText = currentText
+        self.selectedLines = selectedLines
+        if selectedLines != nil { comparison = .previous }
     }
 
-    convenience init(file: URL, workspace: Workspace?) {
+    convenience init(file: URL, workspace: Workspace?, selectedLines: Range<Int>? = nil) {
         let repository = SpaceRepository.shared
         let path = repository.relativePath(of: file) ?? file.lastPathComponent
         self.init(
@@ -144,11 +150,12 @@ final class FileHistoryModel {
                 versions: { await repository.history(of: file) },
                 content: { path, commit in await repository.content(of: repository.url(of: path), at: commit) }
             ),
-            currentText: { workspace?.bufferText(file) ?? (try? String(contentsOf: file, encoding: .utf8)) }
+            currentText: { workspace?.bufferText(file) ?? (try? String(contentsOf: file, encoding: .utf8)) },
+            selectedLines: selectedLines
         )
     }
 
-    var days: [FileVersionDay] { FileVersionDay.group(versions) }
+    var days: [FileVersionDay] { FileVersionDay.group(visibleVersions) }
 
     var selected: FileVersion? { versions.first { $0.id == selection } }
 
@@ -159,15 +166,58 @@ final class FileHistoryModel {
 
     func load() async {
         isLoading = true
+        cachedContent = [:]
+        versionLines = [:]
         versions = await source.versions()
         paths = FileVersion.paths(of: versions, current: path)
+        visibleVersions = selectedLines == nil ? versions : []
+        if let selectedLines, let current = currentText() {
+            var text = current
+            var lines = selectedLines
+            var visible: [FileVersion] = []
+            for (index, version) in versions.enumerated() {
+                guard !Task.isCancelled else { return }
+                let content = await source.content(paths[index], version.commit)
+                cachedContent[version.id] = content
+                guard let older = Self.text(content) else { break }
+                let traced = traceHistoryLines(old: older, new: text, start: UInt32(lines.lowerBound), end: UInt32(lines.upperBound))
+                lines = Int(traced.start)..<Int(traced.end)
+                versionLines[version.id] = lines
+                text = older
+                if lines.isEmpty || version.kind == .added { break }
+            }
+            for (index, version) in versions.enumerated() {
+                guard let lines = versionLines[version.id], !lines.isEmpty,
+                      let text = Self.text(cachedContent[version.id]) else { continue }
+                let older = version.kind != .added && versions.indices.contains(index + 1)
+                    ? Self.text(cachedContent[versions[index + 1].id]) : ""
+                if let older, traceHistoryLines(old: older, new: text, start: UInt32(lines.lowerBound), end: UInt32(lines.upperBound)).changed {
+                    visible.append(version)
+                }
+            }
+            visibleVersions = visible
+        }
         isLoading = false
-        if selection == nil || selected == nil { selection = versions.first?.id }
+        if selection == nil || !visibleVersions.contains(where: { $0.id == selection }) { selection = visibleVersions.first?.id }
         else { loadSelection() }
     }
 
     /// The selection's line diff, when both sides are text (a missing side counts as empty).
-    var rows: [FileDiffRow]? { hunks.map { FileDiffRow.rows($0, expanded: expandedFolds) } }
+    var rows: [FileDiffRow]? {
+        guard let hunks else { return nil }
+        guard let selectedLines, let version = selected, let lines = versionLines[version.id] else {
+            return FileDiffRow.rows(hunks, expanded: expandedFolds)
+        }
+        let older = traceHistoryLines(old: Self.text(base) ?? "", new: Self.text(content) ?? "",
+                                      start: UInt32(lines.lowerBound), end: UInt32(lines.upperBound))
+        let oldLines = comparison == .current ? lines : Int(older.start)..<Int(older.end)
+        let newLines = comparison == .current ? selectedLines : lines
+        return FileDiffRow.rows(hunks, context: hunks.reduce(0) { $0 + $1.lines.count }).filter {
+            guard case .line(let line) = $0 else { return false }
+            return line.old.map { oldLines.contains($0 - 1) } == true
+                || line.new.map { newLines.contains($0 - 1) } == true
+        }
+    }
 
     /// Whether the selection is text, so it gets a diff rather than a preview.
     var isText: Bool { hunks != nil }
@@ -196,14 +246,17 @@ final class FileHistoryModel {
         let older = versions.indices.contains(index + 1) && version.kind != .added ? index + 1 : nil
         let path = paths[index]
         loadTask = Task {
-            let content = await source.content(path, version.commit)
+            let content: FileContent
+            if let cached = cachedContent[version.id] { content = cached }
+            else { content = await source.content(path, version.commit) }
             let base: FileContent
             if case .data = content {
                 base = .missing
             } else if comparison == .current {
                 base = currentText().map(FileContent.text) ?? .missing
             } else if let older {
-                base = await source.content(paths[older], versions[older].commit)
+                if let cached = cachedContent[versions[older].id] { base = cached }
+                else { base = await source.content(paths[older], versions[older].commit) }
             } else {
                 base = .missing
             }

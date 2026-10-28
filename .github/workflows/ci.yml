@@ -20,4 +20,4 @@ jobs:
       - name: Build and test
         run: |
           xcodebuild -project macApp/Typewright.xcodeproj -scheme Typewright \
-            -derivedDataPath .build CODE_SIGN_IDENTITY=- test
+            -derivedDataPath .build CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual TYPEWRIGHT_DEBUG_ENTITLEMENTS= test

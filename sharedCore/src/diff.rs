@@ -46,12 +46,89 @@ pub fn line_diff(old: &str, new: &str) -> Vec<DiffHunk> {
     hunks
 }
 
+/// A zero-based, half-open range of lines traced into an older text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct HistoryLines {
+    pub start: u32,
+    pub end: u32,
+    pub changed: bool,
+}
+
+/// Tracks whole selected lines backward, including replacements but excluding adjacent insertions.
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn trace_history_lines(old: &str, new: &str, start: u32, end: u32) -> HistoryLines {
+    let hunks = line_diff(old, new);
+    let (start, end) = (start as usize, end as usize);
+    let (mut a, mut b, mut i) = (0, 0, 0);
+    let (mut first, mut last) = (None, 0);
+    let mut changed = false;
+    while i < hunks.len() {
+        if hunks[i].kind == DiffKind::Same {
+            let count = hunks[i].lines.len();
+            let (lo, hi) = (start.max(b), end.min(b + count));
+            if lo < hi {
+                first.get_or_insert(a + lo - b);
+                last = a + hi - b;
+            }
+            a += count;
+            b += count;
+            i += 1;
+        } else {
+            let (old_start, new_start) = (a, b);
+            while i < hunks.len() && hunks[i].kind != DiffKind::Same {
+                match hunks[i].kind {
+                    DiffKind::Removed => a += hunks[i].lines.len(),
+                    DiffKind::Added => b += hunks[i].lines.len(),
+                    _ => {}
+                }
+                i += 1;
+            }
+            let overlaps = if b == new_start {
+                start < b && b < end
+            } else {
+                start < b && new_start < end
+            };
+            if overlaps {
+                changed = true;
+                first.get_or_insert(old_start);
+                last = a;
+            }
+        }
+    }
+    HistoryLines { start: first.unwrap_or(a) as u32, end: last.max(first.unwrap_or(a)) as u32, changed }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn hunk(kind: DiffKind, lines: &[&str]) -> DiffHunk {
         DiffHunk { kind, lines: lines.iter().map(|l| l.to_string()).collect() }
+    }
+
+    #[test]
+    fn history_tracks_shifted_lines_without_marking_them_changed() {
+        assert_eq!(trace_history_lines("a\nb\nc", "intro\na\nb\nc", 2, 3),
+                   HistoryLines { start: 1, end: 2, changed: false });
+    }
+
+    #[test]
+    fn history_follows_replacements_and_stops_at_creation() {
+        assert_eq!(trace_history_lines("a\nold\nc", "a\nnew\nextra\nc", 1, 3),
+                   HistoryLines { start: 1, end: 2, changed: true });
+        assert_eq!(trace_history_lines("a\nc", "a\nnew\nc", 1, 2),
+                   HistoryLines { start: 1, end: 1, changed: true });
+    }
+
+    #[test]
+    fn history_includes_internal_deletions_but_not_boundary_changes() {
+        assert_eq!(trace_history_lines("a\ndeleted\nb", "a\nb", 0, 2),
+                   HistoryLines { start: 0, end: 3, changed: true });
+        assert_eq!(trace_history_lines("a\ndeleted\nb", "a\nb", 1, 2),
+                   HistoryLines { start: 2, end: 3, changed: false });
+        assert_eq!(trace_history_lines("a\nb", "a\ninserted\nb", 0, 1),
+                   HistoryLines { start: 0, end: 1, changed: false });
     }
 
     #[test]
