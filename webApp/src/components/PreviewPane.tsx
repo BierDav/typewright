@@ -1,10 +1,11 @@
 import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
+import * as core from "~/lib/core";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import { isDark, type RenderMode, setSettings, settings } from "~/lib/settings";
 import type { Workspace } from "~/lib/workspace";
 import { isMarkdown, isPreviewable } from "~/lib/kinds";
-import { basename } from "~/lib/storage";
+import { basename, readText, join } from "~/lib/storage";
 import { Ellipsis, Moon, Sun, ZoomIn, ZoomOut } from "./icons";
 import { type MenuItem, showMenu } from "./Menu";
 
@@ -61,7 +62,7 @@ function htmlPage(html: string): string {
   const head = /<head[^>]*>/i.exec(html);
   if (!head) return FONT_SCRIPT + html;
   const at = head.index + head[0].length;
-  return html.slice(0, at) + FONT_SCRIPT + html.slice(at);
+  return html.slice(0, at) + `<style>:root { color-scheme: ${settings.previewDark && isDark() ? "dark" : "light"}; }</style>` + FONT_SCRIPT + html.slice(at);
 }
 
 // Mobile browsers have no inline PDF viewer and leave the frame blank.
@@ -69,6 +70,17 @@ const canShowPdf = typeof navigator === "undefined" || navigator.pdfViewerEnable
 
 export default function PreviewPane(props: { workspace: Workspace }) {
   const ws = props.workspace;
+  const [warningDismissed, setWarningDismissed] = createSignal(false);
+  createEffect(on(() => ws.state.preview, () => setWarningDismissed(false)));
+  async function addLetmeout() {
+    const path = file();
+    if (!path) return;
+    const text = path === ws.state.selected ? ws.state.text : await readText(join(ws.root, path));
+    if (text === null) return;
+    const installed = await compiler.installedPackages();
+    const spec = installed.filter(s => /^@[^/]+\/letmeout:/.test(s)).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0] ?? "@preview/letmeout:0.2.0";
+    ws.updateBuffer(path, core.applyPackageShowRule(text, "letmeout", spec));
+  }
   const [markdownCss] = createResource(() => compiler.markdownCss().catch(() => ""));
   let scroller: HTMLDivElement | undefined;
   const [zoom, setZoom] = createSignal<number | "fit">("fit");
@@ -205,7 +217,7 @@ export default function PreviewPane(props: { workspace: Workspace }) {
       for (const f of previewable()) items.push({ label: f.path, checked: f.path === file(), action: () => ws.setPreview(f.path) });
       items.push({ separator: true });
     }
-    if (isTypst()) items.push({ label: "Dark Pages", checked: settings.previewDark, action: () => setSettings("previewDark", (v) => !v) }, { separator: true });
+    if (isTypst() && settings.renderMode === "html") items.push({ label: "Dark Mode", checked: settings.previewDark, action: () => setSettings("previewDark", (v) => !v) }, { separator: true });
     if (isTypst()) items.push({ label: "Export PDF…", action: () => void commands.exportPDF() });
     items.push({ label: ws.state.previewMode === "pinned" ? "Unpin Preview" : "Pin Preview", action: () => (ws.state.previewMode === "pinned" ? ws.followSelection() : ws.setPreview(file()!)) });
     items.push({ label: "Hide Preview", action: () => ws.setPreview(null) });
@@ -213,7 +225,14 @@ export default function PreviewPane(props: { workspace: Workspace }) {
   }
 
   return (
-    <section class="preview" classList={{ "dark-pages": settings.previewDark && isTypst() }}>
+    <section class="preview">
+      <Show when={isTypst() && settings.renderMode === "html" && settings.previewDark && isDark() && ws.state.html && !/prefers-color-scheme|color-scheme\s*:/i.test(ws.state.html) && !warningDismissed()}>
+        <div class="form-row" role="status">
+          <span>This document ignores dark mode. Add letmeout, or configure its show rule, to adapt the HTML to dark mode.</span>
+          <button class="button small" onClick={() => void addLetmeout()}>Add / configure letmeout</button>
+          <button class="button small" onClick={() => setWarningDismissed(true)}>Dismiss</button>
+        </div>
+      </Show>
       <div class="preview-body">
         <Switch
           fallback={
@@ -328,7 +347,7 @@ export default function PreviewPane(props: { workspace: Workspace }) {
         <Show when={zoomable() || ws.state.compiling}>
           <span class="bar-separator" />
         </Show>
-        <Show when={isTypst()}>
+        <Show when={isTypst() && settings.renderMode === "html"}>
           <button
             class="icon-button"
             classList={{ active: settings.previewDark }}

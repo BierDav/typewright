@@ -1,6 +1,6 @@
 // Typewright for Windows, Linux and macOS: the web app in its own window, served from the app bundle.
 // It runs on Chromium, which the web app's storage (OPFS sync access handles) and sync are built for.
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, net, protocol, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, net, protocol, screen, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -242,3 +242,48 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => !isMac && app.quit());
+
+// Folder selection stays native, and package contents remain in their original location.
+ipcMain.handle("package-folder", async () => {
+  const result = await dialog.showOpenDialog({ properties: ["openDirectory"] });
+  if (result.canceled) return null;
+  const folder = result.filePaths[0];
+  const candidates = [folder, ...fs.readdirSync(folder, { withFileTypes: true }).filter(e => e.isDirectory() && !e.name.startsWith(".")).map(e => path.join(folder, e.name))];
+  return { folder, manifests: candidates.flatMap(target => {
+    try { return [{ target, toml: fs.readFileSync(path.join(target, "typst.toml"), "utf8") }]; } catch { return []; }
+  }) };
+});
+ipcMain.handle("link-packages", (_event, namespace, folder, packages) => {
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(namespace) || namespace === "preview") throw new Error("Invalid package namespace.");
+  const destination = path.join(LIBRARY, "packages", namespace);
+  if (fs.existsSync(destination)) throw new Error("This namespace already exists.");
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  if (!packages.length) fs.symlinkSync(folder, destination, "junction");
+  else {
+    fs.mkdirSync(destination);
+    fs.writeFileSync(path.join(destination, ".typewright-link"), folder);
+    try {
+      for (const pkg of packages) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(pkg.name) || !/^\d+\.\d+\.\d+$/.test(pkg.version)) throw new Error("Invalid package manifest.");
+        const parent = path.join(destination, pkg.name);
+        fs.mkdirSync(parent, { recursive: true });
+        fs.symlinkSync(pkg.target, path.join(parent, pkg.version), "junction");
+      }
+    } catch (error) { fs.rmSync(destination, { recursive: true }); throw error; }
+  }
+});
+
+ipcMain.handle("package-links", () => {
+  const root = path.join(LIBRARY, "packages");
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root).filter(name => {
+    const target = path.join(root, name);
+    return fs.lstatSync(target).isSymbolicLink() || fs.existsSync(path.join(target, ".typewright-link"));
+  });
+});
+ipcMain.handle("unlink-packages", (_event, namespace) => {
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(namespace)) throw new Error("Invalid namespace.");
+  const target = path.join(LIBRARY, "packages", namespace);
+  if (!fs.lstatSync(target).isSymbolicLink() && !fs.existsSync(path.join(target, ".typewright-link"))) throw new Error("Not a linked namespace.");
+  fs.rmSync(target, { recursive: true });
+});

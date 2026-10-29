@@ -1,6 +1,6 @@
 // Hosts the typst compiler (`typstBridge` built for wasm) off the main thread. Packages a compile asks
 // for come from origin storage (`packages/<namespace>/<name>/<version>/`) or Typst Universe.
-import { storageRoot } from "~/lib/disk";
+import { libraryFolder, storageRoot } from "~/lib/disk";
 import init, * as typst from "~/wasm/typst/typst.js";
 import wasmUrl from "~/wasm/typst/typst_bg.wasm?url";
 
@@ -130,6 +130,12 @@ function svgUpdates(data: Uint8Array): { key: string; svg: string | null }[] {
 }
 
 async function compile(main: string, format: number) {
+  if (libraryFolder()) {
+    for (const spec of [...loaded].filter(s => !s.startsWith("@preview/"))) {
+      loaded.delete(spec);
+      await obtain(spec).catch(error => failed.set(spec, String(error)));
+    }
+  }
   compiler!.setMain(main);
   const started = performance.now();
   // Each round can reveal imports of the packages loaded in the one before.

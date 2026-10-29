@@ -304,7 +304,7 @@ function nodeBackend(library: string): DiskBackend {
           throw err;
         }
       }),
-    list: (rel) => wrap(async () => (await fs.promises.readdir(abs(rel), { withFileTypes: true })).map((e) => ({ name: e.name, dir: e.isDirectory() }))),
+    list: (rel) => wrap(async () => (await fs.promises.readdir(abs(rel), { withFileTypes: true })).map((e) => ({ name: e.name, dir: e.isDirectory() || (e.isSymbolicLink() && fs.statSync(path.join(abs(rel), e.name)).isDirectory()) }))),
     read: (rel) => wrap(async () => new Uint8Array(await fs.promises.readFile(abs(rel)))),
     write: (rel, data) => wrap(() => fs.promises.writeFile(abs(rel), data)),
     mkdir: (rel) => wrap(async () => void (await fs.promises.mkdir(abs(rel), { recursive: true }))),

@@ -1,6 +1,10 @@
 // The desktop app's bridge (desktopApp/preload.cjs); absent in the browser.
 type Desktop = {
   platform: string;
+  packageLinks(): Promise<string[]>;
+  unlinkPackages(namespace: string): Promise<void>;
+  packageFolder(): Promise<{ folder: string; manifests: { target: string; toml: string }[] } | null>;
+  linkPackages(namespace: string, folder: string, packages: { target: string; name: string; version: string }[]): Promise<void>;
   /** Shows or hides macOS's window buttons, which sit inside the sidebar. */
   setTrafficLights(visible: boolean): void;
   /** Lets the window's own chrome (title bar, scroll bars, menus) follow the app's theme. */

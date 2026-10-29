@@ -56,8 +56,9 @@ function rubber(progress: number): number {
 
 /**
  * Horizontal two-finger swipes, like the Mac app's: right over the sidebar reveals the spaces list, left returns to
- * the space, and the list follows the fingers both ways. Browsers report no gesture phases, so a swipe ends once its
- * events (momentum included) pause, and then settles on the nearer side.
+ * the space, and the list follows the fingers both ways. Browsers report no gesture phases, so lifting the fingers is
+ * read from momentum (deltas shrinking frame by frame): the swipe settles right away, toward a flick's direction, and
+ * the rest of the momentum is swallowed. Without momentum it settles once the events pause.
  */
 function useSpacesSwipe(sidebar: () => HTMLElement | undefined, shown: () => boolean) {
   let active = false;
@@ -66,34 +67,55 @@ function useSpacesSwipe(sidebar: () => HTMLElement | undefined, shown: () => boo
   let dx = 0;
   let dy = 0;
   let start = 0;
+  /** The last horizontal deltas, to spot momentum. */
+  let recent: number[] = [];
+  /** Settled on momentum; its remaining events (no larger than this) are swallowed. */
+  let coasting: number | null = null;
   let endTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function settle() {
-    if (tracking) {
-      const progress = swipe() ?? start;
-      if (progress > 0.5) setSpacesOpen(true);
-      else closeSpaces();
-      setSwipe(null);
-    }
+  function settle(open: boolean) {
+    if (open) setSpacesOpen(true);
+    else closeSpaces();
+    setSwipe(null);
+  }
+
+  function finish() {
+    if (tracking && coasting === null) settle((swipe() ?? start) > 0.5);
     active = false;
     tracking = null;
+    coasting = null;
   }
 
   function onWheel(event: WheelEvent) {
     // Pinch zoom arrives as wheel events with Ctrl held; mouse wheels scroll by lines.
     if (!workspace() || overlay() || !shown() || event.ctrlKey || event.deltaMode !== 0) return;
+    if (coasting !== null) {
+      const size = Math.abs(event.deltaX);
+      clearTimeout(endTimer);
+      endTimer = setTimeout(finish, 60);
+      if (size <= coasting + 1 && Math.abs(event.deltaY) <= size + 1) {
+        coasting = size;
+        event.preventDefault();
+        return;
+      }
+      // Growing again: fresh fingers, a new swipe.
+      active = false;
+      coasting = null;
+    }
     if (!active) {
       // Over the document, only an open list follows a swipe.
       if (!sidebar()?.contains(event.target as Node) && !spacesOpen()) return;
       active = true;
       tracking = null;
       dx = dy = 0;
+      recent = [];
       start = spacesOpen() ? 1 : 0;
     }
     clearTimeout(endTimer);
-    endTimer = setTimeout(settle, 120);
+    endTimer = setTimeout(finish, 60);
     // Fingers moving right give a positive distance, with natural scrolling.
-    dx -= event.deltaX;
+    const limit = settings.sidebarWidth + SPACES_EXTRA;
+    dx = Math.max((-start - 0.35) * limit, Math.min((1 - start + 0.35) * limit, dx - event.deltaX));
     dy += event.deltaY;
     if (tracking === null) {
       if (Math.abs(dx) + Math.abs(dy) < 6) return;
@@ -101,7 +123,18 @@ function useSpacesSwipe(sidebar: () => HTMLElement | undefined, shown: () => boo
     }
     if (!tracking) return;
     event.preventDefault();
-    setSwipe(rubber(start + dx / (settings.sidebarWidth + SPACES_EXTRA)));
+    recent.push(Math.abs(event.deltaX));
+    if (recent.length > 4) recent.shift();
+    const decaying =
+      recent.length === 4 && recent.every((size, i) => i === 0 || size <= recent[i - 1]) && recent[3] < recent[0] * 0.85;
+    if (decaying) {
+      // A flick goes where it was thrown; a slow release to the nearer side.
+      const progress = swipe() ?? start;
+      settle(recent[0] >= 6 ? event.deltaX < 0 : progress > 0.5);
+      coasting = recent[3];
+      return;
+    }
+    setSwipe(rubber(start + dx / limit));
   }
 
   addEventListener("wheel", onWheel, { passive: false });

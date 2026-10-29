@@ -53,7 +53,7 @@ const storage = library && {
       throw err;
     }
   }),
-  list: wrap(async (rel) => (await fs.promises.readdir(abs(rel), { withFileTypes: true })).map((e) => ({ name: e.name, dir: e.isDirectory() }))),
+  list: wrap(async (rel) => (await fs.promises.readdir(abs(rel), { withFileTypes: true })).map((e) => ({ name: e.name, dir: e.isDirectory() || (e.isSymbolicLink() && fs.statSync(path.join(abs(rel), e.name)).isDirectory()) }))),
   read: wrap(async (rel) => new Uint8Array(await fs.promises.readFile(abs(rel)))),
   write: wrap(async (rel, data) => {
     await fs.promises.writeFile(abs(rel), data);
@@ -99,6 +99,10 @@ const storage = library && {
 
 contextBridge.exposeInMainWorld("typewrightDesktop", {
   platform: process.platform,
+  packageLinks: () => ipcRenderer.invoke("package-links"),
+  unlinkPackages: (namespace) => ipcRenderer.invoke("unlink-packages", namespace),
+  packageFolder: () => ipcRenderer.invoke("package-folder"),
+  linkPackages: (namespace, folder, packages) => ipcRenderer.invoke("link-packages", namespace, folder, packages),
   setTrafficLights: (visible) => ipcRenderer.send("traffic-lights", !!visible),
   setTheme: (theme) => ipcRenderer.send("theme", theme),
   reveal: (target) => ipcRenderer.send("reveal", String(target)),

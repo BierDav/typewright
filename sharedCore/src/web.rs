@@ -192,3 +192,9 @@ pub fn delete_selected_lines(list: Vec<Ts<LineSelection>>, text: &str) -> Js<Ts<
 pub fn duplicate_selected_lines(list: Vec<Ts<LineSelection>>, text: &str) -> Js<Ts<LineChange>> {
     line_change(crate::line_editing::duplicate_selected_lines(selections(list)?, text))
 }
+
+/// Applies the package's show rule using its existing import when available.
+#[wasm_bindgen(js_name = applyPackageShowRule)]
+pub fn apply_package_show_rule(text: &str, package: &str, spec: &str) -> String {
+    crate::text::apply_text_edits(crate::packages::show_rule_edits(text, package, package, spec), text)
+}

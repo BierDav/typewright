@@ -430,7 +430,7 @@ select {
   min-width: 0;
   display: flex;
   transition:
-    transform 0.35s var(--ease-out),
+    transform 0.2s var(--ease-out),
     margin-left 0.35s var(--ease-out);
 }
 
@@ -473,7 +473,7 @@ body.resizing .sidebar-dock {
   left: 0;
   display: flex;
   transition:
-    transform 0.35s var(--ease-out),
+    transform 0.2s var(--ease-out),
     opacity 0.3s ease;
 }
 
@@ -508,7 +508,7 @@ body.swiping .space-dimming {
   display: flex;
   border-radius: 16px;
   transition:
-    width 0.35s var(--ease-out),
+    width 0.2s var(--ease-out),
     transform 0.34s var(--ease-out),
     opacity 0.24s ease,
     box-shadow 0.3s ease;
@@ -1500,21 +1500,6 @@ button.issue:hover:not(:disabled) {
   cursor: text;
   content-visibility: auto;
   overflow: hidden;
-}
-
-/* Dark pages: inverted, with hues turned back so colours stay recognisable; pictures flip back to themselves. */
-.dark-pages .svg-page,
-.dark-pages .pdf-frame {
-  filter: invert(0.92) hue-rotate(180deg);
-}
-
-.dark-pages .svg-page image {
-  filter: invert(1) hue-rotate(180deg);
-}
-
-.svg-page,
-.pdf-frame {
-  transition: filter 0.3s ease;
 }
 
 .svg-page svg {

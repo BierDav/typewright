@@ -1,5 +1,6 @@
 import { createMemo, createResource, createSignal, For, type JSX, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { closeSettings, confirm, copyText, openSpace, overlay, prompt, setSettingsTab, type SettingsTab, settingsTab, showRecentlyDeleted, workspace } from "~/lib/app";
+import * as core from "~/lib/core";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import * as fontLib from "~/lib/fonts";
@@ -390,6 +391,7 @@ function Packages() {
     }
   }
 
+  const [linked, { refetch: refreshLinked }] = createResource(() => desktop?.packageLinks() ?? Promise.resolve([]));
   const [cloning, setCloning] = createSignal(false);
   const [cloneMessage, setCloneMessage] = createSignal<string | null>(null);
 
@@ -414,12 +416,17 @@ function Packages() {
 
   return (
     <>
+      <Show when={desktop}>
+        <Section title="Linked namespaces" footer="Linked folders stay in their original location. Unlinking leaves their contents intact.">
+          <For each={linked()}>{namespace => <div class="form-row"><span class="form-label">@{namespace}</span><button class="button small" onClick={async () => { await desktop!.unlinkPackages(namespace); void refreshLinked(); void refetch(); await compiler.retryPackages(); workspace()?.scheduleCompile(0); }}>Unlink</button></div>}</For>
+        </Section>
+      </Show>
       <Section title="Installed" footer="Other namespaces, like @local, come from folders you add or repositories you clone from GitHub; each holds name/version folders.">
         <For each={installed()} fallback={<div class="form-row secondary">No packages yet.</div>}>
           {(item) => (
             <div class="form-row">
               <span class="form-label mono">{item}</span>
-              <button class="icon-button" title="Remove" onClick={() => void compiler.removePackage(item).then(refetch)}>
+              <button class="icon-button" title="Remove" disabled={linked()?.includes(item.slice(1, item.indexOf("/")))} onClick={() => void compiler.removePackage(item).then(refetch)}>
                 <Trash2 size={14} />
               </button>
             </div>
@@ -430,6 +437,24 @@ function Packages() {
           <button
             class="button small"
             onClick={async () => {
+              if (desktop) {
+                try {
+                  const picked = await desktop.packageFolder();
+                  if (!picked) return;
+                  const namespace = (await prompt("Link Local Packages", "local", "Link", "The namespace used in @local/name:1.0.0."))?.trim();
+                  if (!namespace) return;
+                  const packages = picked.manifests.flatMap(({ target, toml }) => {
+                    const manifest = core.packageManifest(toml);
+                    return manifest ? [{ target, name: manifest.name, version: manifest.version }] : [];
+                  });
+                  await desktop.linkPackages(namespace, picked.folder, packages);
+                  void refetch();
+                  void refreshLinked();
+                  await compiler.retryPackages();
+                  workspace()?.scheduleCompile(0);
+                } catch (error) { setCloneMessage((error as Error).message); }
+                return;
+              }
               const files = await pickFiles({ directory: true });
               if (!files.length) return;
               const namespace = (await prompt("Add Local Packages", "local", "Add", "The namespace documents import these packages from, as in @local/name:1.0.0."))?.trim();
