@@ -1,5 +1,5 @@
 import { createMemo, createResource, createSignal, For, type JSX, Match, onCleanup, onMount, Show, Switch } from "solid-js";
-import { closeSettings, confirm, openSpace, overlay, prompt, setSettingsTab, type SettingsTab, settingsTab, showRecentlyDeleted, workspace } from "~/lib/app";
+import { closeSettings, confirm, copyText, openSpace, overlay, prompt, setSettingsTab, type SettingsTab, settingsTab, showRecentlyDeleted, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import * as fontLib from "~/lib/fonts";
@@ -9,6 +9,8 @@ import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
 import { pickFiles } from "~/lib/drop";
+import { desktop } from "~/lib/desktop";
+import { libraryFolder } from "~/lib/disk";
 import { cloneFromGitHub } from "~/lib/packages";
 import { fetchSpace } from "./SpacesSidebar";
 import { Download, KeyRound, Link, MonitorSmartphone, Package, Pencil, Settings as Gear, Trash2, Type, Users, X } from "./icons";
@@ -150,21 +152,43 @@ function General() {
           <Toggle checked={settings.ignoreLibraryWarnings} onChange={(v) => setSettings("ignoreLibraryWarnings", v)} />
         </Row>
       </Section>
-      <Section
-        title="Storage"
-        footer="Spaces live in this browser's storage for this site. Browsers may clear it under storage pressure unless it's kept; sync or download spaces you can't lose."
+      <Show
+        when={libraryFolder()}
+        fallback={
+          <Section
+            title="Storage"
+            footer="Spaces live in this browser's storage for this site. Browsers may clear it under storage pressure unless it's kept; sync or download spaces you can't lose."
+          >
+            <Row label="Used">
+              <span class="secondary">{estimate() ? `${((estimate()!.usage ?? 0) / 1_048_576).toFixed(1)} MB` : "–"}</span>
+            </Row>
+            <Row label="Keep storage">
+              <Show when={!persisted()} fallback={<span class="secondary">Kept</span>}>
+                <button class="button small" onClick={async () => { await fs.persist(); void recheck(); }}>
+                  Ask Browser
+                </button>
+              </Show>
+            </Row>
+          </Section>
+        }
       >
-        <Row label="Used">
-          <span class="secondary">{estimate() ? `${((estimate()!.usage ?? 0) / 1_048_576).toFixed(1)} MB` : "–"}</span>
-        </Row>
-        <Row label="Keep storage">
-          <Show when={!persisted()} fallback={<span class="secondary">Kept</span>}>
-            <button class="button small" onClick={async () => { await fs.persist(); void recheck(); }}>
-              Ask Browser
-            </button>
-          </Show>
-        </Row>
-      </Section>
+        {(folder) => (
+          <Section title="Library" footer="Spaces are folders here, kept in one jj repository. Other programs, like coding agents, can work on them by path; their edits show up and are committed like yours.">
+            <Row label="Spaces">
+              <div class="button-row">
+                {/* Marks keep the slashes in place: the path is cut on the left, so it's laid out right to left. */}
+                <span class="secondary mono library-path" title={`${folder()}/Spaces`}>{`\u200E${folder()}/Spaces\u200E`}</span>
+                <button class="button small" onClick={() => void copyText(`${folder()}/Spaces`, "Path copied")}>
+                  Copy
+                </button>
+                <button class="button small" onClick={() => desktop?.reveal?.(`${folder()}/Spaces`)}>
+                  {desktop?.platform === "darwin" ? "Show in Finder" : "Show Folder"}
+                </button>
+              </div>
+            </Row>
+          </Section>
+        )}
+      </Show>
       <Retention />
       <Section
         title="Large Files"

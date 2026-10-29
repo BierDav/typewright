@@ -10,6 +10,7 @@ import RecentlyDeleted from "~/components/RecentlyDeleted";
 import FileHistory from "~/components/FileHistory";
 import SearchPanel from "~/components/SearchPanel";
 import SettingsPage from "~/components/Settings";
+import { migrateBrowserStorage } from "~/lib/disk";
 import Sidebar from "~/components/Sidebar";
 import { importFolder, importZip, newSpace } from "~/components/SpacesSidebar";
 import StatusBar, { Issues } from "~/components/StatusBar";
@@ -146,6 +147,8 @@ export default function Home() {
 
   onMount(async () => {
     addEventListener("keydown", onKey, true);
+    // Before anything reads storage: the desktop app's spaces move from browser storage to its folder.
+    await migrateBrowserStorage().catch((err) => console.error("Moving spaces to disk", err));
     compiler.warmUp();
     try {
       await Promise.all([loadIdentity(), refreshSpaces()]);

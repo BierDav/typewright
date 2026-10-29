@@ -3060,3 +3060,14 @@ fieldset.plain:disabled {
 .handoff-error {
   color: var(--red);
 }
+
+/* MARK: Library folder (desktop app) */
+
+.library-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  font-size: 11px;
+}

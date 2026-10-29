@@ -2,6 +2,7 @@
 // origin storage's `spaces/` folder (each space a top-level folder, `.jj` beside them); the module reads and writes
 // it directly through the OPFS host in `lib/wasi.ts`. `jj-host/` beside it keeps the host's mtimes (`state.json`)
 // and a journal of files being written, so a tab closed mid-call can't leave a file looking unchanged.
+import { storageRoot } from "~/lib/disk";
 import jspiUrl from "~/wasm/jj/jj_bridge.wasm?url";
 import asyncifyUrl from "~/wasm/jj/jj_bridge.asyncify.wasm?url";
 import { hasJSPI, type HostState, moveFile, OpfsFS, unlocked, Wasi } from "~/lib/wasi";
@@ -104,7 +105,7 @@ async function saveState() {
 }
 
 async function open(lfsLimit: number, staleFromTabs: string[]) {
-  const storage = await navigator.storage.getDirectory();
+  const storage = await storageRoot();
   const root = await storage.getDirectoryHandle(ROOT, { create: true });
   host = await storage.getDirectoryHandle(HOST, { create: true });
   const state = await readJSON<HostState>("state.json");

@@ -1,5 +1,6 @@
-// The origin private file system: spaces are folders under `spaces/`, everything else lives beside them.
-// It has no change events, so every write goes through here and is announced, also to other tabs.
+// The origin private file system (in the desktop app a real folder, see `disk.ts`): spaces are folders under
+// `spaces/`, everything else lives beside them. Writes go through here and are announced, also to other tabs.
+import { storageRoot, watchLibrary } from "./disk";
 
 export type Entry = { path: string; kind: "file" | "dir"; size: number; modified: number };
 
@@ -26,11 +27,13 @@ function announce(paths: string[]) {
 }
 
 channel?.addEventListener("message", (event) => listeners.forEach((l) => l(event.data as Change)));
+// Edits other programs make in the desktop app's library folder, like an agent working on a space.
+watchLibrary((paths) => listeners.forEach((l) => l({ paths })));
 
 let rootPromise: Promise<FileSystemDirectoryHandle> | undefined;
 
 export function root(): Promise<FileSystemDirectoryHandle> {
-  rootPromise ??= navigator.storage.getDirectory();
+  rootPromise ??= storageRoot();
   return rootPromise;
 }
 

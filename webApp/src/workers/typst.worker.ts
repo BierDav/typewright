@@ -1,5 +1,6 @@
 // Hosts the typst compiler (`typstBridge` built for wasm) off the main thread. Packages a compile asks
 // for come from origin storage (`packages/<namespace>/<name>/<version>/`) or Typst Universe.
+import { storageRoot } from "~/lib/disk";
 import init, * as typst from "~/wasm/typst/typst.js";
 import wasmUrl from "~/wasm/typst/typst_bg.wasm?url";
 
@@ -21,7 +22,7 @@ function parseSpec(spec: string): { namespace: string; name: string; version: st
 }
 
 async function directory(path: string[], create: boolean): Promise<FileSystemDirectoryHandle | null> {
-  let dir = await navigator.storage.getDirectory();
+  let dir = await storageRoot();
   for (const part of path) {
     try {
       dir = await dir.getDirectoryHandle(part, { create });

@@ -35,6 +35,15 @@ async function serve(request) {
   return response;
 }
 
+// MARK: - Library
+
+// Spaces live in a real folder, like the Mac app's library, so agents and other programs can work on them by path:
+// `<app data>/Typewright Desktop/Spaces` (its own library; the Mac app's is `Typewright/Spaces`). Workers and the
+// preload read it from the environment, which renderers inherit.
+const LIBRARY = process.env.TYPEWRIGHT_LIBRARY ?? path.join(app.getPath("appData"), "Typewright Desktop");
+fs.mkdirSync(path.join(LIBRARY, "Spaces"), { recursive: true });
+process.env.TYPEWRIGHT_LIBRARY = LIBRARY;
+
 // MARK: - Passkeys
 
 // Electron can't use passkeys of the web app's domain, so they run in the default browser on its page
@@ -138,7 +147,9 @@ function createWindow() {
     ...(isMac ? { titleBarStyle: "hidden", trafficLightPosition: TRAFFIC_LIGHTS } : {}),
     // Packaged builds take theirs from the bundle; Windows and Linux development runs need it here.
     ...(!isMac && !app.isPackaged ? { icon: path.join(here, "build/icons/512x512.png") } : {}),
-    webPreferences: { contextIsolation: true, sandbox: true, spellcheck: true, preload: path.join(here, "preload.cjs") },
+    // Unsandboxed, so the preload and workers reach the library folder through Node (`webApp/src/lib/disk.ts`);
+    // the page itself still has no Node, and only this app's own pages load here.
+    webPreferences: { contextIsolation: true, sandbox: false, nodeIntegrationInWorker: true, spellcheck: true, preload: path.join(here, "preload.cjs") },
   });
   if (saved?.maximized) window.maximize();
   remember(window);
@@ -206,6 +217,12 @@ app.on("open-url", (event, url) => {
   if (!url.startsWith(`${HANDOFF_SCHEME}://`)) return;
   event.preventDefault();
   void receivePasskey(url);
+});
+
+// Only inside the library, so a page can't open arbitrary places.
+ipcMain.on("reveal", (_event, target) => {
+  const resolved = path.resolve(target);
+  if (resolved === LIBRARY || resolved.startsWith(LIBRARY + path.sep)) shell.showItemInFolder(resolved);
 });
 
 ipcMain.on("theme", (_event, theme) => {
