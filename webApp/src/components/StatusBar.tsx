@@ -4,10 +4,10 @@ import { participants } from "~/lib/editor/live";
 import { compiler } from "~/lib/compiler";
 import { isEditable, isMarkdown } from "~/lib/kinds";
 import { basename } from "~/lib/storage";
-import type { Workspace } from "~/lib/workspace";
+import { PREVIEW_NEXT, type Workspace } from "~/lib/workspace";
 import { isMac, toggleSidebar } from "~/lib/app";
 import { setSettings, settings } from "~/lib/settings";
-import { CircleAlert, CircleCheck, CircleX, Eye, PanelLeft, PanelRight, TriangleAlert, Users } from "./icons";
+import { CircleAlert, CircleCheck, CircleX, Eye, PanelLeft, PanelRight, Pin, TriangleAlert, Users } from "./icons";
 
 function words(text: string): number {
   return text.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu)?.length ?? 0;
@@ -50,9 +50,12 @@ export default function StatusBar(props: { workspace: Workspace }) {
       </Show>
       <div class="spacer" />
       <Show when={ws.state.preview}>
-        <span class="status-item" title="Previewed file">
-          <Eye size={12} /> {basename(ws.state.preview!)}
-        </span>
+        <button class="status-item status-button" title={`${ws.state.previewMode === "pinned" ? "Pinned" : "Following the selection"} · ${PREVIEW_NEXT[ws.state.previewMode]}`} onClick={() => ws.cyclePreview()}>
+          <Show when={ws.state.previewMode === "pinned"} fallback={<Eye size={12} />}>
+            <Pin size={12} />
+          </Show>{" "}
+          {basename(ws.state.preview!)}
+        </button>
         <Show when={ws.state.preview!.endsWith(".typ") && compiler.version}>
           <span class="status-item">Typst {compiler.version}</span>
         </Show>

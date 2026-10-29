@@ -1,5 +1,5 @@
 import { createMemo, createResource, createSignal, For, type JSX, Match, onCleanup, onMount, Show, Switch } from "solid-js";
-import { confirm, openSpace, overlay, prompt, setOverlay, type SettingsTab, showRecentlyDeleted, workspace } from "~/lib/app";
+import { closeSettings, confirm, openSpace, overlay, prompt, setSettingsTab, type SettingsTab, settingsTab, showRecentlyDeleted, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import * as fontLib from "~/lib/fonts";
@@ -576,7 +576,7 @@ function Devices() {
             {(share) => (
               <Row label={share.name}>
                 <Show when={share.shared}><Users size={12} class="secondary" aria-label="Shared with others" /></Show>
-                <button class="button small" onClick={() => void fetchSpace(share).then((path) => path && setOverlay(null))}>
+                <button class="button small" onClick={() => void fetchSpace(share).then((path) => path && closeSettings())}>
                   <Download size={13} /> Download…
                 </button>
               </Row>
@@ -598,7 +598,7 @@ function Devices() {
                   <span class="secondary"> · {sync.problems[id] ?? sync.statuses[id] ?? (syncService.isSynced(share.path) || syncService.isShared(share.path) ? "Starting" : "Unlinked")}</span>
                 </span>
                 <div class="button-row">
-                  <button class="button small" onClick={() => { openSpace(share.path.split("/")[0]); setOverlay(null); }}>
+                  <button class="button small" onClick={() => { openSpace(share.path.split("/")[0]); closeSettings(); }}>
                     Open
                   </button>
                   <button class="button small" onClick={() => void commands.share(share.path)}>
@@ -623,7 +623,7 @@ function Devices() {
           </For>
           <div class="form-row">
             <span />
-            <button class="button small" onClick={async () => { const folder = await commands.joinFromLink(); if (folder) { openSpace(folder); setOverlay(null); } }}>
+            <button class="button small" onClick={async () => { const folder = await commands.joinFromLink(); if (folder) { openSpace(folder); closeSettings(); } }}>
               Join Shared Space…
             </button>
           </div>
@@ -633,47 +633,31 @@ function Devices() {
   );
 }
 
-export default function SettingsWindow() {
-  const tab = () => {
-    const o = overlay();
-    return (o?.type === "settings" && o.tab) || "general";
-  };
-  const select = (id: SettingsTab) => setOverlay({ type: "settings", tab: id });
-  const close = () => setOverlay(null);
-  let dialog!: HTMLDivElement;
+/** Settings as a page of its own in the main area, picked in the spaces list. */
+export default function SettingsPage() {
+  const tab = () => settingsTab() ?? "general";
+  let page!: HTMLDivElement;
   // Also when focus fell back to the page, as it does when a clicked button goes away.
   const onKey = (e: KeyboardEvent) => {
     const active = document.activeElement;
-    if (e.key === "Escape" && (!active || active === document.body || dialog.contains(active))) close();
+    if (e.key === "Escape" && !overlay() && workspace() && (!active || active === document.body || page.contains(active))) closeSettings();
   };
   window.addEventListener("keydown", onKey);
   onCleanup(() => window.removeEventListener("keydown", onKey));
   return (
-    <div class="overlay-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div
-        class="settings glass"
-        role="dialog"
-        aria-label="Settings"
-        tabIndex={-1}
-        ref={(el) => {
-          dialog = el;
-          requestAnimationFrame(() => el.focus());
-        }}
-      >
-        <header class="settings-toolbar">
-          <For each={TABS}>
-            {(t) => (
-              <button class="settings-tab" classList={{ active: tab() === t.id }} onClick={() => select(t.id)}>
-                {t.icon()}
-                <span>{t.label}</span>
-              </button>
-            )}
-          </For>
-          <button class="icon-button settings-close" title="Close" onClick={close}>
-            <X size={15} />
-          </button>
-        </header>
-        <div class="settings-body">
+    <div class="settings-page" role="region" aria-label="Settings" tabIndex={-1} ref={page}>
+      <header class="settings-toolbar">
+        <For each={TABS}>
+          {(t) => (
+            <button class="settings-tab" classList={{ active: tab() === t.id }} onClick={() => setSettingsTab(t.id)}>
+              {t.icon()}
+              <span>{t.label}</span>
+            </button>
+          )}
+        </For>
+      </header>
+      <div class="settings-body">
+        <div class="settings-content">
           <Switch>
             <Match when={tab() === "general"}>
               <General />

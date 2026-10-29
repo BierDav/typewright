@@ -1,5 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
-import { choose, confirm, openSpace, prompt, setOverlay, setSpacesOpen, showRecentlyDeleted, toast, workspace } from "~/lib/app";
+import { choose, closeSpaces, confirm, openSpace, prompt, setOverlay, settingsTab, showRecentlyDeleted, showSettings, toast, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { pickFiles, stripTopFolder } from "~/lib/drop";
 import { identity } from "~/lib/identity";
@@ -130,7 +130,7 @@ export default function SpacesSidebar() {
   const [over, setOver] = createSignal<number | null>(null);
 
   return (
-    <div class="sidebar-content from-left">
+    <div class="sidebar-content">
       <header class="sidebar-header">
         <span class="sidebar-title">Spaces</span>
       </header>
@@ -139,7 +139,7 @@ export default function SpacesSidebar() {
           {(folder, index) => (
             <div
               class="tree-row space-row"
-              classList={{ selected: workspace()?.folder === folder, "drop-before": over() === index() && dragging() !== folder }}
+              classList={{ selected: workspace()?.folder === folder && !settingsTab(), "drop-before": over() === index() && dragging() !== folder }}
               draggable={true}
               onClick={() => openSpace(folder)}
               onDragStart={(e) => {
@@ -221,13 +221,21 @@ export default function SpacesSidebar() {
           </For>
         </Show>
       </div>
+      <div class="sidebar-pages">
+        <button class="tree-row" classList={{ selected: !!settingsTab() }} onClick={() => (settingsTab() ? undefined : showSettings())}>
+          <span class="row-icon">
+            <Settings size={15} />
+          </span>
+          <span class="tree-name">Settings</span>
+        </button>
+      </div>
       <footer class="sidebar-footer">
         <Show when={workspace()}>
-          <button class="round-button active" title="Back to the space" onClick={() => setSpacesOpen(false)}>
+          <button class="round-button active" title="Back to the space" onClick={() => closeSpaces()}>
             <SquareStack size={15} />
           </button>
         </Show>
-        <button class="sync-status" onClick={() => setOverlay({ type: "settings", tab: "devices" })} title="Devices and syncing">
+        <button class="sync-status" onClick={() => showSettings("devices")} title="Devices and syncing">
           <Show when={identity.account} fallback={<><CloudOff size={14} /> <span>Sign in to sync</span></>}>
             <Cloud size={14} />
             <span>{syncService.statusSummary()}</span>
@@ -242,9 +250,6 @@ export default function SpacesSidebar() {
           }}
         >
           <Link size={15} />
-        </button>
-        <button class="round-button" title="Settings" onClick={() => setOverlay({ type: "settings" })}>
-          <Settings size={15} />
         </button>
       </footer>
     </div>

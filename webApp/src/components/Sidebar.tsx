@@ -1,6 +1,6 @@
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { desktop } from "~/lib/desktop";
-import { dialogs, floatingSidebar, isMac, overlay, setFloatingSidebar, spacesOpen, toggleSidebar, workspace } from "~/lib/app";
+import { closeSpaces, dialogs, SPACES_EXTRA, floatingSidebar, isMac, overlay, setFloatingSidebar, setSpacesOpen, setSwipe, spacesOpen, spacesProgress, swipe, toggleSidebar, workspace } from "~/lib/app";
 import { setSettings, settings } from "~/lib/settings";
 import FileSidebar from "./FileSidebar";
 import { PanelLeftClose, Pin } from "./icons";
@@ -48,6 +48,69 @@ function ResizeHandle() {
   return <div class="sidebar-resize" onPointerDown={start} onDblClick={() => setSettings("sidebarWidth", DEFAULT_WIDTH)} role="separator" aria-orientation="vertical" title="Drag to resize" />;
 }
 
+/** Rubber band past either end, like AppKit's: the further the pull, the less it moves; at most 12 %. */
+function rubber(progress: number): number {
+  const band = (x: number) => (1 - 1 / ((x * 0.55) / 0.12 + 1)) * 0.12;
+  return progress > 1 ? 1 + band(progress - 1) : progress < 0 ? -band(-progress) : progress;
+}
+
+/**
+ * Horizontal two-finger swipes, like the Mac app's: right over the sidebar reveals the spaces list, left returns to
+ * the space, and the list follows the fingers both ways. Browsers report no gesture phases, so a swipe ends once its
+ * events (momentum included) pause, and then settles on the nearer side.
+ */
+function useSpacesSwipe(sidebar: () => HTMLElement | undefined, shown: () => boolean) {
+  let active = false;
+  /** null until the gesture's direction is known. */
+  let tracking: boolean | null = null;
+  let dx = 0;
+  let dy = 0;
+  let start = 0;
+  let endTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function settle() {
+    if (tracking) {
+      const progress = swipe() ?? start;
+      if (progress > 0.5) setSpacesOpen(true);
+      else closeSpaces();
+      setSwipe(null);
+    }
+    active = false;
+    tracking = null;
+  }
+
+  function onWheel(event: WheelEvent) {
+    // Pinch zoom arrives as wheel events with Ctrl held; mouse wheels scroll by lines.
+    if (!workspace() || overlay() || !shown() || event.ctrlKey || event.deltaMode !== 0) return;
+    if (!active) {
+      // Over the document, only an open list follows a swipe.
+      if (!sidebar()?.contains(event.target as Node) && !spacesOpen()) return;
+      active = true;
+      tracking = null;
+      dx = dy = 0;
+      start = spacesOpen() ? 1 : 0;
+    }
+    clearTimeout(endTimer);
+    endTimer = setTimeout(settle, 120);
+    // Fingers moving right give a positive distance, with natural scrolling.
+    dx -= event.deltaX;
+    dy += event.deltaY;
+    if (tracking === null) {
+      if (Math.abs(dx) + Math.abs(dy) < 6) return;
+      tracking = Math.abs(dx) > Math.abs(dy) * 1.5;
+    }
+    if (!tracking) return;
+    event.preventDefault();
+    setSwipe(rubber(start + dx / (settings.sidebarWidth + SPACES_EXTRA)));
+  }
+
+  addEventListener("wheel", onWheel, { passive: false });
+  onCleanup(() => {
+    removeEventListener("wheel", onWheel);
+    clearTimeout(endTimer);
+  });
+}
+
 /** The one sidebar, floating over the window like the Mac app's: the space's files, or the list of spaces. */
 export default function Sidebar() {
   const pinned = () => settings.sidebarVisible || !workspace();
@@ -59,7 +122,7 @@ export default function Sidebar() {
   let dragDepth = 0;
 
   // Menus, questions and the spaces list it opened keep it out.
-  const held = () => menuOpen() || dialogs.length > 0 || spacesOpen() || hovering() || dragging() || resizing();
+  const held = () => menuOpen() || dialogs.length > 0 || spacesOpen() || swipe() !== null || hovering() || dragging() || resizing();
 
   function show() {
     clearTimeout(hideTimer);
@@ -80,11 +143,27 @@ export default function Sidebar() {
   // The window buttons live in the sidebar's corner, so they come and go with it.
   createEffect(() => desktop?.setTrafficLights(shown()));
   onCleanup(() => clearTimeout(hideTimer));
+  let aside: HTMLElement | undefined;
+  useSpacesSwipe(() => aside, shown);
+  // Without a space the list always shows.
+  const progress = () => (workspace() ? spacesProgress() : 1);
+  const open = () => Math.min(1, Math.max(0, progress()));
+  // Pulled past the files, they move along a little.
+  const filesStyle = () => ({
+    transform: `translateX(${Math.min(0, progress()) * settings.sidebarWidth}px) scale(${1 - 0.08 * open()})`,
+    opacity: 1 - open(),
+  });
+  createEffect(() => document.body.classList.toggle("swiping", swipe() !== null));
 
   return (
     <>
-      <div class="sidebar-dock" classList={{ collapsed: !pinned() }} style={{ "--sidebar-width": `${settings.sidebarWidth}px` }}>
+      <div
+        class="sidebar-dock"
+        classList={{ collapsed: !pinned() }}
+        style={{ "--sidebar-width": `${settings.sidebarWidth}px`, "--spaces-extra": `${SPACES_EXTRA}px`, "--spaces-open": `${Math.max(0, progress())}` }}
+      >
         <aside
+          ref={aside}
           class="sidebar"
           classList={{ floating: !pinned(), shown: shown() }}
           aria-hidden={!shown()}
@@ -97,9 +176,17 @@ export default function Sidebar() {
             if (e.key === "Escape" && !pinned() && !held()) setFloatingSidebar(false);
           }}
         >
-          <Show when={workspace() && !spacesOpen()} fallback={<SpacesSidebar />}>
-            <FileSidebar workspace={workspace()!} />
+          {/* Both stay mounted, so the list slides in over the files and back out. */}
+          <Show when={workspace()} keyed>
+            {(ws) => (
+              <div class="sidebar-layer files" style={filesStyle()} inert={open() === 1} aria-hidden={open() === 1}>
+                <FileSidebar workspace={ws} />
+              </div>
+            )}
           </Show>
+          <div class="sidebar-layer spaces" style={{ transform: `translateX(${(open() - 1) * 100}%)` }} inert={open() === 0} aria-hidden={open() === 0}>
+            <SpacesSidebar />
+          </div>
           <ResizeHandle />
         </aside>
       </div>

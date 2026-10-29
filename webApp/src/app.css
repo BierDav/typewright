@@ -139,6 +139,8 @@ body {
   background: var(--window);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  /* Horizontal swipes switch to the spaces list instead of going back in history. */
+  overscroll-behavior: none;
 }
 
 body.resizing {
@@ -264,8 +266,7 @@ textarea {
   color: var(--red);
 }
 
-.button.primary.destructive,
-.dialog .button.destructive {
+.button.primary.destructive {
   background: var(--red);
   color: white;
   border-color: transparent;
@@ -423,9 +424,25 @@ select {
 }
 
 .main {
+  position: relative;
   flex: 1;
   min-width: 0;
   display: flex;
+  transition:
+    transform 0.35s var(--ease-out),
+    margin-left 0.35s var(--ease-out);
+}
+
+/* Over the space while the spaces list is open, like the Mac app's selector. */
+.space-dimming {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.3);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+  backdrop-filter: blur(6px) saturate(1.2);
+  transition: opacity 0.3s var(--ease-out);
+  animation: fade-in 0.3s var(--ease-out);
 }
 
 /* MARK: Sidebar */
@@ -447,16 +464,50 @@ body.resizing .sidebar-dock {
   transition: none;
 }
 
+/* The files and the spaces list, stacked: the list slides in over the files from the left. */
+.sidebar-layer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  transition:
+    transform 0.35s var(--ease-out),
+    opacity 0.3s ease;
+}
+
+.sidebar-layer.files {
+  width: var(--sidebar-width);
+  transform-origin: left center;
+}
+
+/* Always its open width, so labels never rewrap while it slides; its own glass covers the files beneath. */
+.sidebar-layer.spaces {
+  width: max(100%, calc(var(--sidebar-width) + var(--spaces-extra)));
+  background: var(--sidebar-glass);
+  -webkit-backdrop-filter: blur(30px) saturate(1.6);
+  backdrop-filter: blur(30px) saturate(1.6);
+  box-shadow: 0.5px 0 0 var(--glass-border), 8px 0 24px rgba(0, 0, 0, 0.08);
+}
+
+body.swiping .sidebar,
+body.swiping .sidebar-layer,
+body.swiping .main,
+body.swiping .space-dimming {
+  transition: none;
+}
+
 /* One floating glass panel inset from the window edge, like the Mac app's sidebar. */
 .sidebar {
   position: absolute;
   top: 8px;
   bottom: 8px;
   left: 8px;
-  width: var(--sidebar-width);
+  width: calc(var(--sidebar-width) + var(--spaces-extra) * var(--spaces-open));
   display: flex;
   border-radius: 16px;
   transition:
+    width 0.35s var(--ease-out),
     transform 0.34s var(--ease-out),
     opacity 0.24s ease,
     box-shadow 0.3s ease;
@@ -522,27 +573,8 @@ body.resizing .sidebar-resize::after {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  animation: sidebar-swap-right 0.32s var(--ease-out);
 }
 
-/* The spaces list comes in from the left, a space's files from the right. */
-.sidebar-content.from-left {
-  animation-name: sidebar-swap-left;
-}
-
-@keyframes sidebar-swap-right {
-  from {
-    opacity: 0;
-    transform: translateX(14px);
-  }
-}
-
-@keyframes sidebar-swap-left {
-  from {
-    opacity: 0;
-    transform: translateX(-14px);
-  }
-}
 
 .tree-children {
   display: flex;
@@ -652,7 +684,8 @@ body.resizing .sidebar-resize::after {
     transform 0.15s var(--ease-spring);
 }
 
-button.tree-row {
+button.tree-row,
+.space-row {
   padding-left: 10px;
 }
 
@@ -790,6 +823,13 @@ button.tree-row {
 
 .hint {
   padding: 8px;
+}
+
+/* Pages of the app itself, below the spaces list. */
+.sidebar-pages {
+  flex-shrink: 0;
+  padding: 6px 8px 0;
+  border-top: 0.5px solid var(--separator);
 }
 
 .sidebar-footer {
@@ -2041,9 +2081,7 @@ li[aria-selected] .cm-completionIcon {
   animation: overlay-in 0.22s var(--ease-out);
 }
 
-.dialog-backdrop > .dialog {
-  animation: dialog-in 0.28s var(--ease-spring);
-}
+
 
 @keyframes fade-in {
   from {
@@ -2058,18 +2096,8 @@ li[aria-selected] .cm-completionIcon {
   }
 }
 
-@keyframes dialog-in {
-  from {
-    opacity: 0;
-    transform: scale(0.92);
-  }
-}
-
 .dialog-backdrop {
   z-index: 70;
-  align-items: center;
-  padding-top: 0;
-  background: rgba(0, 0, 0, 0.2);
 }
 
 .palette {
@@ -2344,17 +2372,30 @@ li[aria-selected] .cm-completionIcon {
   color: var(--accent);
 }
 
-.settings-close {
-  position: absolute;
-  right: 10px;
-  top: 10px;
+/* Fills the main area beside the sidebar, its tabs on top like a Mac settings window's toolbar. */
+.settings-page {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+  animation: fade-in 0.18s ease-out;
+}
+
+.settings-page .settings-toolbar {
+  padding-top: 14px;
+  border-bottom: none;
 }
 
 .settings-body {
   flex: 1;
   overflow: auto;
   padding: 16px 24px 32px;
-  background: var(--window);
+}
+
+.settings-content {
+  max-width: 640px;
+  margin: 0 auto;
 }
 
 .form-section {
@@ -2430,62 +2471,29 @@ li[aria-selected] .cm-completionIcon {
 
 /* MARK: Dialogs, menus, toasts */
 
-.dialog {
-  width: 300px;
-  padding: 20px 18px 16px;
-  border-radius: 16px;
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 10px;
+/* Questions and messages, in the command palette's look. */
+.dialog-backdrop {
+  align-items: flex-start;
+  padding-top: 12vh;
 }
 
-.dialog-icon {
-  width: 56px;
-  height: 56px;
-  align-self: center;
-}
-
-.dialog h2 {
+.palette-detail {
   margin: 0;
-  font-size: 13.5px;
-  font-weight: 700;
-}
-
-.dialog p {
-  margin: 0;
+  padding: 10px 16px;
   font-size: 12px;
-  color: var(--text);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  user-select: text;
 }
 
-.dialog .text-field {
-  height: 28px;
-  text-align: left;
+.palette-dialog .palette-detail + .palette-list,
+.palette-dialog .palette-detail + .palette-hints {
+  border-top: 0.5px solid var(--separator);
 }
 
-.copy-field {
-  display: flex;
-  gap: 4px;
-}
-
-.copy-field .text-field {
-  font-size: 11px;
-}
-
-.dialog-buttons {
-  display: flex;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.dialog-buttons .button {
-  flex: 1;
-  padding: 0 8px;
-}
-
-.dialog-buttons.stacked {
-  flex-direction: column-reverse;
+.palette-row.destructive,
+.palette-row.destructive .palette-icon {
+  color: var(--red);
 }
 
 .menu-backdrop {
@@ -2972,9 +2980,15 @@ fieldset.plain:disabled {
 /* Motion stays for meaning only when it's asked to be reduced. */
 /* MARK: Desktop app on macOS */
 
-/* The window buttons sit in the sidebar's top corner, like the Mac app's; the header makes room and drags the window. */
+/* The corner radius of Electron's window on macOS 26 (a titled window without a toolbar). */
+.desktop-mac {
+  --window-radius: 16px;
+}
+
+/* The window buttons get a row of their own at the sidebar's top, with the title below them; the header drags the window. */
 .desktop-mac .sidebar-header {
-  padding-left: 82px;
+  height: 72px;
+  padding-top: 36px;
   -webkit-app-region: drag;
 }
 
@@ -2982,16 +2996,12 @@ fieldset.plain:disabled {
   -webkit-app-region: no-drag;
 }
 
-/* The spaces list's title sits beside the buttons too. */
-.desktop-mac .sidebar-title {
-  padding-left: 4px;
+/* Concentric with the window's corner, which sits 8 px further out. */
+.desktop-mac .sidebar {
+  border-radius: calc(var(--window-radius) - 8px);
 }
 
 /* A strip along the window's top edge to drag it by, as a title bar would. */
-.desktop-mac .main {
-  position: relative;
-}
-
 .desktop-mac .main::before {
   content: "";
   position: absolute;
@@ -3017,4 +3027,36 @@ fieldset.plain:disabled {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* MARK: Passkey hand-off page */
+
+.handoff {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+  background: var(--surface);
+}
+
+.handoff h1 {
+  margin: 8px 0 0;
+  font-size: 22px;
+}
+
+.handoff p {
+  max-width: 420px;
+  margin: 0;
+}
+
+.handoff .button {
+  margin-top: 8px;
+}
+
+.handoff-error {
+  color: var(--red);
 }

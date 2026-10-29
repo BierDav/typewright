@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, type JSX, on, onCleanup, onMount, Show, untrack } from "solid-js";
-import { editorView, openSpace, toggleSidebar, overlay, setOverlay, shortcut, showHistory, showRecentlyDeleted, spacesOpen, toggleSpaces, workspace } from "~/lib/app";
+import { editorView, openSpace, toggleSidebar, overlay, setOverlay, shortcut, showHistory, showRecentlyDeleted, showSettings, spacesOpen, toggleSpaces, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { fuzzyScore } from "~/lib/core";
 import { symbolAt } from "~/lib/editor/refactor";
@@ -10,7 +10,13 @@ import { type RenderMode, setSettings, settings } from "~/lib/settings";
 import { download, SPACES, spaces, uniqueName, zipSpace } from "~/lib/spaces";
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
-import type { Workspace } from "~/lib/workspace";
+import { PREVIEW_NEXT, type Workspace } from "~/lib/workspace";
+
+/** Runs a preview change, bringing back a pane dragged shut. */
+function showPreview(ws: Workspace, change: () => void) {
+  change();
+  if (ws.state.preview && settings.split === 0) setSettings("split", 0.5);
+}
 import { ChevronRight, Command, CornerDownLeft, File, Folder, Layers, Search, Type } from "./icons";
 import { importFolder, importZip, newSpace } from "./SpacesSidebar";
 import { renameCurrentSpace } from "./FileSidebar";
@@ -228,7 +234,7 @@ async function rootItems(): Promise<Item[]> {
       }
       if (isPreviewable(file)) {
         const previewed = ws.state.preview === file;
-        items.push({ id: "preview", title: previewed ? "Hide Preview" : `Preview ${name}`, section: "File", action: { run: () => ws.togglePreview(file) } });
+        items.push({ id: "preview", title: previewed ? PREVIEW_NEXT[ws.state.previewMode] : `Preview ${name}`, section: "File", action: { run: () => showPreview(ws, () => ws.togglePreview(file)) } });
       }
       items.push(...(await refactorItems(ws)));
       if (ws.state.selectedKind === "typst") {
@@ -304,7 +310,13 @@ async function rootItems(): Promise<Item[]> {
         section: "Space",
         action: { run: () => setSettings("theme", theme) },
       })),
-      { id: "space.preview", title: settings.split > 0 ? "Hide Preview Pane" : "Show Preview Pane", section: "Space", action: { run: () => setSettings("split", (v) => (v > 0 ? 0 : 0.5)) } },
+      { id: "preview.toggle", title: PREVIEW_NEXT[ws.state.previewMode], keywords: ["preview pane", "toggle preview", "cycle preview"], section: "Space", action: { run: () => showPreview(ws, () => ws.cyclePreview()) } },
+      ...(ws.state.previewMode === "hidden" && ws.state.selected && isPreviewable(ws.state.selected)
+        ? [{ id: "preview.pin", title: `Pin Preview to ${fs.basename(ws.state.selected)}`, keywords: ["pin preview", "show preview"], section: "Space", action: { run: () => showPreview(ws, () => ws.setPreview(ws.state.selected)) } }]
+        : []),
+      ...(ws.state.previewMode === "following"
+        ? [{ id: "preview.hide", title: "Hide Preview", keywords: ["close preview"], section: "Space", action: { run: () => ws.setPreview(null) } }]
+        : []),
       { id: "space.close", title: `Close ${ws.name}`, section: "Space", shortcut: shortcut("⌃⌘W"), action: { run: () => openSpace(null) } },
     );
     // Typing searches every file name in the space.
@@ -340,9 +352,9 @@ async function rootItems(): Promise<Item[]> {
   );
   if (fonts.fonts.installed.length) items.push({ id: "fonts.remove", title: "Remove Google Font…", section: "Fonts", keywords: ["delete", "uninstall"], action: { page: removeFontsPage } });
   items.push(
-    { id: "fonts.settings", title: "Font Settings…", section: "Fonts", action: { run: () => setOverlay({ type: "settings", tab: "fonts" }) } },
-    { id: "app.settings", title: "Settings…", section: "App", shortcut: shortcut("⌘,"), action: { run: () => setOverlay({ type: "settings" }) } },
-    { id: "app.devices", title: "Devices and Syncing…", section: "App", keywords: ["account", "passkey", "sign in"], action: { run: () => setOverlay({ type: "settings", tab: "devices" }) } },
+    { id: "fonts.settings", title: "Font Settings…", section: "Fonts", action: { run: () => showSettings("fonts") } },
+    { id: "app.settings", title: "Settings…", section: "App", shortcut: shortcut("⌘,"), action: { run: () => showSettings("general") } },
+    { id: "app.devices", title: "Devices and Syncing…", section: "App", keywords: ["account", "passkey", "sign in"], action: { run: () => showSettings("devices") } },
   );
   return items;
 }

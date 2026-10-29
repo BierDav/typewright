@@ -207,7 +207,8 @@ export default function PreviewPane(props: { workspace: Workspace }) {
     }
     if (isTypst()) items.push({ label: "Dark Pages", checked: settings.previewDark, action: () => setSettings("previewDark", (v) => !v) }, { separator: true });
     if (isTypst()) items.push({ label: "Export PDF…", action: () => void commands.exportPDF() });
-    items.push({ label: "Hide Preview", action: () => setSettings("split", 0) });
+    items.push({ label: ws.state.previewMode === "pinned" ? "Unpin Preview" : "Pin Preview", action: () => (ws.state.previewMode === "pinned" ? ws.followSelection() : ws.setPreview(file()!)) });
+    items.push({ label: "Hide Preview", action: () => ws.setPreview(null) });
     return items;
   }
 

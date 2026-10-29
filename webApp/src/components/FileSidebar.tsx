@@ -7,8 +7,8 @@ import { isPreviewable, mimeType } from "~/lib/kinds";
 import { cleanName, download, renameSpace, spacePath, zipSpace } from "~/lib/spaces";
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
-import { type FileNode, Workspace } from "~/lib/workspace";
-import { ArrowUpRight, BookOpen, ChevronRight, Copy, Download, Ellipsis, Eye, EyeOff, File, FileCode, FileImage, FilePlus, FileSearch, FileText, Files, Folder, FolderPlus, History, Link, Move, Pencil, Plus, SquareStack, Trash2, Type, Upload, UserPlus } from "./icons";
+import { type FileNode, PREVIEW_NEXT, Workspace } from "~/lib/workspace";
+import { ArrowUpRight, BookOpen, ChevronRight, Copy, Download, Ellipsis, Eye, EyeOff, File, FileCode, FileImage, FilePlus, FileSearch, FileText, Files, Folder, FolderPlus, History, Link, Move, Pencil, Pin, Plus, SquareStack, Trash2, Type, Upload, UserPlus } from "./icons";
 import { SidebarToggle } from "./Sidebar";
 import { type MenuItem, showMenu } from "./Menu";
 import { SyncBadge } from "./SyncBadge";
@@ -119,7 +119,12 @@ export default function FileSidebar(props: { workspace: Workspace }) {
     const items: MenuItem[] = [];
     if (!node.children) items.push({ label: "Open", icon: ArrowUpRight, action: () => void ws.select(node.path) });
     if (isPreviewable(node.path)) {
-      items.push({ label: ws.state.preview === node.path ? "Hide Preview" : "Preview", icon: ws.state.preview === node.path ? EyeOff : Eye, action: () => ws.togglePreview(node.path) });
+      const previewed = ws.state.preview === node.path;
+      items.push({
+        label: previewed ? PREVIEW_NEXT[ws.state.previewMode] : "Preview",
+        icon: previewed ? (ws.state.previewMode === "following" ? Pin : EyeOff) : Eye,
+        action: () => togglePreview(node.path),
+      });
     }
     if (node.kind === "typst") items.push({ label: "Find Usages", icon: FileSearch, action: () => setOverlay({ type: "palette", page: `usages:${node.path}` }) });
     if (!node.children) items.push({ label: "Show History…", icon: History, action: () => showHistory(ws.repoPath(node.path)) });
@@ -214,7 +219,7 @@ export default function FileSidebar(props: { workspace: Workspace }) {
           onDragStart={(e) => e.dataTransfer?.setData(DRAG_TYPE, node.path)}
           {...folderDrop}
           onClick={() => (node.children ? ws.toggleExpanded(node.path) : void ws.select(node.path))}
-          onDblClick={() => !node.children && isPreviewable(node.path) && ws.setPreview(node.path)}
+          onDblClick={() => !node.children && ws.previewSelected(node.path)}
           onContextMenu={(e) => showMenu(e, menuFor(node))}
           title={node.path}
         >
@@ -232,13 +237,15 @@ export default function FileSidebar(props: { workspace: Workspace }) {
             <button
               class="row-action"
               classList={{ active: previewed() }}
-              title={previewed() ? "Hide preview" : "Preview this file"}
+              title={previewed() ? PREVIEW_NEXT[ws.state.previewMode] : "Preview this file"}
               onClick={(e) => {
                 e.stopPropagation();
                 togglePreview(node.path);
               }}
             >
-              <Eye size={14} />
+              <Show when={previewed() && ws.state.previewMode === "pinned"} fallback={<Eye size={14} />}>
+                <Pin size={14} />
+              </Show>
             </button>
           </Show>
         </div>
@@ -269,7 +276,7 @@ export default function FileSidebar(props: { workspace: Workspace }) {
   }
 
   return (
-    <div class="sidebar-content from-right">
+    <div class="sidebar-content">
       <header class="sidebar-header">
         <div class="space-header" classList={{ "drop-target": dropTarget() === "" }} {...dropProps("")} onContextMenu={(e) => showMenu(e, spaceMenu())}>
           <button class="space-title" title="Spaces" onClick={() => toggleSpaces()} onDblClick={() => void renameCurrentSpace(ws)}>

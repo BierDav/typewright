@@ -15,12 +15,43 @@ export { workspace };
 /** The sidebar shows the list of spaces instead of the open space's files, like the Mac app's selector. */
 export const [spacesOpen, setSpacesOpen] = createSignal(false);
 
+/** Live progress of a two-finger swipe between the files (0) and the spaces list (1), like the Mac app's. */
+export const [swipe, setSwipe] = createSignal<number | null>(null);
+
+/** How far the open spaces list reaches past the sidebar, pushing the space aside (the Mac app's `spacesExtra`). */
+export const SPACES_EXTRA = 150;
+
+/** 0 shows the space's files, 1 the spaces list; a swipe pulls it a little past either end. */
+export const spacesProgress = () => swipe() ?? (spacesOpen() ? 1 : 0);
+
 /** The hidden sidebar floating over the space, while the pointer is at the window's left edge. */
 export const [floatingSidebar, setFloatingSidebar] = createSignal(false);
 
 export function toggleSpaces() {
   if (!settings.sidebarVisible && !spacesOpen()) setFloatingSidebar(true);
-  setSpacesOpen((open) => !open);
+  if (spacesOpen()) closeSpaces();
+  else setSpacesOpen(true);
+}
+
+/** Back from the spaces list to the open space; Settings belongs to the list, so it closes too. */
+export function closeSpaces() {
+  setSpacesOpen(false);
+  if (workspace()) setSettingsTab(null);
+}
+
+/** The Settings page, shown in the main area while selected in the spaces list. */
+export const [settingsTab, setSettingsTab] = createSignal<SettingsTab | null>(null);
+
+export function showSettings(tab: SettingsTab = settingsTab() ?? "general") {
+  setOverlay(null);
+  setSpacesOpen(true);
+  setSettingsTab(tab);
+}
+
+/** Leaves Settings for the open space, if there is one. */
+export function closeSettings() {
+  setSettingsTab(null);
+  if (workspace()) setSpacesOpen(false);
 }
 
 /** ⌘S: pins the sidebar, or hides it; a floating one gets pinned where it is. */
@@ -32,6 +63,7 @@ export function toggleSidebar() {
 export function openSpace(folder: string | null) {
   const current = workspace();
   setSpacesOpen(false);
+  setSettingsTab(null);
   if (current?.folder === folder) return;
   current?.dispose();
   setWorkspaceSignal(folder ? new Workspace(folder) : null);
@@ -46,7 +78,6 @@ export function lastSpace(): string | null {
 export type Overlay =
   | { type: "palette"; page?: string }
   | { type: "search"; allSpaces: boolean }
-  | { type: "settings"; tab?: SettingsTab }
   /** `scope` is a repo-relative folder (a space or one inside it); null lists every space. */
   | { type: "deleted"; scope: string | null }
   /** `path` is repo-relative. */

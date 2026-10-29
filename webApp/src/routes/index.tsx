@@ -9,11 +9,11 @@ import PreviewPane from "~/components/PreviewPane";
 import RecentlyDeleted from "~/components/RecentlyDeleted";
 import FileHistory from "~/components/FileHistory";
 import SearchPanel from "~/components/SearchPanel";
-import SettingsWindow from "~/components/Settings";
+import SettingsPage from "~/components/Settings";
 import Sidebar from "~/components/Sidebar";
 import { importFolder, importZip, newSpace } from "~/components/SpacesSidebar";
 import StatusBar, { Issues } from "~/components/StatusBar";
-import { alert, isMac, lastSpace, openSpace, overlay, PENDING_JOIN, setOverlay, toggleSidebar, toggleSpaces, workspace } from "~/lib/app";
+import { alert, closeSpaces, isMac, SPACES_EXTRA, lastSpace, openSpace, overlay, PENDING_JOIN, setOverlay, settingsTab, showSettings, spacesProgress, toggleSidebar, toggleSpaces, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import { loadIdentity } from "~/lib/identity";
@@ -130,7 +130,7 @@ export default function Home() {
       if (overlay()?.type === "palette") closePalette();
       else setOverlay({ type: "palette" });
     } else if (key === "KeyP" && !event.altKey && !event.shiftKey) setOverlay({ type: "palette" });
-    else if (key === "Comma") setOverlay({ type: "settings" });
+    else if (key === "Comma") showSettings();
     else if (key === "KeyF" && event.shiftKey && !event.altKey) setOverlay({ type: "search", allSpaces: false });
     else if (key === "KeyS" && event.shiftKey && !event.altKey) toggleSpaces();
     // Edits save on their own, so ⌘S toggles the sidebar like in the Mac app.
@@ -179,12 +179,26 @@ export default function Home() {
     workspace()?.dispose();
   });
 
+  // The open spaces list reaches past the pinned sidebar and pushes the space aside, as on the Mac. The space
+  // moves without reflowing; Settings and the welcome page are what's shown beside the list, so they make room.
+  const mainShift = () => {
+    const pinned = settings.sidebarVisible || !workspace();
+    const shift = pinned ? SPACES_EXTRA * Math.max(0, workspace() ? spacesProgress() : 1) : 0;
+    return workspace() && !settingsTab() ? { transform: `translateX(${shift}px)` } : { "margin-left": `${shift}px` };
+  };
+
   return (
     <div class="app" classList={{ ready: ready() }}>
       <Sidebar />
-      <main class="main">
-        <Show when={workspace()} keyed fallback={<Show when={ready()}><Welcome /></Show>}>
-          {(ws) => <Space workspace={ws} />}
+      <main class="main" style={mainShift()}>
+        <Show when={!settingsTab()} fallback={<SettingsPage />}>
+          <Show when={workspace()} keyed fallback={<Show when={ready()}><Welcome /></Show>}>
+            {(ws) => <Space workspace={ws} />}
+          </Show>
+          {/* Blurs and darkens the space behind the spaces list; clicking it returns to the space. */}
+          <Show when={workspace() && spacesProgress() > 0}>
+            <div class="space-dimming" style={{ opacity: Math.min(1, spacesProgress()) }} onClick={() => closeSpaces()} />
+          </Show>
         </Show>
       </main>
       <Switch>
@@ -193,9 +207,6 @@ export default function Home() {
         </Match>
         <Match when={overlay()?.type === "search"}>
           <SearchPanel allSpaces={(overlay() as { allSpaces: boolean }).allSpaces} />
-        </Match>
-        <Match when={overlay()?.type === "settings"}>
-          <SettingsWindow />
         </Match>
         <Match when={overlay()?.type === "deleted"}>
           <RecentlyDeleted />

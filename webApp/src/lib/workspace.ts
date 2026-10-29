@@ -23,9 +23,16 @@ export type Diagnostic = DiagnosticJSON & { fromPackage: boolean };
 
 export type EditorState = { anchor: number; head: number; scroll: number };
 
+/** Like the Mac app's: a following preview shows whichever file is selected, a pinned one stays on its file. */
+export type PreviewMode = "hidden" | "following" | "pinned";
+
+/** What the preview toggle does next, for its title. */
+export const PREVIEW_NEXT: Record<PreviewMode, string> = { hidden: "Show Preview", following: "Pin Preview", pinned: "Hide Preview" };
+
 type SpaceState = {
   selected?: string | null;
   preview?: string | null;
+  previewMode?: PreviewMode;
   expanded?: string[];
   editors?: Record<string, EditorState>;
 };
@@ -78,6 +85,7 @@ export class Workspace {
       selectedKind: null as Kind | null,
       text: "",
       preview: (saved?.preview ?? null) as string | null,
+      previewMode: (saved?.previewMode ?? (saved && !saved.preview ? "hidden" : saved ? "pinned" : "following")) as PreviewMode,
       expanded: saved?.expanded ?? ([] as string[]),
       svgPages: null as SvgPage[] | null,
       pdf: null as Uint8Array | null,
@@ -234,6 +242,7 @@ export class Workspace {
     }
     batch(() => {
       this.setState({ selected: path, selectedKind: kind, text, solvengDiagnostics: [] });
+      if (this.state.previewMode === "following") this.updatePreview(isPreviewable(path) ? path : null);
       this.scheduleSolvengCheck(0);
       // Opening a file inside collapsed folders shows it in the sidebar.
       const parents = ancestors(path);
@@ -244,11 +253,57 @@ export class Workspace {
     this.persist();
   }
 
+  /** The eye of a file's row: previews it following the selection, or steps the mode on for the previewed one. */
   togglePreview(path: string) {
-    this.setPreview(this.state.preview === path ? null : path);
+    if (this.state.previewMode === "hidden" || this.state.preview !== path) {
+      this.setPreviewMode("following");
+      this.updatePreview(path);
+    } else this.cyclePreview();
   }
 
+  /** Hidden → following → pinned → hidden, like the Mac app's ⌘-. */
+  cyclePreview() {
+    switch (this.state.previewMode) {
+      case "hidden":
+        this.setPreviewMode("following");
+        this.updatePreview(this.state.selected && isPreviewable(this.state.selected) ? this.state.selected : null);
+        break;
+      case "following":
+        this.setPreviewMode(this.state.preview ? "pinned" : "hidden");
+        break;
+      case "pinned":
+        this.setPreviewMode("hidden");
+        this.updatePreview(null);
+    }
+  }
+
+  /** Double-clicks move a shown preview to the file, following the selection. */
+  previewSelected(path: string) {
+    if (!isPreviewable(path)) return;
+    if (this.state.previewMode === "hidden") this.setPreviewMode("following");
+    this.updatePreview(path);
+  }
+
+  /** Unpins: the preview follows the selection again, moving to the selected file if that can be previewed. */
+  followSelection() {
+    this.setPreviewMode("following");
+    const selected = this.state.selected;
+    if (selected && isPreviewable(selected)) this.updatePreview(selected);
+  }
+
+  /** Pins the preview to a file, or hides it. */
   setPreview(path: string | null) {
+    this.setPreviewMode(path ? "pinned" : "hidden");
+    this.updatePreview(path);
+  }
+
+  private setPreviewMode(mode: PreviewMode) {
+    this.previewChosen = true;
+    this.setState("previewMode", mode);
+    this.persist();
+  }
+
+  private updatePreview(path: string | null) {
     if (path === this.state.preview) return;
     this.previewChosen = true;
     this.generation++;
@@ -672,7 +727,7 @@ export class Workspace {
     // A space joined from elsewhere opens empty; its main file shows once it arrives.
     const main = this.defaultMain();
     if (main && !this.state.selected) await this.select(main);
-    if (main && !this.state.preview && !this.previewChosen) this.setPreview(main);
+    if (main && !this.state.preview && !this.previewChosen) this.previewSelected(main);
     for (const path of changed) {
       if (path === "") continue;
       const info = await fs.stat(fs.join(this.root, path));
@@ -826,6 +881,7 @@ export class Workspace {
     const state: SpaceState = {
       selected: this.state.selected,
       preview: this.state.preview,
+      previewMode: this.state.previewMode,
       expanded: [...this.state.expanded],
       editors: this.editorStates,
     };
