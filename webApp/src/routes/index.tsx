@@ -2,7 +2,6 @@ import { createSignal, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import CommandPalette, { closePalette } from "~/components/CommandPalette";
 import Dialogs from "~/components/Dialogs";
 import Editor from "~/components/Editor";
-import FileSidebar from "~/components/FileSidebar";
 import FileViewer from "~/components/FileViewer";
 import { File as FileIcon, Link, Plus, Upload } from "~/components/icons";
 import { MenuHost } from "~/components/Menu";
@@ -11,9 +10,10 @@ import RecentlyDeleted from "~/components/RecentlyDeleted";
 import FileHistory from "~/components/FileHistory";
 import SearchPanel from "~/components/SearchPanel";
 import SettingsWindow from "~/components/Settings";
-import SpacesSidebar, { importFolder, importZip, newSpace } from "~/components/SpacesSidebar";
+import Sidebar from "~/components/Sidebar";
+import { importFolder, importZip, newSpace } from "~/components/SpacesSidebar";
 import StatusBar, { Issues } from "~/components/StatusBar";
-import { alert, isMac, lastSpace, openSpace, overlay, PENDING_JOIN, setOverlay, spacesOpen, toggleSpaces, workspace } from "~/lib/app";
+import { alert, isMac, lastSpace, openSpace, overlay, PENDING_JOIN, setOverlay, toggleSidebar, toggleSpaces, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import { loadIdentity } from "~/lib/identity";
@@ -118,17 +118,6 @@ function Space(props: { workspace: Workspace }) {
   );
 }
 
-/** The one sidebar, floating over the window like the Mac app's: the space's files, or the list of spaces. */
-function Sidebar() {
-  return (
-    <aside class="sidebar">
-      <Show when={workspace() && !spacesOpen()} fallback={<SpacesSidebar />}>
-        <FileSidebar workspace={workspace()!} />
-      </Show>
-    </aside>
-  );
-}
-
 export default function Home() {
   const [ready, setReady] = createSignal(false);
 
@@ -145,7 +134,7 @@ export default function Home() {
     else if (key === "KeyF" && event.shiftKey && !event.altKey) setOverlay({ type: "search", allSpaces: false });
     else if (key === "KeyS" && event.shiftKey && !event.altKey) toggleSpaces();
     // Edits save on their own, so ⌘S toggles the sidebar like in the Mac app.
-    else if (key === "KeyS" && !event.shiftKey) setSettings("sidebarVisible", (v) => !v);
+    else if (key === "KeyS" && !event.shiftKey) toggleSidebar();
     else if (key === "KeyI" && event.altKey && workspace()?.state.selected) setOverlay({ type: "palette", page: `move:${workspace()!.state.selected}` });
     else if (key === "KeyW" && (isMac ? event.ctrlKey : event.shiftKey)) openSpace(null);
     else handled = false;
@@ -192,9 +181,7 @@ export default function Home() {
 
   return (
     <div class="app" classList={{ ready: ready() }}>
-      <Show when={settings.sidebarVisible || !workspace()}>
-        <Sidebar />
-      </Show>
+      <Sidebar />
       <main class="main">
         <Show when={workspace()} keyed fallback={<Show when={ready()}><Welcome /></Show>}>
           {(ws) => <Space workspace={ws} />}

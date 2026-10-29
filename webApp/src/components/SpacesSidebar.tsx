@@ -6,7 +6,7 @@ import { identity } from "~/lib/identity";
 import { createSpace, deleteSpace, download, importFiles, moveSpace, restoreSpace, spaces, unzip, zipSpace } from "~/lib/spaces";
 import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
-import { Cloud, CloudOff, Download, Folder, Link, Plus, Settings, SquareStack, UserPlus, Users } from "./icons";
+import { ArrowUpRight, Cloud, CloudOff, Download, Folder, FolderPlus, Link, Pencil, Plus, Settings, SquareStack, Trash2, Upload, UserPlus, Users } from "./icons";
 import { SyncBadge } from "./SyncBadge";
 import { renameCurrentSpace } from "./FileSidebar";
 import { type MenuItem, showMenu } from "./Menu";
@@ -69,34 +69,35 @@ async function removeEverywhere(id: string, name: string) {
 
 function spaceMenu(folder: string): MenuItem[] {
   const items: MenuItem[] = [
-    { label: "Open", action: () => openSpace(folder) },
+    { label: "Open", icon: ArrowUpRight, action: () => openSpace(folder) },
     {
       label: "Rename…",
+      icon: Pencil,
       action: () => {
         openSpace(folder);
         const ws = workspace();
         if (ws) void renameCurrentSpace(ws);
       },
     },
-    { label: "Download as Zip", action: async () => download(`${folder}.zip`, await zipSpace(folder), "application/zip") },
+    { label: "Download as Zip", icon: Download, action: async () => download(`${folder}.zip`, await zipSpace(folder), "application/zip") },
     { separator: true },
   ];
-  items.push({ label: "Share…", disabled: !syncService.isRunning(), action: () => void commands.share(folder) });
+  items.push({ label: "Share…", icon: UserPlus, disabled: !syncService.isRunning(), action: () => void commands.share(folder) });
   items.push(
     { separator: true },
-    { label: "Show Recently Deleted", action: () => showRecentlyDeleted(folder) },
-    { label: "Delete Space…", destructive: true, action: () => void removeSpace(folder) },
+    { label: "Show Recently Deleted", icon: Trash2, action: () => showRecentlyDeleted(folder) },
+    { label: "Delete Space…", icon: Trash2, destructive: true, action: () => void removeSpace(folder) },
   );
   return items;
 }
 
 function addMenu(): MenuItem[] {
   return [
-    { label: "New Space…", action: () => void newSpace() },
-    { label: "Import Folder…", action: () => void importFolder() },
-    { label: "Import Zip…", action: () => void importZip() },
+    { label: "New Space…", icon: FolderPlus, action: () => void newSpace() },
+    { label: "Import Folder…", icon: Upload, action: () => void importFolder() },
+    { label: "Import Zip…", icon: Upload, action: () => void importZip() },
     { separator: true },
-    { label: "Join Shared Space…", action: async () => {
+    { label: "Join Shared Space…", icon: Link, action: async () => {
       const folder = await commands.joinFromLink();
       if (folder) openSpace(folder);
     } },
@@ -129,7 +130,7 @@ export default function SpacesSidebar() {
   const [over, setOver] = createSignal<number | null>(null);
 
   return (
-    <div class="sidebar-content">
+    <div class="sidebar-content from-left">
       <header class="sidebar-header">
         <span class="sidebar-title">Spaces</span>
       </header>
@@ -201,9 +202,9 @@ export default function SpacesSidebar() {
                 onClick={() => void fetchSpace(space)}
                 onContextMenu={(e) =>
                   showMenu(e, [
-                    { label: "Download…", action: () => void fetchSpace(space) },
+                    { label: "Download…", icon: Download, action: () => void fetchSpace(space) },
                     { separator: true },
-                    { label: "Remove From All Devices…", destructive: true, action: () => void removeEverywhere(space.id, space.name) },
+                    { label: "Remove From All Devices…", icon: Trash2, destructive: true, action: () => void removeEverywhere(space.id, space.name) },
                   ])
                 }
                 title={`Download “${space.name}” from your other devices`}

@@ -10,6 +10,9 @@
   --orange: #ff9500;
   --green: #34c759;
   --radius: 10px;
+  /* Apple's spring-like curve, for things that slide and grow. */
+  --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
 
   --window: #ececec;
   --surface: #ffffff;
@@ -215,6 +218,10 @@ textarea {
 }
 
 .button {
+  transition:
+    background 0.12s,
+    transform 0.15s var(--ease-spring),
+    box-shadow 0.12s;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -233,6 +240,10 @@ textarea {
 
 .button:hover:not(:disabled) {
   background: var(--surface-2);
+}
+
+.button:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .button:disabled {
@@ -419,20 +430,91 @@ select {
 
 /* MARK: Sidebar */
 
+/* The dock holds the pinned sidebar's room and narrows to nothing as it hides. */
+.sidebar-dock {
+  position: relative;
+  flex-shrink: 0;
+  width: calc(var(--sidebar-width) + 8px);
+  z-index: 20;
+  transition: width 0.34s var(--ease-out);
+}
+
+.sidebar-dock.collapsed {
+  width: 0;
+}
+
+body.resizing .sidebar-dock {
+  transition: none;
+}
+
 /* One floating glass panel inset from the window edge, like the Mac app's sidebar. */
 .sidebar {
-  width: 264px;
-  flex-shrink: 0;
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 8px;
+  width: var(--sidebar-width);
   display: flex;
-  margin: 8px 0 8px 8px;
   border-radius: 16px;
+  transition:
+    transform 0.34s var(--ease-out),
+    opacity 0.24s ease,
+    box-shadow 0.3s ease;
   background: var(--sidebar-glass);
   -webkit-backdrop-filter: blur(30px) saturate(1.6);
   backdrop-filter: blur(30px) saturate(1.6);
   border: 0.5px solid var(--glass-border);
   box-shadow: var(--sidebar-shadow);
   overflow: hidden;
+}
+
+.sidebar:not(.shown) {
+  transform: translateX(calc(-100% - 16px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Hidden, it floats over the space and casts a deeper shadow. */
+.sidebar.floating.shown {
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22), 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+.sidebar-edge {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 19;
+}
+
+.sidebar-resize {
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  right: 0;
+  width: 8px;
+  cursor: col-resize;
   z-index: 2;
+}
+
+.sidebar-resize::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  width: 3px;
+  height: 36px;
+  margin-top: -18px;
+  border-radius: 2px;
+  background: var(--tertiary);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.sidebar-resize:hover::after,
+body.resizing .sidebar-resize::after {
+  opacity: 0.7;
 }
 
 .sidebar-content {
@@ -440,6 +522,41 @@ select {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  animation: sidebar-swap-right 0.32s var(--ease-out);
+}
+
+/* The spaces list comes in from the left, a space's files from the right. */
+.sidebar-content.from-left {
+  animation-name: sidebar-swap-left;
+}
+
+@keyframes sidebar-swap-right {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+}
+
+@keyframes sidebar-swap-left {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+}
+
+.tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: tree-open 0.22s var(--ease-out);
+  transform-origin: top;
+}
+
+@keyframes tree-open {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
 }
 
 .sidebar-header {
@@ -529,7 +646,10 @@ select {
   white-space: nowrap;
   cursor: default;
   user-select: none;
-  transition: background 0.12s, transform 0.15s;
+  transition:
+    background 0.14s,
+    color 0.14s,
+    transform 0.15s var(--ease-spring);
 }
 
 button.tree-row {
@@ -577,7 +697,7 @@ button.tree-row {
 /* Folders swap their icon for the disclosure chevron while hovered. */
 .row-icon .chevron {
   display: none;
-  transition: transform 0.15s;
+  transition: transform 0.22s var(--ease-out);
 }
 
 .tree-row.folder.open .chevron {
@@ -887,6 +1007,8 @@ body.resizing .divider {
 }
 
 .issues {
+  animation: overlay-in 0.2s var(--ease-out);
+  transform-origin: bottom right;
   position: fixed;
   right: 16px;
   bottom: 64px;
@@ -957,8 +1079,60 @@ button.issue:hover:not(:disabled) {
 }
 
 .cm-lineNumbers .cm-gutterElement {
-  padding: 0 10px 0 14px !important;
+  padding: 0 6px 0 14px !important;
   font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Folding chevrons appear while the gutter is hovered; a folded range keeps its own. */
+.cm-foldGutter .cm-gutterElement {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  color: var(--tertiary);
+  cursor: default;
+}
+
+.tw-fold {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 4px;
+  transition:
+    opacity 0.15s,
+    transform 0.2s var(--ease-out),
+    background 0.12s;
+}
+
+.tw-fold.open {
+  transform: rotate(90deg);
+  opacity: 0;
+}
+
+.cm-gutters:hover .tw-fold.open {
+  opacity: 1;
+}
+
+.tw-fold:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.cm-foldPlaceholder {
+  margin: 0 3px;
+  padding: 0 6px;
+  border: none !important;
+  border-radius: 6px;
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
+  font-family: var(--font);
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.cm-placeholder {
+  color: var(--tertiary) !important;
+  font-family: var(--font);
 }
 
 .cm-activeLine {
@@ -968,10 +1142,12 @@ button.issue:hover:not(:disabled) {
 .cm-activeLineGutter {
   background: transparent !important;
   color: var(--text) !important;
+  font-weight: 600;
 }
 
 .cm-selectionBackground {
   background: color-mix(in srgb, var(--accent) 22%, transparent) !important;
+  border-radius: 3px;
 }
 
 .cm-focused .cm-selectionBackground {
@@ -980,15 +1156,32 @@ button.issue:hover:not(:disabled) {
 
 .cm-cursor {
   border-left: 2px solid var(--accent) !important;
+  border-radius: 1px;
+  /* Glides to where it goes instead of jumping. */
+  transition:
+    left 70ms ease-out,
+    top 70ms ease-out;
+}
+
+/* A soft pulse instead of a hard blink. */
+.cm-cursorLayer {
+  animation-timing-function: ease-in-out !important;
 }
 
 .cm-matchingBracket {
   background: color-mix(in srgb, var(--accent) 18%, transparent) !important;
   outline: none !important;
+  border-radius: 3px;
 }
 
 .cm-selectionMatch {
   background: color-mix(in srgb, var(--orange) 22%, transparent) !important;
+}
+
+/* Hovers and F1 docs ease in rather than pop. */
+.cm-tooltip-hover,
+.cm-tooltip:has(> .tw-docs) {
+  animation: popover-in 0.16s var(--ease-out);
 }
 
 /* Uses of the solveng name at the caret. */
@@ -1057,39 +1250,72 @@ button.issue:hover:not(:disabled) {
 .cm-tooltip {
   background: var(--popover) !important;
   border: 0.5px solid var(--popover-border) !important;
-  border-radius: 8px;
+  border-radius: 10px;
   box-shadow: var(--shadow);
   color: var(--text);
   overflow: hidden;
 }
 
-/* Completions look like the Mac app's list: icon, monospaced name, type on the right. */
+/* Completions look like the Mac app's list: tinted kind badge, monospaced name, type on the right. */
+.cm-tooltip.cm-tooltip-autocomplete.tw-completions,
 .cm-tooltip.cm-tooltip-autocomplete {
-  width: 380px;
+  min-width: 280px;
+  max-width: 520px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--popover) 88%, transparent) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  backdrop-filter: blur(24px) saturate(1.8);
+  animation: popover-in 0.14s var(--ease-out);
+  transform-origin: top left;
+}
+
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
 }
 
 .cm-tooltip.cm-tooltip-autocomplete > ul {
   font-family: var(--mono) !important;
-  font-size: 12px;
-  max-height: calc(9 * 22px + 8px) !important;
+  font-size: 12.5px;
+  max-height: calc(10 * 26px + 10px) !important;
   max-width: none !important;
   min-width: 0 !important;
-  padding: 4px !important;
+  padding: 5px !important;
+  scroll-padding: 5px;
+  scrollbar-width: thin;
 }
 
 .cm-tooltip.cm-tooltip-autocomplete > ul > li {
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 22px;
+  gap: 8px;
+  height: 26px;
   padding: 0 8px 0 4px !important;
-  border-radius: 5px;
-  line-height: 22px;
+  border-radius: 7px;
+  line-height: 26px;
+  color: var(--text);
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li:hover:not([aria-selected]) {
+  background: var(--hover);
 }
 
 .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
   background: var(--accent) !important;
   color: white !important;
+}
+
+/* Keys that act on the list, as a quiet footer. */
+.tw-completions::after {
+  content: "↩ or ⇥ insert   ↑↓ choose   esc close";
+  display: block;
+  padding: 5px 12px 6px;
+  border-top: 0.5px solid var(--separator);
+  font: 10.5px var(--font);
+  color: var(--tertiary);
+  white-space: pre;
 }
 
 .cm-completionLabel {
@@ -1102,12 +1328,18 @@ button.issue:hover:not(:disabled) {
 
 .cm-completionMatchedText {
   text-decoration: none !important;
-  font-weight: 600;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+li[aria-selected] .cm-completionMatchedText {
+  color: inherit;
 }
 
 .cm-completionDetail {
   flex: 1;
   margin-left: auto !important;
+  padding-left: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1122,21 +1354,42 @@ li[aria-selected] .cm-completionDetail {
   color: rgba(255, 255, 255, 0.8);
 }
 
+/* The kind's name stands in for a missing detail on the highlighted row. */
+.tw-completion-kind {
+  display: none;
+  margin-left: auto;
+  padding-left: 12px;
+  font: 11px var(--font);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+li[aria-selected]:not(:has(.cm-completionDetail)) .tw-completion-kind {
+  display: inline;
+}
+
 .cm-completionIcon {
+  --kind: var(--secondary);
   flex-shrink: 0;
-  width: 16px !important;
-  height: 16px;
+  width: 18px !important;
+  height: 18px;
   padding: 0 !important;
   margin: 0 !important;
-  border-radius: 4px;
+  border-radius: 5px;
   font-family: var(--font);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
-  line-height: 16px;
+  line-height: 18px;
   text-align: center;
   opacity: 1 !important;
+  color: var(--kind);
+  background: color-mix(in srgb, var(--kind) 16%, transparent);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--kind) 35%, transparent);
+}
+
+li[aria-selected] .cm-completionIcon {
   color: white;
-  background: var(--tertiary);
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: none;
 }
 
 .cm-completionIcon::after {
@@ -1145,45 +1398,48 @@ li[aria-selected] .cm-completionDetail {
 
 .cm-completionIcon-function::after,
 .cm-completionIcon-method::after {
-  content: "f" !important;
+  content: "ƒ" !important;
   font-style: italic;
+  font-family: Georgia, serif;
+  font-size: 12px;
 }
 
 .cm-completionIcon-function,
 .cm-completionIcon-method {
-  background: #0a84ff;
+  --kind: #0a84ff;
 }
 
 .cm-completionIcon-variable::after {
   content: "x" !important;
+  font-style: italic;
 }
 
 .cm-completionIcon-variable {
-  background: #30b0c7;
+  --kind: #30b0c7;
 }
 
 .cm-completionIcon-constant::after {
-  content: "#" !important;
+  content: "π" !important;
 }
 
 .cm-completionIcon-constant {
-  background: #ff9f0a;
+  --kind: #ff9f0a;
 }
 
 .cm-completionIcon-keyword::after {
-  content: "K" !important;
+  content: "#" !important;
 }
 
 .cm-completionIcon-keyword {
-  background: #ff375f;
+  --kind: #ff375f;
 }
 
 .cm-completionIcon-property::after {
-  content: "P" !important;
+  content: ":" !important;
 }
 
 .cm-completionIcon-property {
-  background: #30a14e;
+  --kind: #30a14e;
 }
 
 .cm-completionIcon-type::after,
@@ -1193,20 +1449,20 @@ li[aria-selected] .cm-completionDetail {
 
 .cm-completionIcon-type,
 .cm-completionIcon-class {
-  background: #8e5bd8;
+  --kind: #8e5bd8;
 }
 
 .cm-completionIcon-namespace::after {
   content: "{}" !important;
-  font-size: 9px;
+  font-size: 9.5px;
+}
+
+.cm-completionIcon-namespace {
+  --kind: #a2845e;
 }
 
 .cm-completionIcon-text::after {
   content: "a" !important;
-}
-
-li[aria-selected] .cm-completionIcon {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
 }
 
 /* The selected item's docs beside the list, like F1 on the Mac. */
@@ -1214,7 +1470,8 @@ li[aria-selected] .cm-completionIcon {
   width: 420px;
   max-width: 420px !important;
   padding: 0 !important;
-  margin-left: 4px;
+  margin-left: 6px;
+  border-radius: 11px;
 }
 
 .cm-tooltip.cm-completionInfo.cm-completionInfo-left {
@@ -1559,6 +1816,21 @@ li[aria-selected] .cm-completionIcon {
   overflow: hidden;
 }
 
+/* Dark pages: inverted, with hues turned back so colours stay recognisable; pictures flip back to themselves. */
+.dark-pages .svg-page,
+.dark-pages .pdf-frame {
+  filter: invert(0.92) hue-rotate(180deg);
+}
+
+.dark-pages .svg-page image {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+.svg-page,
+.pdf-frame {
+  transition: filter 0.3s ease;
+}
+
 .svg-page svg {
   display: block;
   width: 100%;
@@ -1612,6 +1884,7 @@ li[aria-selected] .cm-completionIcon {
 }
 
 .empty-state {
+  animation: fade-in 0.3s ease-out;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -1697,6 +1970,38 @@ li[aria-selected] .cm-completionIcon {
   background: var(--surface);
 }
 
+.welcome > * {
+  animation: welcome-in 0.5s var(--ease-out) backwards;
+}
+
+.welcome > :nth-child(2) {
+  animation-delay: 0.05s;
+}
+
+.welcome > :nth-child(3) {
+  animation-delay: 0.1s;
+}
+
+.welcome > :nth-child(n + 4) {
+  animation-delay: 0.15s;
+}
+
+.welcome > img {
+  filter: drop-shadow(0 10px 24px rgba(0, 0, 0, 0.18));
+  transition: transform 0.4s var(--ease-spring);
+}
+
+.welcome > img:hover {
+  transform: scale(1.05) rotate(-2deg);
+}
+
+@keyframes welcome-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
 .welcome h1 {
   margin: 8px 0 0;
   font-size: 26px;
@@ -1728,6 +2033,36 @@ li[aria-selected] .cm-completionIcon {
   justify-content: center;
   padding-top: 12vh;
   background: rgba(0, 0, 0, 0.08);
+  animation: fade-in 0.18s ease-out;
+}
+
+/* Palettes, sheets and dialogs grow in slightly, like Mac popovers. */
+.overlay-backdrop > .glass {
+  animation: overlay-in 0.22s var(--ease-out);
+}
+
+.dialog-backdrop > .dialog {
+  animation: dialog-in 0.28s var(--ease-spring);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
 }
 
 .dialog-backdrop {
@@ -1794,6 +2129,10 @@ li[aria-selected] .cm-completionIcon {
   background: transparent;
   text-align: left;
   cursor: default;
+}
+
+.palette-row {
+  transition: background 0.1s;
 }
 
 .palette-row.selected {
@@ -2155,63 +2494,120 @@ li[aria-selected] .cm-completionIcon {
   z-index: 55;
 }
 
+/* Like macOS menus: translucent, rounded, grows from the corner at the pointer. */
 .menu {
   position: fixed;
   z-index: 56;
-  min-width: 200px;
+  min-width: 220px;
+  max-width: 340px;
   padding: 5px;
-  border-radius: 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--popover) 82%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  backdrop-filter: blur(24px) saturate(1.8);
+  border: 0.5px solid var(--popover-border);
+  box-shadow: var(--shadow);
+  outline: none;
+  user-select: none;
+  animation: menu-in 0.16s var(--ease-out);
+}
+
+.menu.leaving {
+  pointer-events: none;
+  animation: menu-out 0.14s ease-in forwards;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+}
+
+@keyframes menu-out {
+  to {
+    opacity: 0;
+  }
 }
 
 .menu-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
-  padding: 4px 10px;
+  height: 26px;
+  padding: 0 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
+  font-size: 13px;
   text-align: left;
   white-space: nowrap;
   cursor: default;
 }
 
-.menu-item:hover:not(:disabled) {
-  background: var(--accent);
-  color: white;
+.menu-item.active {
+  background: var(--selected);
 }
 
 .menu-item:disabled {
-  opacity: 0.4;
+  opacity: 0.38;
 }
 
 .menu-item.destructive {
   color: var(--red);
 }
 
-.menu-item.destructive:hover {
+.menu-item.destructive.active {
   background: var(--red);
   color: white;
 }
 
-.menu-item > span:not(.menu-check):not(.menu-shortcut) {
+.menu-label {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.menu-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex-shrink: 0;
+  color: var(--secondary);
+}
+
+.menu-item.destructive .menu-icon,
+.menu-item.active .menu-icon {
+  color: inherit;
+}
+
+.menu-item.destructive.active .menu-icon {
+  color: white;
 }
 
 .menu-shortcut {
-  margin-left: 16px;
+  margin-left: 20px;
+  color: var(--tertiary);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.menu-item.active .menu-shortcut {
   color: var(--secondary);
 }
 
 .menu-check {
-  width: 12px;
+  display: inline-flex;
+  width: 14px;
   flex-shrink: 0;
-  font-size: 12px;
 }
 
 .menu-header {
-  padding: 4px 10px 2px;
+  padding: 6px 10px 3px;
   font-size: 11px;
   font-weight: 600;
   color: var(--secondary);
@@ -2284,11 +2680,6 @@ li[aria-selected] .cm-completionIcon {
   }
 }
 
-@media (max-width: 900px) {
-  .sidebar {
-    width: 220px;
-  }
-}
 
 /* Groups controls so one `disabled` covers them, without a fieldset's frame. */
 fieldset.plain {
@@ -2576,4 +2967,54 @@ fieldset.plain:disabled {
 
 .tree:focus {
   outline: none;
+}
+
+/* Motion stays for meaning only when it's asked to be reduced. */
+/* MARK: Desktop app on macOS */
+
+/* The window buttons sit in the sidebar's top corner, like the Mac app's; the header makes room and drags the window. */
+.desktop-mac .sidebar-header {
+  padding-left: 82px;
+  -webkit-app-region: drag;
+}
+
+.desktop-mac .sidebar-header > * {
+  -webkit-app-region: no-drag;
+}
+
+/* The spaces list's title sits beside the buttons too. */
+.desktop-mac .sidebar-title {
+  padding-left: 4px;
+}
+
+/* A strip along the window's top edge to drag it by, as a title bar would. */
+.desktop-mac .main {
+  position: relative;
+}
+
+.desktop-mac .main::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 10px;
+  z-index: 5;
+  -webkit-app-region: drag;
+}
+
+.desktop-mac .overlay-backdrop,
+.desktop-mac .menu,
+.desktop-mac .menu-backdrop {
+  -webkit-app-region: no-drag;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

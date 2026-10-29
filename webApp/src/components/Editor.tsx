@@ -1,7 +1,7 @@
-import { closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { acceptCompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+import { defaultKeymap, history, historyKeymap, indentWithTab, selectAll } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
-import { bracketMatching, HighlightStyle, indentOnInput, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
+import { bracketMatching, codeFolding, foldGutter, foldKeymap, HighlightStyle, indentOnInput, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
 import { type Diagnostic as LintDiagnostic, lintGutter, lintKeymap, setDiagnostics } from "@codemirror/lint";
 import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
 import { Compartment, EditorSelection, EditorState, type Extension } from "@codemirror/state";
@@ -15,14 +15,16 @@ import {
   highlightSpecialChars,
   keymap,
   lineNumbers,
+  placeholder,
   rectangularSelection,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { vim } from "@replit/codemirror-vim";
 import { createEffect, on, onCleanup, onMount } from "solid-js";
-import { setEditorView } from "~/lib/app";
+import { isMac, setEditorView, shortcut } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { colorSwatches } from "~/lib/editor/colors";
+import { typstFolding } from "~/lib/editor/folding";
 import { refreshHighlights, typstHighlighting } from "~/lib/editor/highlight";
 import { typstLanguage } from "~/lib/editor/language";
 import { liveEditing } from "~/lib/editor/live";
@@ -32,6 +34,8 @@ import { isEditable, isMarkdown } from "~/lib/kinds";
 import { settings } from "~/lib/settings";
 import { extension } from "~/lib/storage";
 import type { Workspace } from "~/lib/workspace";
+import { ArrowUpRight, BookOpen, ClipboardPaste, Copy, Pencil, Replace, Scissors, Search, SquareFunction, TextSelect, Variable, WandSparkles } from "./icons";
+import { type MenuItem, showMenu } from "./Menu";
 
 /** Typst for CodeMirror's commands: comments, brackets and indentation; colours come from typst itself. */
 const typstSyntax = StreamLanguage.define({
@@ -59,10 +63,69 @@ const markdownStyle = HighlightStyle.define([
 function languageFor(path: string): Extension {
   const ext = extension(path);
   if (ext === "typ" || ext === "typc") {
-    return [typing("typst"), typstSyntax, typstHighlighting(ext === "typc", commands.languageContext().solvengContext), typstLanguage(commands.languageContext()), colorSwatches];
+    return [typing("typst"), typstSyntax, typstFolding, typstHighlighting(ext === "typc", commands.languageContext().solvengContext), typstLanguage(commands.languageContext()), colorSwatches];
   }
   if (isMarkdown(path)) return [typing("markdown"), markdown(), syntaxHighlighting(markdownStyle)];
   return [typing("")];
+}
+
+/** A chevron like the file tree's, shown while the gutter is hovered or the range is folded. */
+function foldMarker(open: boolean): HTMLElement {
+  const el = document.createElement("span");
+  el.className = open ? "tw-fold open" : "tw-fold";
+  el.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>`;
+  return el;
+}
+
+/** Cut, copy and paste plus the language's commands, at the pointer. */
+function contextMenu(event: MouseEvent, view: EditorView, path: string) {
+  // A click outside the selection moves the caret there first, as native editors do.
+  const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+  const main = view.state.selection.main;
+  if (pos !== null && (pos < main.from || pos > main.to)) view.dispatch({ selection: { anchor: pos } });
+  const selected = !view.state.selection.main.empty;
+  const readOnly = view.state.readOnly;
+  const typst = extension(path) === "typ";
+  const copy = async (cut: boolean) => {
+    const { from, to } = view.state.selection.main;
+    await navigator.clipboard.writeText(view.state.sliceDoc(from, to)).catch(() => undefined);
+    if (cut) view.dispatch({ changes: { from, to }, userEvent: "delete.cut" });
+    view.focus();
+  };
+  const items: MenuItem[] = [
+    { label: "Cut", icon: Scissors, shortcut: shortcut("⌘X"), disabled: !selected || readOnly, action: () => void copy(true) },
+    { label: "Copy", icon: Copy, shortcut: shortcut("⌘C"), disabled: !selected, action: () => void copy(false) },
+    {
+      label: "Paste",
+      icon: ClipboardPaste,
+      shortcut: shortcut("⌘V"),
+      disabled: readOnly,
+      action: async () => {
+        const text = await navigator.clipboard.readText().catch(() => null);
+        if (text) view.dispatch(view.state.replaceSelection(text), { userEvent: "input.paste", scrollIntoView: true });
+        view.focus();
+      },
+    },
+    { label: "Select All", icon: TextSelect, shortcut: shortcut("⌘A"), action: () => (selectAll(view), view.focus()) },
+    { separator: true },
+  ];
+  if (typst) {
+    items.push(
+      { label: "Go to Definition", icon: ArrowUpRight, shortcut: "F12", action: () => commands.definition() },
+      { label: "Show Documentation", icon: BookOpen, shortcut: "F1", action: () => commands.quickDocs() },
+      { separator: true },
+      { label: "Rename Symbol…", icon: Pencil, shortcut: "F2", disabled: readOnly, action: () => commands.rename() },
+      { label: "Extract Variable", icon: Variable, shortcut: shortcut("⌘⌥V"), disabled: readOnly, action: () => void commands.extractVariable() },
+      { label: "Extract Function", icon: SquareFunction, shortcut: shortcut("⌘⌥M"), disabled: readOnly, action: () => void commands.extractFunction() },
+      { label: "Format Document", icon: WandSparkles, shortcut: shortcut("⌘⌥L"), disabled: readOnly, action: () => void commands.formatDocument() },
+      { separator: true },
+    );
+  }
+  items.push(
+    { label: "Find…", icon: Search, shortcut: shortcut("⌘F"), action: () => commands.find() },
+    { label: "Find and Replace…", icon: Replace, shortcut: shortcut("⌘⌥F"), disabled: readOnly, action: () => commands.find(true) },
+  );
+  showMenu(event, items);
 }
 
 function theme(): Extension {
@@ -112,6 +175,8 @@ export default function Editor(props: { workspace: Workspace }) {
     return [
       vimSlot.of(settings.vim ? vim() : []),
       lineNumbers(),
+      codeFolding({ placeholderText: "…" }),
+      foldGutter({ markerDOM: foldMarker }),
       highlightActiveLineGutter(),
       highlightSpecialChars(),
       history(),
@@ -127,7 +192,10 @@ export default function Editor(props: { workspace: Workspace }) {
       highlightSelectionMatches(),
       search({ top: true }),
       lintGutter(),
+      placeholder(isMarkdown(path) ? "Start writing…" : extension(path) === "typ" ? `Start writing, or press ${isMac ? "⌃Space" : "Ctrl+Space"} for completions…` : ""),
       keymap.of([
+        // Tab takes the highlighted completion; without a list it indents.
+        { key: "Tab", run: acceptCompletion },
         { key: "Mod-Alt-l", run: () => (void commands.formatDocument(), true) },
         { key: "Shift-F6", run: () => (commands.rename(), true) },
         { key: "F2", run: () => (commands.rename(), true) },
@@ -143,6 +211,7 @@ export default function Editor(props: { workspace: Workspace }) {
         ...historyKeymap,
         ...completionKeymap,
         ...lintKeymap,
+        ...foldKeymap,
         indentWithTab,
       ]),
       language.of(languageFor(path)),
@@ -167,6 +236,12 @@ export default function Editor(props: { workspace: Workspace }) {
       }),
       EditorView.domEventHandlers({
         scroll: () => rememberState(),
+        contextmenu: (event, view) => {
+          // ⇧ right-click keeps the browser's own menu, for spelling suggestions and the like.
+          if (event.shiftKey) return false;
+          contextMenu(event, view, path);
+          return true;
+        },
         paste: (event, view) => {
           const files = images(event.clipboardData);
           if (!files.length) return false;

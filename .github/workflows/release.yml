@@ -21,6 +21,8 @@ concurrency: release
 jobs:
   release:
     runs-on: xcode-27
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,3 +109,86 @@ jobs:
           git add Casks
           git commit -m "typewright $VERSION"
           git push
+
+  # The web app built once for the desktop app, served from app://typewright/ at the root.
+  desktop-web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            sharedCore -> ../.build/cargo-wasm
+            irohBridge -> ../.build/cargo-wasm
+            typstBridge -> ../.build/cargo-wasm
+            jjBridge -> ../.build/cargo-wasi
+      - name: Find wasm-bindgen version
+        id: bindgen
+        run: echo "version=$(grep -m1 -o 'wasm-bindgen = "=[0-9.]*"' irohBridge/Cargo.toml | grep -o '[0-9.]*[0-9]')" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.bindgen.outputs.version }}
+      - name: Install binaryen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo WebAssembly/binaryen --pattern '*-x86_64-linux.tar.gz' --dir "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/binaryen"
+          tar -xzf "$RUNNER_TEMP"/binaryen-*.tar.gz -C "$RUNNER_TEMP/binaryen" --strip-components 1
+          echo "$RUNNER_TEMP/binaryen/bin" >> "$GITHUB_PATH"
+      - name: Update solveng to its latest main
+        run: scripts/update-solveng.sh
+      - name: Build Rust core and bridges for wasm
+        run: scripts/build-webApp-wasm.sh
+      - uses: oven-sh/setup-bun@v2
+      - name: Build
+        working-directory: webApp
+        env:
+          TYPEWRIGHT_WEB_BASE: /
+        run: |
+          bun install --frozen-lockfile
+          bun run --bun build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-web
+          path: webApp/.output/public
+
+  # Installers for Windows, Linux and macOS, attached to the release the Mac app created.
+  desktop:
+    needs: [release, desktop-web]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-web
+          path: desktopApp/web
+      - name: Install rpm tooling
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - name: Build
+        shell: bash
+        env:
+          # macOS builds are signed and notarized with the Mac app's Developer ID.
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.DEVELOPER_ID_P12 || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.DEVELOPER_ID_P12_PASSWORD || '' }}
+          APPLE_ID: ${{ runner.os == 'macOS' && secrets.NOTARY_APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ runner.os == 'macOS' && secrets.NOTARY_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.NOTARY_TEAM_ID || '' }}
+        run: scripts/build-desktopApp.sh '${{ needs.release.outputs.version }}' --skip-web
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(desktopApp/dist/Typewright-*.{dmg,zip,exe,AppImage,deb,rpm})
+          gh release upload "v${{ needs.release.outputs.version }}" "${files[@]}" --clobber

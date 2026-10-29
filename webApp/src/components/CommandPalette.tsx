@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, type JSX, on, onCleanup, onMount, Show, untrack } from "solid-js";
-import { editorView, openSpace, overlay, setOverlay, shortcut, showHistory, showRecentlyDeleted, spacesOpen, toggleSpaces, workspace } from "~/lib/app";
+import { editorView, openSpace, toggleSidebar, overlay, setOverlay, shortcut, showHistory, showRecentlyDeleted, spacesOpen, toggleSpaces, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { fuzzyScore } from "~/lib/core";
 import { symbolAt } from "~/lib/editor/refactor";
@@ -295,7 +295,15 @@ async function rootItems(): Promise<Item[]> {
     items.push(
       { id: "space.rename", title: `Rename ${ws.name}…`, section: "Space", action: { run: () => void renameCurrentSpace(ws) } },
       { id: "space.zip", title: `Download ${ws.name} as Zip`, section: "Space", action: { run: async () => download(`${ws.folder}.zip`, await zipSpace(ws.folder), "application/zip") } },
-      { id: "space.sidebar", title: settings.sidebarVisible ? "Hide Sidebar" : "Show Sidebar", section: "Space", shortcut: shortcut("⌘S"), action: { run: () => setSettings("sidebarVisible", (v) => !v) } },
+      { id: "space.sidebar", title: settings.sidebarVisible ? "Hide Sidebar" : "Keep Sidebar Open", keywords: ["show sidebar", "pin sidebar"], section: "Space", shortcut: shortcut("⌘S"), action: { run: () => toggleSidebar() } },
+      { id: "preview.dark", title: settings.previewDark ? "Show Preview Pages Light" : "Show Preview Pages Dark", keywords: ["dark mode", "night", "invert"], section: "Space", action: { run: () => setSettings("previewDark", (v) => !v) } },
+      ...(["system", "light", "dark"] as const).map((theme) => ({
+        id: `appearance.${theme}`,
+        title: `Appearance: ${theme === "system" ? "Match System" : theme === "light" ? "Light" : "Dark"}`,
+        keywords: ["theme", "dark mode", "light mode"],
+        section: "Space",
+        action: { run: () => setSettings("theme", theme) },
+      })),
       { id: "space.preview", title: settings.split > 0 ? "Hide Preview Pane" : "Show Preview Pane", section: "Space", action: { run: () => setSettings("split", (v) => (v > 0 ? 0 : 0.5)) } },
       { id: "space.close", title: `Close ${ws.name}`, section: "Space", shortcut: shortcut("⌃⌘W"), action: { run: () => openSpace(null) } },
     );

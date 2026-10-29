@@ -8,7 +8,8 @@ import { cleanName, download, renameSpace, spacePath, zipSpace } from "~/lib/spa
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
 import { type FileNode, Workspace } from "~/lib/workspace";
-import { BookOpen, ChevronRight, Ellipsis, Eye, File, FileCode, FileImage, FileText, Folder, Plus, SquareStack, Type } from "./icons";
+import { ArrowUpRight, BookOpen, ChevronRight, Copy, Download, Ellipsis, Eye, EyeOff, File, FileCode, FileImage, FilePlus, FileSearch, FileText, Files, Folder, FolderPlus, History, Link, Move, Pencil, Plus, SquareStack, Trash2, Type, Upload, UserPlus } from "./icons";
+import { SidebarToggle } from "./Sidebar";
 import { type MenuItem, showMenu } from "./Menu";
 import { SyncBadge } from "./SyncBadge";
 
@@ -116,52 +117,53 @@ export default function FileSidebar(props: { workspace: Workspace }) {
   function menuFor(node: FileNode): MenuItem[] {
     const dir = node.children ? node.path : fs.dirname(node.path);
     const items: MenuItem[] = [];
-    if (!node.children) items.push({ label: "Open", action: () => void ws.select(node.path) });
+    if (!node.children) items.push({ label: "Open", icon: ArrowUpRight, action: () => void ws.select(node.path) });
     if (isPreviewable(node.path)) {
-      items.push({ label: ws.state.preview === node.path ? "Hide Preview" : "Preview", action: () => ws.togglePreview(node.path) });
+      items.push({ label: ws.state.preview === node.path ? "Hide Preview" : "Preview", icon: ws.state.preview === node.path ? EyeOff : Eye, action: () => ws.togglePreview(node.path) });
     }
-    if (node.kind === "typst") items.push({ label: "Find Usages", action: () => setOverlay({ type: "palette", page: `usages:${node.path}` }) });
-    if (!node.children) items.push({ label: "Show History…", action: () => showHistory(ws.repoPath(node.path)) });
+    if (node.kind === "typst") items.push({ label: "Find Usages", icon: FileSearch, action: () => setOverlay({ type: "palette", page: `usages:${node.path}` }) });
+    if (!node.children) items.push({ label: "Show History…", icon: History, action: () => showHistory(ws.repoPath(node.path)) });
     items.push(
       { separator: true },
-      { label: "New File Here…", action: () => void newFile(dir) },
-      { label: "New Folder Here…", action: () => void newFolder(dir) },
-      { label: "Upload Files Here…", action: () => void upload(dir) },
+      { label: "New File Here…", icon: FilePlus, action: () => void newFile(dir) },
+      { label: "New Folder Here…", icon: FolderPlus, action: () => void newFolder(dir) },
+      { label: "Upload Files Here…", icon: Upload, action: () => void upload(dir) },
       { separator: true },
-      { label: "Rename…", action: () => void rename(node) },
-      { label: "Move To…", action: () => void moveTo(node) },
-      { label: "Copy Relative Path", action: () => void copyText(node.path, "Path copied") },
-      { label: node.children ? "Download as Zip" : "Download", action: () => void save(node) },
-      { label: "Duplicate", action: () => void ws.duplicate(node.path).then(focusTree) },
+      { label: "Rename…", icon: Pencil, action: () => void rename(node) },
+      { label: "Move To…", icon: Move, action: () => void moveTo(node) },
+      { label: "Copy Relative Path", icon: Copy, action: () => void copyText(node.path, "Path copied") },
+      { label: node.children ? "Download as Zip" : "Download", icon: Download, action: () => void save(node) },
+      { label: "Duplicate", icon: Files, action: () => void ws.duplicate(node.path).then(focusTree) },
       { separator: true },
     );
-    if (node.children) items.push({ label: "Show Recently Deleted in This Folder", action: () => showRecentlyDeleted(ws.repoPath(node.path)) });
+    if (node.children) items.push({ label: "Show Recently Deleted in This Folder", icon: Trash2, action: () => showRecentlyDeleted(ws.repoPath(node.path)) });
     items.push(
-      { label: "Share…", disabled: !syncService.isRunning(), action: () => void commands.share(ws.repoPath(node.path)) },
+      { label: "Share…", icon: UserPlus, disabled: !syncService.isRunning(), action: () => void commands.share(ws.repoPath(node.path)) },
       { separator: true },
-      { label: "Delete", destructive: true, action: () => void remove(node) },
+      { label: "Delete", icon: Trash2, destructive: true, action: () => void remove(node) },
     );
     return items;
   }
 
   function spaceMenu(): MenuItem[] {
     return [
-      { label: "New File…", action: () => void newFile() },
-      { label: "New Folder…", action: () => void newFolder() },
-      { label: "Upload Files…", action: () => void upload() },
+      { label: "New File…", icon: FilePlus, action: () => void newFile() },
+      { label: "New Folder…", icon: FolderPlus, action: () => void newFolder() },
+      { label: "Upload Files…", icon: Upload, action: () => void upload() },
       {
         label: "Upload Folder…",
+        icon: Upload,
         action: async () => {
           const files = await pickFiles({ directory: true });
           if (files.length) await ws.importFiles("", files);
         },
       },
       { separator: true },
-      { label: "Rename Space…", action: () => void renameCurrentSpace(ws) },
-      { label: "Show Recently Deleted", action: () => showRecentlyDeleted(ws.folder) },
-      { label: "Download Space as Zip", action: async () => download(`${ws.folder}.zip`, await zipSpace(ws.folder), "application/zip") },
+      { label: "Rename Space…", icon: Pencil, action: () => void renameCurrentSpace(ws) },
+      { label: "Show Recently Deleted", icon: Trash2, action: () => showRecentlyDeleted(ws.folder) },
+      { label: "Download Space as Zip", icon: Download, action: async () => download(`${ws.folder}.zip`, await zipSpace(ws.folder), "application/zip") },
       { separator: true },
-      { label: "Share…", disabled: !syncService.isRunning(), action: () => void commands.share(ws.folder) },
+      { label: "Share…", icon: UserPlus, disabled: !syncService.isRunning(), action: () => void commands.share(ws.folder) },
     ];
   }
 
@@ -241,7 +243,9 @@ export default function FileSidebar(props: { workspace: Workspace }) {
           </Show>
         </div>
         <Show when={node.children && open()}>
-          <For each={node.children}>{(child) => <Row node={child} depth={rowProps.depth + 1} />}</For>
+          <div class="tree-children">
+            <For each={node.children}>{(child) => <Row node={child} depth={rowProps.depth + 1} />}</For>
+          </div>
         </Show>
       </>
     );
@@ -249,12 +253,13 @@ export default function FileSidebar(props: { workspace: Workspace }) {
 
   function createMenu(): MenuItem[] {
     return [
-      { label: "New File…", action: () => void newFile() },
-      { label: "New Folder…", action: () => void newFolder() },
+      { label: "New File…", icon: FilePlus, action: () => void newFile() },
+      { label: "New Folder…", icon: FolderPlus, action: () => void newFolder() },
       { separator: true },
-      { label: "Upload Files…", action: () => void upload() },
+      { label: "Upload Files…", icon: Upload, action: () => void upload() },
       {
         label: "Upload Folder…",
+        icon: Upload,
         action: async () => {
           const files = await pickFiles({ directory: true });
           if (files.length) await ws.importFiles("", files);
@@ -264,7 +269,7 @@ export default function FileSidebar(props: { workspace: Workspace }) {
   }
 
   return (
-    <div class="sidebar-content">
+    <div class="sidebar-content from-right">
       <header class="sidebar-header">
         <div class="space-header" classList={{ "drop-target": dropTarget() === "" }} {...dropProps("")} onContextMenu={(e) => showMenu(e, spaceMenu())}>
           <button class="space-title" title="Spaces" onClick={() => toggleSpaces()} onDblClick={() => void renameCurrentSpace(ws)}>
@@ -301,6 +306,7 @@ export default function FileSidebar(props: { workspace: Workspace }) {
         <button class="round-button" title={`Spaces (${isMac ? "⇧⌘S" : "Ctrl+Shift+S"})`} onClick={() => toggleSpaces()}>
           <SquareStack size={15} />
         </button>
+        <SidebarToggle />
         <div class="spacer" />
         <button class="round-button" title="New file or folder" onClick={(e) => showMenu(e, createMenu())}>
           <Plus size={16} />

@@ -22,6 +22,10 @@ Typewright needs macOS 26 or newer. On first launch it downloads the official Ty
 
 [bierdav.github.io/typewright](https://bierdav.github.io/typewright/) runs Typewright in the browser. Spaces stay in the browser's storage and sync with your Mac through the same passkey.
 
+## Windows, Linux and macOS
+
+Every release also carries the desktop app, the web app in its own window: `Typewright-<version>-win-x64.exe` (and `arm64`), `.AppImage`, `.deb` and `.rpm` for Linux, and `.dmg` for Macs before macOS 26. Download them from [Releases](https://github.com/BierDav/typewright/releases). Spaces stay on the device; sign in with your account key (Settings › Devices) to sync, since passkeys only work on the website and in the Mac app.
+
 ## Command line
 
 The Mac app also runs headlessly with `Typewright.app/Contents/MacOS/Typewright --cli`. Opening the app creates a wrapper at `.jj/typewright/bin/typewright` in the library root:
@@ -49,6 +53,8 @@ For the web app, also install [Bun](https://bun.sh) and Homebrew's `llvm`, then:
 scripts/build-webApp-wasm.sh
 cd webApp && bun install && bun run dev
 ```
+
+The desktop app runs with `scripts/run-desktopApp.sh`; `scripts/build-desktopApp.sh <version>` builds its installers for the current platform.
 
 ## License
 

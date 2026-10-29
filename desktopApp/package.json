@@ -1,0 +1,20 @@
+{
+  "name": "typewright-desktop",
+  "productName": "Typewright",
+  "version": "0.0.0",
+  "description": "Write Typst with a live preview.",
+  "author": "David Emanuel Bieregger",
+  "homepage": "https://github.com/BierDav/typewright",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "bunx --bun electron .",
+    "dist": "bunx --bun electron-builder --publish never"
+  },
+  "devDependencies": {
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0"
+  }
+}

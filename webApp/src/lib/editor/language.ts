@@ -37,6 +37,28 @@ const KIND: Record<string, Completion["type"]> = {
 
 let indexRequested = false;
 
+const KIND_NAMES: Record<string, string> = {
+  function: "Function",
+  method: "Method",
+  variable: "Variable",
+  constant: "Constant",
+  keyword: "Keyword",
+  property: "Parameter",
+  type: "Type",
+  class: "Type",
+  namespace: "Package",
+  text: "Value",
+};
+
+function kindLabel(completion: Completion): HTMLElement | null {
+  const name = KIND_NAMES[completion.type ?? ""];
+  if (!name) return null;
+  const el = document.createElement("span");
+  el.className = "tw-completion-kind";
+  el.textContent = name;
+  return el;
+}
+
 /** Named arguments of the call at the caret, for any function (`parameters.rs` in the typst bridge). */
 type Parameters = {
   from: number;
@@ -318,7 +340,15 @@ export function typstLanguage(context: LanguageContext) {
   return [
     occurrenceField,
     occurrences(context),
-    autocompletion({ override: [completionSource(context)], activateOnTypingDelay: 60, icons: true }),
+    autocompletion({
+      override: [completionSource(context)],
+      activateOnTypingDelay: 60,
+      icons: true,
+      maxRenderedOptions: 80,
+      tooltipClass: () => "tw-completions",
+      // The kind's name under the icon, read by screen readers and shown as a tooltip.
+      addToOptions: [{ render: (completion) => kindLabel(completion), position: 90 }],
+    }),
     fenceClosing,
     hover(context),
     docsField,

@@ -5,7 +5,7 @@ import { compiler } from "~/lib/compiler";
 import { isEditable, isMarkdown } from "~/lib/kinds";
 import { basename } from "~/lib/storage";
 import type { Workspace } from "~/lib/workspace";
-import { isMac } from "~/lib/app";
+import { isMac, toggleSidebar } from "~/lib/app";
 import { setSettings, settings } from "~/lib/settings";
 import { CircleAlert, CircleCheck, CircleX, Eye, PanelLeft, PanelRight, TriangleAlert, Users } from "./icons";
 
@@ -30,7 +30,7 @@ export default function StatusBar(props: { workspace: Workspace }) {
   return (
     <footer class="status-bar">
       <Show when={!settings.sidebarVisible}>
-        <button class="status-button" title={`Show sidebar (${isMac ? "⌘S" : "Ctrl+S"})`} onClick={() => setSettings("sidebarVisible", true)}>
+        <button class="status-button" title={`Keep Sidebar Open (${isMac ? "⌘S" : "Ctrl+S"})`} onClick={() => toggleSidebar()}>
           <PanelLeft size={13} />
         </button>
       </Show>

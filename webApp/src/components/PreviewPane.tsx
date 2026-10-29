@@ -5,7 +5,7 @@ import { isDark, type RenderMode, setSettings, settings } from "~/lib/settings";
 import type { Workspace } from "~/lib/workspace";
 import { isMarkdown, isPreviewable } from "~/lib/kinds";
 import { basename } from "~/lib/storage";
-import { Ellipsis, ZoomIn, ZoomOut } from "./icons";
+import { Ellipsis, Moon, Sun, ZoomIn, ZoomOut } from "./icons";
 import { type MenuItem, showMenu } from "./Menu";
 
 const ZOOMS = [0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
@@ -205,13 +205,14 @@ export default function PreviewPane(props: { workspace: Workspace }) {
       for (const f of previewable()) items.push({ label: f.path, checked: f.path === file(), action: () => ws.setPreview(f.path) });
       items.push({ separator: true });
     }
+    if (isTypst()) items.push({ label: "Dark Pages", checked: settings.previewDark, action: () => setSettings("previewDark", (v) => !v) }, { separator: true });
     if (isTypst()) items.push({ label: "Export PDF…", action: () => void commands.exportPDF() });
     items.push({ label: "Hide Preview", action: () => setSettings("split", 0) });
     return items;
   }
 
   return (
-    <section class="preview">
+    <section class="preview" classList={{ "dark-pages": settings.previewDark && isTypst() }}>
       <div class="preview-body">
         <Switch
           fallback={
@@ -325,6 +326,19 @@ export default function PreviewPane(props: { workspace: Workspace }) {
         </Show>
         <Show when={zoomable() || ws.state.compiling}>
           <span class="bar-separator" />
+        </Show>
+        <Show when={isTypst()}>
+          <button
+            class="icon-button"
+            classList={{ active: settings.previewDark }}
+            title={settings.previewDark ? "Show pages light" : "Show pages dark"}
+            aria-pressed={settings.previewDark}
+            onClick={() => setSettings("previewDark", (v) => !v)}
+          >
+            <Show when={settings.previewDark} fallback={<Moon size={15} />}>
+              <Sun size={15} />
+            </Show>
+          </button>
         </Show>
         <button class="icon-button" title="More" onClick={(e) => showMenu(e, moreMenu())}>
           <Ellipsis size={15} />

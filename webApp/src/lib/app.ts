@@ -15,11 +15,18 @@ export { workspace };
 /** The sidebar shows the list of spaces instead of the open space's files, like the Mac app's selector. */
 export const [spacesOpen, setSpacesOpen] = createSignal(false);
 
+/** The hidden sidebar floating over the space, while the pointer is at the window's left edge. */
+export const [floatingSidebar, setFloatingSidebar] = createSignal(false);
+
 export function toggleSpaces() {
-  if (!settings.sidebarVisible) {
-    setSettings("sidebarVisible", true);
-    setSpacesOpen(true);
-  } else setSpacesOpen((open) => !open);
+  if (!settings.sidebarVisible && !spacesOpen()) setFloatingSidebar(true);
+  setSpacesOpen((open) => !open);
+}
+
+/** ⌘S: pins the sidebar, or hides it; a floating one gets pinned where it is. */
+export function toggleSidebar() {
+  setFloatingSidebar(false);
+  setSettings("sidebarVisible", (v) => !v);
 }
 
 export function openSpace(folder: string | null) {

@@ -1,5 +1,6 @@
 import { createEffect, createRoot } from "solid-js";
 import { createStore } from "solid-js/store";
+import { desktop } from "./desktop";
 
 export type RenderMode = "pdf" | "html" | "svg";
 
@@ -31,7 +32,11 @@ export type Settings = {
   historyRetention: RetentionPolicy;
   /** Labels this device's cursor on other devices. */
   deviceName: string;
+  /** Pinned beside the content; when false it hides and floats in from the left edge. */
   sidebarVisible: boolean;
+  sidebarWidth: number;
+  /** Shows the document's pages dark, colours inverted, for reading at night. */
+  previewDark: boolean;
   /** Width of the preview as a share of the window. */
   split: number;
 };
@@ -52,7 +57,9 @@ const defaults: Settings = {
   historyRetention: DEFAULT_RETENTION,
   deviceName: defaultDeviceName(),
   sidebarVisible: true,
+  sidebarWidth: 264,
   split: 0.5,
+  previewDark: false,
 };
 
 function defaultDeviceName(): string {
@@ -85,6 +92,7 @@ createRoot(() => {
   createEffect(() => {
     const theme = settings.theme;
     document.documentElement.dataset.theme = theme;
+    desktop?.setTheme(theme);
   });
 });
 
