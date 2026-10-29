@@ -757,7 +757,7 @@ button.tree-row {
   padding: 0 4px;
   flex-shrink: 0;
   border: none;
-  border-radius: 12px;
+  border-radius: 6px;
   background: transparent;
   color: var(--secondary);
   cursor: default;
@@ -809,7 +809,7 @@ button.tree-row {
   height: 28px;
   flex-shrink: 0;
   border: none;
-  border-radius: 14px;
+  border-radius: 8px;
   background: transparent;
   color: var(--secondary);
   cursor: default;
@@ -839,7 +839,7 @@ button.tree-row {
   height: 28px;
   padding: 0 8px;
   border: none;
-  border-radius: 14px;
+  border-radius: 8px;
   background: transparent;
   color: var(--secondary);
   font-size: 12px;
@@ -1744,7 +1744,7 @@ li[aria-selected] .cm-completionIcon {
 }
 
 .floating-bar .icon-button {
-  border-radius: 13px;
+  border-radius: 7px;
 }
 
 .bar-label {
@@ -1765,7 +1765,7 @@ li[aria-selected] .cm-completionIcon {
   min-width: 44px;
   height: 26px;
   border: none;
-  border-radius: 13px;
+  border-radius: 7px;
   background: transparent;
   font-size: 11.5px;
   color: var(--secondary);
