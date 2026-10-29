@@ -14,10 +14,18 @@ export default defineConfig({
     nitro({ preset: "github-pages", baseURL: base, prerender: { routes: ["/"], crawlLinks: false } }),
   ],
   resolve: {
-    alias: [{ find: "~", replacement: fileURLToPath(new URL("./src", import.meta.url)) }],
+    alias: [
+      { find: "~", replacement: fileURLToPath(new URL("./src", import.meta.url)) },
+      // monaco-vim imports Monaco by paths its package exports no longer list.
+      { find: /^monaco-editor\/esm\/vs\/(.*?)(\.js)?$/, replacement: fileURLToPath(new URL("./node_modules/monaco-editor/esm/vs/", import.meta.url)) + "$1.js" },
+      { find: /^monaco-vim$/, replacement: fileURLToPath(new URL("./node_modules/monaco-vim/dist/index.mjs", import.meta.url)) },
+    ],
   },
-  // The editor chunk sits just above the default 500 kB advisory; gzip keeps it around 175 kB.
-  build: { chunkSizeWarningLimit: 550 },
+  build: {
+    // Monaco is one large chunk (about 3.5 MB, 900 kB gzipped) of its own, cached across app updates.
+    chunkSizeWarningLimit: 3600,
+    rolldownOptions: { output: { codeSplitting: { groups: [{ name: "monaco", test: /node_modules[\\/]monaco-(editor|vim)[\\/]/ }] } } },
+  },
   worker: { format: "es" },
   server: { fs: { allow: [".."] } },
 });

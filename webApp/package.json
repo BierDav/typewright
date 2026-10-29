@@ -10,21 +10,12 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@codemirror/autocomplete": "^6.20.4",
-    "@codemirror/commands": "^6.11.1",
-    "@codemirror/lang-markdown": "^6.5.2",
-    "@codemirror/language": "^6.13.1",
-    "@codemirror/lint": "^6.9.7",
-    "@codemirror/search": "^6.7.2",
-    "@codemirror/state": "^6.7.6",
-    "@codemirror/view": "^6.43.15",
-    "@lezer/highlight": "^1.2.5",
-    "@replit/codemirror-vim": "^6.4.0",
     "@solidjs/router": "^1.0.0",
     "@solidjs/start": "2.0.6",
-    "codemirror": "^6.0.2",
     "fflate": "^0.8.3",
     "lucide-solid": "^1.60.0",
+    "monaco-editor": "^0.57.0",
+    "monaco-vim": "^0.4.4",
     "nitro": "^3.0.260903-beta",
     "solid-js": "^1.9.17",
     "vite": "8"

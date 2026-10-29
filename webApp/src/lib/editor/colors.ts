@@ -1,7 +1,6 @@
 // Swatches before colour literals like `rgb("#ff4136")`, `rgb(255, 65, 54)`, `luma(40%)` or `red`, as in
-// the Mac app's `ColorLiteral`; clicking one opens the colour picker and writes the colour back in its form.
-import { RangeSetBuilder } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
+// the Mac app's `ColorLiteral`; clicking one opens Monaco's colour picker, which writes the colour back in its form.
+import { monaco, range } from "./monaco";
 
 type Format =
   | { type: "hex"; uppercase: boolean; alpha: boolean; short: boolean; hash: boolean }
@@ -103,77 +102,19 @@ export function colorSource(rgba: [number, number, number, number], format: Form
   return `rgb("#${hex}")`;
 }
 
-function css([r, g, b, a]: [number, number, number, number]): string {
-  return `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
-}
-
-class Swatch extends WidgetType {
-  constructor(readonly literal: Literal) {
-    super();
-  }
-  eq(other: Swatch) {
-    return other.literal.from === this.literal.from && css(other.literal.rgba) === css(this.literal.rgba);
-  }
-  toDOM(view: EditorView) {
-    const swatch = document.createElement("span");
-    swatch.className = "tw-swatch";
-    swatch.style.setProperty("--swatch", css(this.literal.rgba));
-    swatch.title = "Change colour";
-    swatch.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      pick(view, this.literal);
-    });
-    return swatch;
-  }
-  ignoreEvent() {
-    return true;
-  }
-}
-
-/** The browser's colour picker; its edits apply live, so the preview follows the drag. */
-function pick(view: EditorView, literal: Literal) {
-  const input = document.createElement("input");
-  input.type = "color";
-  const [r, g, b] = literal.rgba.map((v) => Math.round(v * 255));
-  input.value = `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
-  Object.assign(input.style, { position: "fixed", opacity: "0", pointerEvents: "none" });
-  const coords = view.coordsAtPos(literal.from);
-  if (coords) Object.assign(input.style, { left: `${coords.left}px`, top: `${coords.bottom}px` });
-  document.body.append(input);
-  let range = { from: literal.from, to: literal.to };
-  let format = literal.format;
-  input.addEventListener("input", () => {
-    const hex = parseInt(input.value.slice(1), 16);
-    const rgba: [number, number, number, number] = [((hex >> 16) & 0xff) / 255, ((hex >> 8) & 0xff) / 255, (hex & 0xff) / 255, literal.rgba[3]];
-    const source = colorSource(rgba, format);
-    view.dispatch({ changes: { from: range.from, to: range.to, insert: source }, userEvent: "input.color" });
-    range = { from: range.from, to: range.from + source.length };
-    format = findColors(source)[0]?.format ?? format;
+/** Monaco's colour decorators for typst, with its picker; presentations keep the literal's form. */
+export function registerColors(): monaco.IDisposable {
+  return monaco.languages.registerColorProvider("typst", {
+    provideDocumentColors(model) {
+      return findColors(model.getValue()).map((l) => ({
+        range: range(model, l.from, l.to),
+        color: { red: l.rgba[0], green: l.rgba[1], blue: l.rgba[2], alpha: l.rgba[3] },
+      }));
+    },
+    provideColorPresentations(model, info) {
+      const literal = findColors(model.getValueInRange(info.range))[0];
+      const { red, green, blue, alpha } = info.color;
+      return [{ label: colorSource([red, green, blue, alpha], literal?.format ?? { type: "named" }) }];
+    },
   });
-  input.addEventListener("change", () => input.remove());
-  input.addEventListener("blur", () => input.remove());
-  input.showPicker?.() ?? input.click();
 }
-
-function decorations(view: EditorView): DecorationSet {
-  const builder = new RangeSetBuilder<Decoration>();
-  for (const { from, to } of view.visibleRanges) {
-    for (const literal of findColors(view.state.sliceDoc(from, to), from)) {
-      builder.add(literal.from, literal.from, Decoration.widget({ widget: new Swatch(literal), side: -1 }));
-    }
-  }
-  return builder.finish();
-}
-
-export const colorSwatches = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet;
-    constructor(view: EditorView) {
-      this.decorations = decorations(view);
-    }
-    update(update: ViewUpdate) {
-      if (update.docChanged || update.viewportChanged) this.decorations = decorations(update.view);
-    }
-  },
-  { decorations: (v) => v.decorations },
-);

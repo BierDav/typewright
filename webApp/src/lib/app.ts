@@ -1,5 +1,5 @@
 // Window-wide state: the open space, overlays and dialogs.
-import type { EditorView } from "@codemirror/view";
+import type { CodeEditor } from "./editor/monaco";
 import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { setSettings, settings } from "./settings";
@@ -99,7 +99,7 @@ export function showRecentlyDeleted(scope: string | null = workspace()?.folder ?
 }
 
 /** The editor view of the shown file, for commands run from outside it. */
-const [editorView, setEditorView] = createSignal<EditorView | null>(null);
+const [editorView, setEditorView] = createSignal<CodeEditor | null>(null);
 export { editorView, setEditorView };
 
 // MARK: - Dialogs

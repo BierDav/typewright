@@ -1,8 +1,7 @@
 // solveng in the editor: its editor support (`solveng-ide` from the solveng repository, run in the typst worker),
 // fences that close themselves and rewrites between calls, math and code, like the Mac app's context actions.
-import { startCompletion } from "@codemirror/autocomplete";
-import { EditorView } from "@codemirror/view";
 import { compiler } from "../compiler";
+import { type CodeEditor, edit, monaco, selection, text } from "./monaco";
 
 export type SolvengLocation = { path?: string | null; start: number; end: number };
 
@@ -58,28 +57,38 @@ export const Solveng = {
 };
 
 /** The third backtick of a fence adds a closing fence and offers the language tags. */
-export const fenceClosing = EditorView.inputHandler.of((view, from, to, text) => {
-  if (text !== "`" || from !== to || view.state.readOnly) return false;
-  const before = view.state.sliceDoc(Math.max(0, from - 3), from);
-  if (!before.endsWith("``") || before === "```" || view.state.sliceDoc(from, from + 1) === "`") return false;
-  view.dispatch({ changes: { from, insert: "````" }, selection: { anchor: from + 1 }, userEvent: "input.type" });
-  startCompletion(view);
-  return true;
-});
+export function fenceClosing(editor: CodeEditor): monaco.IDisposable {
+  return editor.onDidChangeModelContent((event) => {
+    const [change] = event.changes;
+    if (event.isUndoing || event.isRedoing || event.isFlush || event.changes.length !== 1 || change.text !== "`" || change.rangeLength) return;
+    const model = editor.getModel();
+    if (!model || model.getLanguageId() !== "typst" || editor.getOption(monaco.editor.EditorOption.readOnly)) return;
+    const at = change.rangeOffset;
+    const doc = model.getValue();
+    const before = doc.slice(Math.max(0, at - 3), at);
+    if (!before.endsWith("``") || before === "```" || doc[at + 1] === "`") return;
+    // Edits can't run inside the change event.
+    queueMicrotask(() => {
+      if (model.getValue() !== doc || selection(editor).head !== at + 1) return;
+      edit(editor, [{ from: at + 1, to: at + 1, insert: "```" }], [{ anchor: at + 1, head: at + 1 }], "input.type");
+      editor.trigger("fence", "editor.action.triggerSuggest", {});
+    });
+  });
+}
 
 export type Conversion = { title: string; run: () => void };
 
 /** Calculation fixes at the caret. */
-export async function conversions(view: EditorView, around: string): Promise<Conversion[]> {
-  const text = view.state.doc.toString();
-  const offset = view.state.selection.main.head;
-  const fixes = await Solveng.fixes(text, around, offset);
+export async function conversions(view: CodeEditor, around: string): Promise<Conversion[]> {
+  const doc = text(view);
+  const offset = selection(view).head;
+  const fixes = await Solveng.fixes(doc, around, offset);
   return fixes.map((c) => ({
     title: c.title,
     run: () => {
-      if (view.state.doc.toString() !== text) return;
+      if (text(view) !== doc) return;
       const extra = (c.edits ?? []).filter((e) => !e.path).map((e) => ({ from: e.start, to: e.end, insert: e.text }));
-      view.dispatch({ changes: [{ from: c.start, to: c.end, insert: c.text }, ...extra], scrollIntoView: true, userEvent: "input.refactor" });
+      edit(view, [{ from: c.start, to: c.end, insert: c.text }, ...extra], undefined, "input.refactor");
       view.focus();
     },
   }));

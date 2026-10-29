@@ -1,9 +1,8 @@
 // Typst highlighting from typst's own parser (in the worker), with code in raw blocks coloured by the
 // Rust core's tokenizers, like the Mac app's `Highlighter` and `InjectedLanguages`.
-import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { compiler } from "../compiler";
 import { codeLanguage, codeTokens, rawBlockParts } from "../core";
+import { type CodeEditor, monaco } from "./monaco";
 import { Solveng } from "./solveng";
 
 /** Typst's highlighting tags as the bridge numbers them (`HlTag`). */
@@ -37,10 +36,10 @@ const MATH = 4;
 // Then solveng's: parameters, variables that stand out, and the = or -> showing a result, bold as in Mathcad.
 const CODE_CLASS = ["tw-keyword", "tw-string", "tw-comment", "tw-number", "tw-function", "tw-type", "tw-param", "tw-label", "tw-keyword", "tw-unit", "tw-param tw-parameter", "tw-keyword tw-evaluate", "tw-plain", "tw-type", "tw-unit-reference", "tw-constant"];
 
-const marks = new Map<string, Decoration>();
-function mark(cls: string): Decoration {
+const marks = new Map<string, monaco.editor.IModelDecorationOptions>();
+function mark(cls: string): monaco.editor.IModelDecorationOptions {
   let deco = marks.get(cls);
-  if (!deco) marks.set(cls, (deco = Decoration.mark({ class: cls })));
+  if (!deco) marks.set(cls, (deco = { inlineClassName: cls, stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges }));
   return deco;
 }
 
@@ -79,7 +78,7 @@ function without(ranges: { from: number; to: number; cls: string }[], cuts: { fr
 
 type SolvengHighlight = { tokens: number[]; plain: number[] } | null;
 
-function build(text: string, runs: Uint32Array, solveng: SolvengHighlight): DecorationSet {
+function build(model: monaco.editor.ITextModel, text: string, runs: Uint32Array, solveng: SolvengHighlight): monaco.editor.IModelDeltaDecoration[] {
   let ranges: { from: number; to: number; cls: string }[] = [];
   for (let i = 0; i + 2 < runs.length; i += 3) {
     const from = runs[i];
@@ -116,54 +115,46 @@ function build(text: string, runs: Uint32Array, solveng: SolvengHighlight): Deco
     ranges = [...without(ranges, cuts), ...tokens];
   }
   ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-  const builder = new RangeSetBuilder<Decoration>();
-  for (const r of ranges) if (r.to > r.from && r.to <= text.length && r.cls) builder.add(r.from, r.to, mark(r.cls));
-  return builder.finish();
+  return ranges
+    .filter((r) => r.to > r.from && r.to <= text.length && r.cls)
+    .map((r) => {
+      const a = model.getPositionAt(r.from);
+      const b = model.getPositionAt(r.to);
+      return { range: new monaco.Range(a.lineNumber, a.column, b.lineNumber, b.column), options: mark(r.cls) };
+    });
 }
 
-const setHighlights = StateEffect.define<DecorationSet>();
-/** Highlights again, e.g. once a compile tells whether solveng reads math. */
-export const refreshHighlights = StateEffect.define<null>();
-
-const highlights = StateField.define<DecorationSet>({
-  create: () => Decoration.none,
-  update(deco, tr) {
-    deco = deco.map(tr.changes);
-    for (const effect of tr.effects) if (effect.is(setHighlights)) deco = effect.value;
-    return deco;
-  },
-  provide: (field) => EditorView.decorations.from(field),
-});
-
 /**
- * Typst highlighting; `code` treats the whole file as code, as for `.typc`. `solvengContext` gives the text of the
- * files around, where solveng's settings may be.
+ * Typst highlighting as decorations; `code` treats the whole file as code, as for `.typc`. `solvengContext` gives the
+ * text of the files around, where solveng's settings may be. `refresh` highlights again, e.g. once a compile tells
+ * whether solveng reads math.
  */
-export function typstHighlighting(code = false, solvengContext: () => Promise<string> = async () => "") {
-  const plugin = ViewPlugin.fromClass(
-    class {
-      version = 0;
-      constructor(view: EditorView) {
-        this.request(view);
-      }
-      update(update: ViewUpdate) {
-        if (update.docChanged || update.transactions.some((t) => t.effects.some((e) => e.is(refreshHighlights)))) this.request(update.view);
-      }
-      request(view: EditorView) {
-        const version = ++this.version;
-        const text = view.state.doc.toString();
-        const solveng = code ? Promise.resolve(null) : solvengContext().then((around) => Solveng.highlight(text, around)).catch(() => null);
-        Promise.all([compiler.highlight(text, code), solveng])
-          .then(([runs, calculated]) => {
-            // Results for older text would land in the wrong places.
-            if (version !== this.version || view.state.doc.length !== text.length) return;
-            view.dispatch({ effects: setHighlights.of(build(text, runs, calculated)) });
-          })
-          .catch(() => {});
-      }
+export function typstHighlighting(editor: CodeEditor, code = false, solvengContext: () => Promise<string> = async () => "") {
+  const model = editor.getModel()!;
+  const decorations = editor.createDecorationsCollection();
+  let version = 0;
+  const request = () => {
+    const current = ++version;
+    const text = model.getValue();
+    const solveng = code ? Promise.resolve(null) : solvengContext().then((around) => Solveng.highlight(text, around)).catch(() => null);
+    Promise.all([compiler.highlight(text, code), solveng])
+      .then(([runs, calculated]) => {
+        // Results for older text would land in the wrong places.
+        if (current !== version || model.isDisposed() || editor.getModel() !== model || model.getValueLength() !== text.length) return;
+        decorations.set(build(model, text, runs, calculated));
+      })
+      .catch(() => {});
+  };
+  const listener = model.onDidChangeContent(request);
+  request();
+  return {
+    refresh: request,
+    dispose: () => {
+      version++;
+      listener.dispose();
+      decorations.clear();
     },
-  );
-  return [highlights, plugin];
+  };
 }
 
 /** Colours a docs code block like the editor: `typc` and signatures as code, `typ` as markup. */

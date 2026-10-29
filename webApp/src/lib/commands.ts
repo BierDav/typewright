@@ -1,9 +1,8 @@
 // Editor commands shared by key bindings and the command palette.
-import { openSearchPanel } from "@codemirror/search";
-import type { EditorView } from "@codemirror/view";
 import { alert, choose, confirm, copyText, editorView, prompt, setOverlay, toast, workspace } from "./app";
 import { createTemporaryIdentity, identity } from "./identity";
 import { goToDefinition, showDocs, type LanguageContext } from "./editor/language";
+import { type CodeEditor, edit, monaco, selection, text } from "./editor/monaco";
 import * as refactor from "./editor/refactor";
 import * as solveng from "./editor/solveng";
 import { download } from "./spaces";
@@ -20,7 +19,7 @@ export function languageContext(): LanguageContext {
   };
 }
 
-function view(): EditorView | null {
+function view(): CodeEditor | null {
   return editorView();
 }
 
@@ -32,19 +31,19 @@ async function report(result: Promise<string | null>) {
 export function find(replace = false) {
   const v = view();
   if (!v) return;
-  openSearchPanel(v);
-  // The panel's replace field is right after the search field.
-  if (replace) requestAnimationFrame(() => v.dom.querySelector<HTMLInputElement>(".cm-search input[name=replace]")?.focus());
+  void v.getAction(replace ? "editor.action.startFindReplaceAction" : "actions.find")?.run();
 }
 
 export async function formatDocument() {
   const v = view();
   const ws = workspace();
-  if (!v || !ws || !ws.state.selected?.endsWith(".typ") || v.state.readOnly) return;
-  const doc = v.state.doc;
-  const edits = await solveng.Solveng.format(doc.toString(), await ws.solvengContext());
-  if (v.state.doc !== doc || v.state.readOnly || !edits.length) return;
-  v.dispatch({ changes: edits.map((e) => ({ from: e.start, to: e.end, insert: e.text })), userEvent: "input.format" });
+  const readOnly = () => !!v?.getOption(monaco.editor.EditorOption.readOnly);
+  if (!v || !ws || !ws.state.selected?.endsWith(".typ") || readOnly()) return;
+  const model = v.getModel();
+  const doc = text(v);
+  const edits = await solveng.Solveng.format(doc, await ws.solvengContext());
+  if (v.getModel() !== model || text(v) !== doc || readOnly() || !edits.length) return;
+  edit(v, edits.map((e) => ({ from: e.start, to: e.end, insert: e.text })), undefined, "input.format");
 }
 
 export function quickDocs() {
@@ -69,7 +68,7 @@ export async function extractVariable(all = false) {
   const candidates = await refactor.extractCandidates(v);
   if (!candidates.length) return toast("Select an expression to extract.");
   let pick = candidates[0];
-  if (candidates.length > 1 && v.state.selection.main.empty) {
+  if (candidates.length > 1 && selection(v).empty) {
     const label = (text: string) => (text.length > 48 ? `${text.slice(0, 45)}…` : text).replace(/\s+/g, " ");
     const chosen = await choose("Extract Variable", "Which expression?", [
       ...candidates.slice(0, 5).map((c, i) => ({ label: label(c.text), value: String(i) })),

@@ -219,7 +219,8 @@ textarea {
   color: var(--accent);
 }
 
-.button {
+/* Monaco uses the same class names inside its widgets. */
+.button:where(:not(.monaco-editor *)) {
   transition:
     background 0.12s,
     transform 0.15s var(--ease-spring),
@@ -240,45 +241,45 @@ textarea {
   text-decoration: none;
 }
 
-.button:hover:not(:disabled) {
+.button:where(:not(.monaco-editor *)):hover:not(:disabled) {
   background: var(--surface-2);
 }
 
-.button:active:not(:disabled) {
+.button:where(:not(.monaco-editor *)):active:not(:disabled) {
   transform: scale(0.97);
 }
 
-.button:disabled {
+.button:where(:not(.monaco-editor *)):disabled {
   opacity: 0.5;
 }
 
-.button.primary {
+.button:where(:not(.monaco-editor *)).primary {
   background: var(--accent);
   border-color: transparent;
   color: white;
 }
 
-.button.primary:hover {
+.button:where(:not(.monaco-editor *)).primary:hover {
   background: color-mix(in srgb, var(--accent) 88%, black);
 }
 
-.button.destructive {
+.button:where(:not(.monaco-editor *)).destructive {
   color: var(--red);
 }
 
-.button.primary.destructive {
+.button:where(:not(.monaco-editor *)).primary.destructive {
   background: var(--red);
   color: white;
   border-color: transparent;
 }
 
-.button.small {
+.button:where(:not(.monaco-editor *)).small {
   height: 24px;
   padding: 0 10px;
   font-size: 12px;
 }
 
-.button:focus-visible,
+.button:where(:not(.monaco-editor *)):focus-visible,
 .icon-button:focus-visible,
 .text-field:focus,
 select:focus-visible {
@@ -423,7 +424,7 @@ select {
   opacity: 1;
 }
 
-.main {
+.main:where(:not(.monaco-editor *)) {
   position: relative;
   flex: 1;
   min-width: 0;
@@ -492,7 +493,7 @@ body.resizing .sidebar-dock {
 
 body.swiping .sidebar,
 body.swiping .sidebar-layer,
-body.swiping .main,
+body.swiping .main:where(:not(.monaco-editor *)),
 body.swiping .space-dimming {
   transition: none;
 }
@@ -647,7 +648,7 @@ body.resizing .sidebar-resize::after {
   cursor: default;
 }
 
-.tree {
+.tree:where(:not(.monaco-editor *)) {
   flex: 1;
   overflow: auto;
   display: flex;
@@ -657,7 +658,7 @@ body.resizing .sidebar-resize::after {
   scrollbar-width: thin;
 }
 
-.tree.drop-target {
+.tree:where(:not(.monaco-editor *)).drop-target {
   background: var(--accent-soft);
 }
 
@@ -1091,137 +1092,68 @@ button.issue:hover:not(:disabled) {
 
 /* MARK: Editor */
 
-.cm-editor {
+.editor {
+  flex-direction: column;
+}
+
+.editor-monaco {
   flex: 1;
   min-width: 0;
-  height: 100%;
-  background: var(--surface);
-  color: var(--text);
+  min-height: 0;
+  position: relative;
 }
 
-.cm-editor.cm-focused {
+.vim-status {
+  padding: 3px 12px;
+  border-top: 0.5px solid var(--separator);
+  background: var(--surface-2);
+  color: var(--secondary);
+  font: 12px var(--mono);
+}
+
+.vim-status input {
+  border: none;
   outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
 }
 
-.cm-scroller {
-  font-family: var(--mono) !important;
-  line-height: 1.55 !important;
-}
-
-.cm-content {
-  padding: 12px 0 40vh !important;
-}
-
-.cm-gutters {
-  background: var(--surface) !important;
-  border-right: none !important;
-  color: var(--tertiary) !important;
-}
-
-.cm-lineNumbers .cm-gutterElement {
-  padding: 0 6px 0 14px !important;
-  font-size: 0.85em;
+.monaco-editor .line-numbers {
   font-variant-numeric: tabular-nums;
 }
 
-/* Folding chevrons appear while the gutter is hovered; a folded range keeps its own. */
-.cm-foldGutter .cm-gutterElement {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  color: var(--tertiary);
-  cursor: default;
-}
-
-.tw-fold {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 4px;
-  transition:
-    opacity 0.15s,
-    transform 0.2s var(--ease-out),
-    background 0.12s;
-}
-
-.tw-fold.open {
-  transform: rotate(90deg);
-  opacity: 0;
-}
-
-.cm-gutters:hover .tw-fold.open {
-  opacity: 1;
-}
-
-.tw-fold:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.cm-foldPlaceholder {
-  margin: 0 3px;
-  padding: 0 6px;
-  border: none !important;
-  border-radius: 6px;
-  background: var(--accent-soft) !important;
-  color: var(--accent) !important;
-  font-family: var(--font);
-  font-size: 0.85em;
-  cursor: pointer;
-}
-
-.cm-placeholder {
-  color: var(--tertiary) !important;
-  font-family: var(--font);
-}
-
-.cm-activeLine {
-  background: color-mix(in srgb, var(--accent) 5%, transparent) !important;
-}
-
-.cm-activeLineGutter {
-  background: transparent !important;
-  color: var(--text) !important;
+.monaco-editor .line-numbers.active-line-number {
   font-weight: 600;
 }
 
-.cm-selectionBackground {
-  background: color-mix(in srgb, var(--accent) 22%, transparent) !important;
-  border-radius: 3px;
-}
-
-.cm-focused .cm-selectionBackground {
-  background: color-mix(in srgb, var(--accent) 30%, transparent) !important;
-}
-
-.cm-cursor {
-  border-left: 2px solid var(--accent) !important;
+.monaco-editor .cursor {
   border-radius: 1px;
-  /* Glides to where it goes instead of jumping. */
-  transition:
-    left 70ms ease-out,
-    top 70ms ease-out;
 }
 
-/* A soft pulse instead of a hard blink. */
-.cm-cursorLayer {
-  animation-timing-function: ease-in-out !important;
-}
-
-.cm-matchingBracket {
-  background: color-mix(in srgb, var(--accent) 18%, transparent) !important;
-  outline: none !important;
+.monaco-editor .selected-text {
   border-radius: 3px;
 }
 
-.cm-selectionMatch {
-  background: color-mix(in srgb, var(--orange) 22%, transparent) !important;
+.monaco-editor .editorPlaceholder {
+  font-family: var(--font);
+  color: var(--tertiary) !important;
 }
 
-/* Hovers and F1 docs ease in rather than pop. */
-.cm-tooltip-hover,
-.cm-tooltip:has(> .tw-docs) {
-  animation: popover-in 0.16s var(--ease-out);
+/* The folded range's ellipsis, as a soft capsule. */
+.monaco-editor .inline-folded::after {
+  margin: 0 3px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent) !important;
+  font-family: var(--font);
+  font-size: 0.85em;
+}
+
+.monaco-editor .colorpicker-color-decoration {
+  border-radius: 3px;
+  margin: 0.15em 3px 0 1px;
 }
 
 /* Uses of the solveng name at the caret. */
@@ -1230,83 +1162,41 @@ button.issue:hover:not(:disabled) {
   border-radius: 2px;
 }
 
-.cm-searchMatch {
-  background: color-mix(in srgb, #ffd60a 45%, transparent) !important;
-  outline: none !important;
+/* Popovers ease in like the app's, with its rounded corners and shadow. */
+.monaco-editor .suggest-widget,
+.monaco-editor .suggest-details-container,
+.monaco-editor .monaco-hover,
+.monaco-editor .colorpicker-widget,
+.monaco-editor .find-widget,
+.monaco-editor .action-widget {
+  border-radius: 11px !important;
+  box-shadow: var(--shadow) !important;
+  font-family: var(--font);
 }
 
-.cm-searchMatch-selected {
-  background: #ffd60a !important;
-  color: black;
-}
-
-.cm-panels {
-  background: var(--surface-2) !important;
-  color: var(--text) !important;
-  border-color: var(--separator) !important;
-}
-
-.cm-panel.cm-search {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 6px;
-  padding: 6px 10px !important;
-  font-size: 12px;
-}
-
-.cm-panel.cm-search input[type="text"],
-.cm-panel.cm-search .cm-textfield {
-  height: 24px;
-  padding: 0 8px;
-  border: 0.5px solid var(--separator);
-  border-radius: 6px;
-  background: var(--surface);
-  font-size: 12px;
-}
-
-.cm-panel.cm-search button {
-  height: 22px;
-  padding: 0 8px;
-  border: 0.5px solid var(--separator);
-  border-radius: 6px;
-  background: var(--surface);
-  background-image: none !important;
-  font-size: 11.5px;
-}
-
-.cm-panel.cm-search label {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.cm-panel.cm-search [name="close"] {
-  border: none !important;
-  font-size: 16px !important;
-  color: var(--secondary);
-}
-
-.cm-tooltip {
-  background: var(--popover) !important;
-  border: 0.5px solid var(--popover-border) !important;
-  border-radius: 10px;
-  box-shadow: var(--shadow);
-  color: var(--text);
+.monaco-editor .suggest-widget,
+.monaco-editor .monaco-hover {
   overflow: hidden;
+  animation: popover-in 0.14s var(--ease-out);
 }
 
-/* Completions look like the Mac app's list: tinted kind badge, monospaced name, type on the right. */
-.cm-tooltip.cm-tooltip-autocomplete.tw-completions,
-.cm-tooltip.cm-tooltip-autocomplete {
-  min-width: 280px;
-  max-width: 520px;
-  border-radius: 11px;
+.monaco-editor .suggest-widget {
   background: color-mix(in srgb, var(--popover) 88%, transparent) !important;
   -webkit-backdrop-filter: blur(24px) saturate(1.8);
   backdrop-filter: blur(24px) saturate(1.8);
-  animation: popover-in 0.14s var(--ease-out);
-  transform-origin: top left;
+}
+
+.monaco-editor .suggest-widget .monaco-list .monaco-list-row {
+  border-radius: 7px;
+  font-family: var(--mono);
+}
+
+.monaco-editor .suggest-widget .monaco-list .monaco-list-row .details-label {
+  font-family: var(--font);
+}
+
+.monaco-editor .find-widget {
+  border-radius: 0 0 11px 11px !important;
 }
 
 @keyframes popover-in {
@@ -1316,229 +1206,30 @@ button.issue:hover:not(:disabled) {
   }
 }
 
-.cm-tooltip.cm-tooltip-autocomplete > ul {
-  font-family: var(--mono) !important;
-  font-size: 12.5px;
-  max-height: calc(10 * 26px + 10px) !important;
-  max-width: none !important;
-  min-width: 0 !important;
-  padding: 5px !important;
-  scroll-padding: 5px;
-  scrollbar-width: thin;
-}
-
-.cm-tooltip.cm-tooltip-autocomplete > ul > li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 26px;
-  padding: 0 8px 0 4px !important;
-  border-radius: 7px;
-  line-height: 26px;
-  color: var(--text);
-}
-
-.cm-tooltip.cm-tooltip-autocomplete > ul > li:hover:not([aria-selected]) {
-  background: var(--hover);
-}
-
-.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
-  background: var(--accent) !important;
-  color: white !important;
-}
-
-/* Keys that act on the list, as a quiet footer. */
-.tw-completions::after {
-  content: "↩ or ⇥ insert   ↑↓ choose   esc close";
-  display: block;
-  padding: 5px 12px 6px;
-  border-top: 0.5px solid var(--separator);
-  font: 10.5px var(--font);
-  color: var(--tertiary);
-  white-space: pre;
-}
-
-.cm-completionLabel {
-  flex-shrink: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 60%;
-}
-
-.cm-completionMatchedText {
-  text-decoration: none !important;
-  font-weight: 700;
-  color: var(--accent);
-}
-
-li[aria-selected] .cm-completionMatchedText {
-  color: inherit;
-}
-
-.cm-completionDetail {
-  flex: 1;
-  margin-left: auto !important;
-  padding-left: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-  font-family: var(--font);
-  font-size: 11px;
-  font-style: normal !important;
-  color: var(--secondary);
-}
-
-li[aria-selected] .cm-completionDetail {
-  color: rgba(255, 255, 255, 0.8);
-}
-
-/* The kind's name stands in for a missing detail on the highlighted row. */
-.tw-completion-kind {
-  display: none;
-  margin-left: auto;
-  padding-left: 12px;
-  font: 11px var(--font);
-  color: rgba(255, 255, 255, 0.75);
-}
-
-li[aria-selected]:not(:has(.cm-completionDetail)) .tw-completion-kind {
-  display: inline;
-}
-
-.cm-completionIcon {
-  --kind: var(--secondary);
-  flex-shrink: 0;
-  width: 18px !important;
-  height: 18px;
-  padding: 0 !important;
-  margin: 0 !important;
-  border-radius: 5px;
-  font-family: var(--font);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 18px;
-  text-align: center;
-  opacity: 1 !important;
-  color: var(--kind);
-  background: color-mix(in srgb, var(--kind) 16%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--kind) 35%, transparent);
-}
-
-li[aria-selected] .cm-completionIcon {
-  color: white;
-  background: rgba(255, 255, 255, 0.22);
-  box-shadow: none;
-}
-
-.cm-completionIcon::after {
-  content: "•" !important;
-}
-
-.cm-completionIcon-function::after,
-.cm-completionIcon-method::after {
-  content: "ƒ" !important;
-  font-style: italic;
-  font-family: Georgia, serif;
-  font-size: 12px;
-}
-
-.cm-completionIcon-function,
-.cm-completionIcon-method {
-  --kind: #0a84ff;
-}
-
-.cm-completionIcon-variable::after {
-  content: "x" !important;
-  font-style: italic;
-}
-
-.cm-completionIcon-variable {
-  --kind: #30b0c7;
-}
-
-.cm-completionIcon-constant::after {
-  content: "π" !important;
-}
-
-.cm-completionIcon-constant {
-  --kind: #ff9f0a;
-}
-
-.cm-completionIcon-keyword::after {
-  content: "#" !important;
-}
-
-.cm-completionIcon-keyword {
-  --kind: #ff375f;
-}
-
-.cm-completionIcon-property::after {
-  content: ":" !important;
-}
-
-.cm-completionIcon-property {
-  --kind: #30a14e;
-}
-
-.cm-completionIcon-type::after,
-.cm-completionIcon-class::after {
-  content: "T" !important;
-}
-
-.cm-completionIcon-type,
-.cm-completionIcon-class {
-  --kind: #8e5bd8;
-}
-
-.cm-completionIcon-namespace::after {
-  content: "{}" !important;
-  font-size: 9.5px;
-}
-
-.cm-completionIcon-namespace {
-  --kind: #a2845e;
-}
-
-.cm-completionIcon-text::after {
-  content: "a" !important;
-}
-
-/* The selected item's docs beside the list, like F1 on the Mac. */
-.cm-tooltip.cm-completionInfo {
-  width: 420px;
-  max-width: 420px !important;
-  padding: 0 !important;
-  margin-left: 6px;
-  border-radius: 11px;
-}
-
-.cm-tooltip.cm-completionInfo.cm-completionInfo-left {
-  margin-left: -4px;
-}
-
+/* Docs in hovers and beside completions, like F1 on the Mac. */
+.monaco-hover .rendered-markdown,
+.suggest-details .rendered-markdown,
 .tw-docs {
-  max-width: 480px;
-  max-height: 360px;
-  overflow: auto;
-  padding: 10px 12px;
   font-family: var(--font);
   font-size: 12.5px;
   line-height: 1.5;
 }
 
-.cm-completionInfo .tw-docs {
-  max-width: none;
+.monaco-hover .hover-contents,
+.suggest-details .docs {
+  max-width: 480px;
 }
 
-.tw-docs pre,
-.tw-docs code {
-  font-family: var(--mono);
+.monaco-hover pre,
+.suggest-details pre,
+.monaco-hover code,
+.suggest-details code {
+  font-family: var(--mono) !important;
   font-size: 11.5px;
 }
 
-.tw-docs pre {
+.monaco-hover pre,
+.suggest-details pre {
   margin: 8px 0;
   padding: 6px 8px;
   border-radius: 6px;
@@ -1547,34 +1238,32 @@ li[aria-selected] .cm-completionIcon {
   overflow-wrap: anywhere;
 }
 
-/* The signature heads the docs, set off as on the Mac. */
-.tw-docs > pre:first-child {
-  margin: -10px -12px 10px;
-  padding: 8px 12px;
-  border-radius: 0;
-  border-bottom: 0.5px solid var(--separator);
+.monaco-hover pre code,
+.suggest-details pre code {
+  padding: 0;
+  background: none !important;
 }
 
-.tw-docs > pre:only-child {
-  margin-bottom: -10px;
-  border-bottom: none;
-}
-
-.tw-docs :not(pre) > code {
+.monaco-hover :not(pre) > code,
+.suggest-details :not(pre) > code {
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--surface-2);
 }
 
-.tw-docs h1,
-.tw-docs h2,
-.tw-docs h3 {
+.monaco-hover h1,
+.monaco-hover h2,
+.monaco-hover h3,
+.suggest-details h1,
+.suggest-details h2,
+.suggest-details h3 {
   margin: 12px 0 4px;
   font-size: 12.5px;
   font-weight: 600;
 }
 
-.tw-docs h2 {
+.monaco-hover h2,
+.suggest-details h2 {
   padding-top: 8px;
   border-top: 0.5px solid var(--separator);
   color: var(--secondary);
@@ -1583,143 +1272,84 @@ li[aria-selected] .cm-completionIcon {
   letter-spacing: 0.03em;
 }
 
-.tw-docs a {
-  color: var(--hl-link);
+.monaco-hover a,
+.suggest-details a {
+  color: var(--hl-link) !important;
   text-decoration: none;
 }
 
-.tw-docs p,
-.tw-docs ul,
-.tw-docs ol {
-  margin: 6px 0;
-}
-
-.tw-docs ul,
-.tw-docs ol {
-  padding-left: 18px;
-}
-
-.tw-docs > :first-child {
-  margin-top: 0;
-}
-
-.tw-docs > :last-child {
-  margin-bottom: 0;
-}
-
-.cm-diagnostic {
-  padding: 6px 10px !important;
-  font-family: var(--font);
-}
-
-.cm-diagnosticAction {
-  background: var(--accent) !important;
-  border-radius: 5px;
-  padding: 2px 8px !important;
-}
-
-.cm-lintRange-error {
-  background-image: none !important;
-  text-decoration: underline wavy var(--red);
-  text-underline-offset: 3px;
-}
-
-.cm-lintRange-warning {
-  background-image: none !important;
-  text-decoration: underline wavy var(--orange);
-  text-underline-offset: 3px;
-}
-
-.cm-gutter-lint {
-  width: 12px !important;
-}
-
-.tw-wrap-guide .cm-content {
-  border-right: 1px dashed var(--separator);
-}
-
-.tw-keyword {
+/* The editor's, docs' and the font sample's highlighting, above Monaco's own token colours. */
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-keyword {
   color: var(--hl-keyword);
 }
-.tw-string {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-string {
   color: var(--hl-string);
 }
-.tw-number {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-number {
   color: var(--hl-number);
 }
-.tw-unit {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-unit {
   color: color-mix(in srgb, var(--hl-number) 65%, transparent);
 }
-.tw-function {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-function {
   color: var(--hl-function);
 }
-.tw-param {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-param {
   color: var(--hl-param);
 }
-.tw-parameter {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-parameter {
   font-weight: 600;
 }
 /* solveng's = or -> that shows a result: as bold as Mathcad's, past what the font's weights give */
-.tw-evaluate {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-evaluate {
   font-weight: 900;
   -webkit-text-stroke: 0.1em currentColor;
 }
-.tw-label {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-label {
   color: var(--hl-label);
 }
-.tw-comment {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-comment {
   color: var(--hl-comment);
   font-style: italic;
 }
-.tw-unit-reference {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-unit-reference {
   color: var(--hl-comment);
 }
 /* solveng's constants (π, e, i, c): a colour nothing else uses */
-.tw-constant {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-constant {
   color: var(--hl-constant);
   font-weight: 500;
 }
-.tw-plain {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-plain {
   color: var(--text);
 }
-.tw-math {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-math {
   color: var(--hl-math);
 }
-.tw-type {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-type {
   color: var(--hl-type);
 }
-.tw-link {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-link {
   color: var(--hl-link);
   text-decoration: underline;
 }
-.tw-bold {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-bold {
   font-weight: 700;
 }
-.tw-italic {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-italic {
   font-style: italic;
 }
-.tw-error {
+:is(.tw-docs, .font-sample, .monaco-editor .view-lines) .tw-error {
   text-decoration: underline wavy var(--red);
 }
 
-.tw-swatch {
-  display: inline-block;
-  width: 0.85em;
-  height: 0.85em;
-  margin: 0 3px -0.08em 1px;
-  border-radius: 3px;
-  background:
-    linear-gradient(var(--swatch), var(--swatch)),
-    repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 0 0 / 6px 6px;
-  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.3);
-  cursor: pointer;
-}
-
 .tw-remote-caret {
+  display: block;
   position: relative;
-  border-left: 2px solid var(--remote);
+  width: 0;
   margin-left: -1px;
-  margin-right: -1px;
+  border-left: 2px solid var(--remote);
+  pointer-events: none;
 }
 
 .tw-remote-name {
@@ -1732,13 +1362,21 @@ li[aria-selected] .cm-completionIcon {
   color: white;
   font: 600 10px/1.5 var(--font);
   white-space: nowrap;
-  pointer-events: none;
   opacity: 0.9;
 }
 
 .tw-remote-selection {
   background: color-mix(in srgb, var(--remote) 22%, transparent);
 }
+
+.tw-remote-0 { --remote: #ff2d55; }
+.tw-remote-1 { --remote: #ff9500; }
+.tw-remote-2 { --remote: #af52de; }
+.tw-remote-3 { --remote: #30b0c7; }
+.tw-remote-4 { --remote: #34c759; }
+.tw-remote-5 { --remote: #007aff; }
+.tw-remote-6 { --remote: #5856d6; }
+.tw-remote-7 { --remote: #a2845e; }
 
 /* MARK: Preview */
 
@@ -2973,7 +2611,7 @@ fieldset.plain:disabled {
   color: var(--text);
 }
 
-.tree:focus {
+.tree:where(:not(.monaco-editor *)):focus {
   outline: none;
 }
 
@@ -3002,7 +2640,7 @@ fieldset.plain:disabled {
 }
 
 /* A strip along the window's top edge to drag it by, as a title bar would. */
-.desktop-mac .main::before {
+.desktop-mac .main:where(:not(.monaco-editor *))::before {
   content: "";
   position: absolute;
   top: 0;
@@ -3053,7 +2691,7 @@ fieldset.plain:disabled {
   margin: 0;
 }
 
-.handoff .button {
+.handoff .button:where(:not(.monaco-editor *)) {
   margin-top: 8px;
 }
 
