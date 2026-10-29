@@ -1,10 +1,13 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import { participants } from "~/lib/editor/live";
-import { isEditable } from "~/lib/kinds";
+import { compiler } from "~/lib/compiler";
+import { isEditable, isMarkdown } from "~/lib/kinds";
 import { basename } from "~/lib/storage";
 import type { Workspace } from "~/lib/workspace";
-import { CircleAlert, CircleCheck, Eye, TriangleAlert, Users } from "./icons";
+import { isMac } from "~/lib/app";
+import { setSettings, settings } from "~/lib/settings";
+import { CircleAlert, CircleCheck, CircleX, Eye, PanelLeft, PanelRight, TriangleAlert, Users } from "./icons";
 
 function words(text: string): number {
   return text.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu)?.length ?? 0;
@@ -12,9 +15,6 @@ function words(text: string): number {
 
 export default function StatusBar(props: { workspace: Workspace }) {
   const ws = props.workspace;
-  const [issuesOpen, setIssuesOpen] = createSignal(false);
-  const errors = () => ws.state.diagnostics.filter((d) => d.severity === "error").length;
-  const warnings = () => ws.state.diagnostics.length - errors();
   const total = createMemo(() => words(ws.state.text));
 
   const caret = createMemo(() => {
@@ -29,44 +29,73 @@ export default function StatusBar(props: { workspace: Workspace }) {
 
   return (
     <footer class="status-bar">
-      <button class="status-item" classList={{ error: errors() > 0 }} onClick={() => setIssuesOpen(!issuesOpen())} title="Errors and warnings">
-        <Show when={ws.state.diagnostics.length > 0} fallback={<CircleCheck size={13} />}>
-          <Show when={errors() > 0}>
-            <CircleAlert size={13} /> {errors()}
-          </Show>
-          <Show when={warnings() > 0}>
-            <TriangleAlert size={13} class="warning" /> {warnings()}
-          </Show>
-        </Show>
-      </button>
-      <Show when={participants().length > 0}>
-        <span class="status-item" title="Also editing this file">
-          <Users size={13} /> {participants().join(", ")}
-        </span>
+      <Show when={!settings.sidebarVisible}>
+        <button class="status-button" title={`Show sidebar (${isMac ? "⌘S" : "Ctrl+S"})`} onClick={() => setSettings("sidebarVisible", true)}>
+          <PanelLeft size={13} />
+        </button>
       </Show>
-      <Show when={ws.state.preview}>
-        <span class="status-item" title="Previewed file">
-          <Eye size={13} /> {basename(ws.state.preview!)}
-        </span>
-      </Show>
-      <Show when={ws.state.duration !== null}>
-        <span class="status-item secondary">{ws.state.compiling ? "Compiling…" : `${Math.round(ws.state.duration!)} ms`}</span>
-      </Show>
-      <div class="spacer" />
       <Show when={isEditable(ws.state.selectedKind)}>
-        <span class="status-item secondary">{caret().characters > 0 ? `${caret().words} of ${total()} words` : `${total()} words`}</span>
-        <span class="status-item secondary">
+        <span class="status-item">
           Ln {caret().line}, Col {caret().column}
           <Show when={caret().characters > 0}>
             {caret().lines > 1 ? ` (${caret().lines} lines, ${caret().characters} selected)` : ` (${caret().characters} selected)`}
           </Show>
         </span>
+        <span class="status-item">{caret().characters > 0 ? `${caret().words} of ${total()} words` : `${total()} words`}</span>
       </Show>
-      <Show when={issuesOpen()}>
+      <Show when={participants().length > 0}>
+        <span class="status-item" title="Also editing this file">
+          <Users size={12} /> {participants().join(", ")}
+        </span>
+      </Show>
+      <div class="spacer" />
+      <Show when={ws.state.preview}>
+        <span class="status-item" title="Previewed file">
+          <Eye size={12} /> {basename(ws.state.preview!)}
+        </span>
+        <Show when={ws.state.preview!.endsWith(".typ") && compiler.version}>
+          <span class="status-item">Typst {compiler.version}</span>
+        </Show>
+        <Show when={ws.state.duration !== null}>
+          <span class="status-item">{Math.round(ws.state.duration!)} ms</span>
+        </Show>
+        <Show when={settings.split === 0}>
+          <button class="status-button" title="Show preview" onClick={() => setSettings("split", 0.5)}>
+            <PanelRight size={13} />
+          </button>
+        </Show>
+      </Show>
+    </footer>
+  );
+}
+
+/** The errors and warnings capsule at the editor's bottom right, like the Mac app's. */
+export function Issues(props: { workspace: Workspace }) {
+  const ws = props.workspace;
+  const [open, setOpen] = createSignal(false);
+  const errors = () => ws.state.diagnostics.filter((d) => d.severity === "error").length + ws.state.packageErrors.length;
+  const count = () => ws.state.diagnostics.length + ws.state.packageErrors.length;
+
+  return (
+    <Show when={ws.state.preview && !isMarkdown(ws.state.preview)}>
+      <button
+        class="issues-button glass-capsule"
+        classList={{ error: errors() > 0, warning: errors() === 0 && count() > 0, ok: count() === 0 }}
+        onClick={() => setOpen(!open())}
+        title="Errors and warnings"
+      >
+        <Show when={errors() > 0} fallback={<Show when={count() > 0} fallback={<CircleCheck size={13} />}><TriangleAlert size={13} /></Show>}>
+          <CircleX size={13} />
+        </Show>
+        <Show when={count() > 0}>
+          <span>{count()}</span>
+        </Show>
+      </button>
+      <Show when={open()}>
         <Portal>
-          <div class="menu-backdrop" onMouseDown={() => setIssuesOpen(false)} />
+          <div class="menu-backdrop" onMouseDown={() => setOpen(false)} />
           <div class="issues glass">
-            <Show when={ws.state.diagnostics.length > 0 || ws.state.packageErrors.length > 0} fallback={<p class="secondary issues-empty"><CircleCheck size={14} /> No issues</p>}>
+            <Show when={count() > 0} fallback={<p class="secondary issues-empty"><CircleCheck size={14} /> No issues</p>}>
               <For each={ws.state.packageErrors}>{(message) => <div class="issue"><CircleAlert size={14} class="error" /><div><div>{message}</div></div></div>}</For>
               <For each={ws.state.diagnostics}>
                 {(d) => (
@@ -74,7 +103,7 @@ export default function StatusBar(props: { workspace: Workspace }) {
                     class="issue"
                     disabled={d.fromPackage || !d.path}
                     onClick={() => {
-                      setIssuesOpen(false);
+                      setOpen(false);
                       ws.revealDiagnostic(d);
                     }}
                     title="Go to the issue"
@@ -95,6 +124,6 @@ export default function StatusBar(props: { workspace: Workspace }) {
           </div>
         </Portal>
       </Show>
-    </footer>
+    </Show>
   );
 }

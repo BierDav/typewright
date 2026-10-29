@@ -26,7 +26,7 @@ use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 use wasm_bindgen::prelude::*;
 
-use crate::{LIBRARY, Slot, decode, display_path, highlight_runs, markdown, refactor_json, solveng_report, svg_pages};
+use crate::{LIBRARY, Slot, decode, display_path, highlight_runs, markdown, refactor_json, solveng_report, svg_page_updates};
 
 static EMBEDDED: LazyLock<Vec<(Font, typst::text::FontInfo)>> = LazyLock::new(|| typst_kit::fonts::embedded().collect());
 
@@ -341,7 +341,13 @@ impl Compiler {
         self.world.fonts.book().families().map(|(name, _)| name.to_string()).collect()
     }
 
-    /// Compiles the main file to `format` 0 PDF, 1 HTML or 2 SVG pages separated by NUL bytes; 3 lays out without
+    /// Forgets which SVG pages were sent, so the next SVG compile sends every page again.
+    #[wasm_bindgen(js_name = resetSvg)]
+    pub fn reset_svg(&mut self) {
+        self.world.svg_pages.get_mut().clear();
+    }
+
+    /// Compiles the main file to `format` 0 PDF, 1 HTML or 2 SVG page updates (`svg_page_updates`); 3 lays out without
     /// output, for solveng's report on the file the editor shows.
     pub fn compile(&mut self, format: u8) -> CompileResult {
         self.world.time.reset();
@@ -410,7 +416,7 @@ impl Compiler {
             }
             _ => {
                 let (data, diags, doc) =
-                    finish(typst::compile::<PagedDocument>(world), |doc| Ok(svg_pages(&world.svg_pages, doc)));
+                    finish(typst::compile::<PagedDocument>(world), |doc| Ok(svg_page_updates(&world.svg_pages, doc)));
                 if let Some(doc) = doc {
                     self.world.solveng = solveng_report(&self.world, &**doc.introspector());
                     self.world.document = Some(doc);

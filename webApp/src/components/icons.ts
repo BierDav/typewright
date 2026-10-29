@@ -58,3 +58,5 @@ export { default as WifiOff } from "lucide-solid/icons/wifi-off";
 export { default as ALargeSmall } from "lucide-solid/icons/a-large-small";
 export { default as Replace } from "lucide-solid/icons/replace";
 export { default as CornerDownLeft } from "lucide-solid/icons/corner-down-left";
+export { default as CircleX } from "lucide-solid/icons/circle-x";
+export { default as SquareStack } from "lucide-solid/icons/square-stack";

@@ -1,12 +1,12 @@
 import { createSignal, For, Show } from "solid-js";
-import { choose, confirm, openSpace, prompt, setOverlay, showRecentlyDeleted, toast, workspace } from "~/lib/app";
+import { choose, confirm, openSpace, prompt, setOverlay, setSpacesOpen, showRecentlyDeleted, toast, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { pickFiles, stripTopFolder } from "~/lib/drop";
 import { identity } from "~/lib/identity";
 import { createSpace, deleteSpace, download, importFiles, moveSpace, restoreSpace, spaces, unzip, zipSpace } from "~/lib/spaces";
 import * as syncService from "~/lib/sync";
 import { sync } from "~/lib/sync";
-import { Cloud, CloudOff, Download, Layers, Link, Plus, Settings, UserPlus, Users } from "./icons";
+import { Cloud, CloudOff, Download, Folder, Link, Plus, Settings, SquareStack, UserPlus, Users } from "./icons";
 import { SyncBadge } from "./SyncBadge";
 import { renameCurrentSpace } from "./FileSidebar";
 import { type MenuItem, showMenu } from "./Menu";
@@ -129,21 +129,18 @@ export default function SpacesSidebar() {
   const [over, setOver] = createSignal<number | null>(null);
 
   return (
-    <nav class="spaces-sidebar">
-      <header class="pane-header">
-        <span class="section-title">Spaces</span>
-        <div class="spacer" />
-        <button class="icon-button" title="New space" onClick={(e) => showMenu(e, addMenu())}>
-          <Plus size={16} />
-        </button>
+    <div class="sidebar-content">
+      <header class="sidebar-header">
+        <span class="sidebar-title">Spaces</span>
       </header>
-      <div class="spaces-list" onDragLeave={() => setOver(null)}>
+      <div class="tree spaces-list" onDragLeave={() => setOver(null)}>
         <For each={spaces.names}>
           {(folder, index) => (
             <div
-              class="space-row"
+              class="tree-row space-row"
               classList={{ selected: workspace()?.folder === folder, "drop-before": over() === index() && dragging() !== folder }}
               draggable={true}
+              onClick={() => openSpace(folder)}
               onDragStart={(e) => {
                 setDragging(folder);
                 e.dataTransfer!.effectAllowed = "move";
@@ -167,26 +164,40 @@ export default function SpacesSidebar() {
               onContextMenu={(e) => showMenu(e, spaceMenu(folder))}
               title="Drag to reorder"
             >
-              <button class="space-open" onClick={() => openSpace(folder)}>
-                <Layers size={15} class="space-icon" />
-                <span class="space-label">{folder}</span>
-              </button>
-              <button class="icon-button" title="Sharing…" aria-label="Sharing…" onClick={() => void commands.share(folder)}>
+              <span class="row-icon">
+                <Folder size={15} classList={{ filled: workspace()?.folder === folder }} />
+              </span>
+              <span class="tree-name">{folder}</span>
+              <button
+                class="row-action sharing"
+                classList={{ visible: syncService.isSynced(folder) || syncService.isShared(folder) }}
+                title="Sharing…"
+                aria-label="Sharing…"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void commands.share(folder);
+                }}
+              >
                 <SyncBadge path={folder} />
-                <Show when={!syncService.isSynced(folder) && !syncService.isShared(folder)}><UserPlus size={13} class="secondary" /></Show>
+                <Show when={!syncService.isSynced(folder) && !syncService.isShared(folder)}>
+                  <UserPlus size={13} />
+                </Show>
               </button>
             </div>
           )}
         </For>
-        <Show when={spaces.loaded && spaces.names.length === 0}>
-          <p class="secondary hint">No spaces yet.</p>
-        </Show>
+        <button class="tree-row quiet" onClick={(e) => showMenu(e, addMenu())}>
+          <span class="row-icon">
+            <Plus size={15} />
+          </span>
+          <span class="tree-name">New Space</span>
+        </button>
         <Show when={syncService.elsewhere().length > 0}>
-          <div class="section-title sub">On Other Devices</div>
+          <div class="sidebar-section">On Other Devices</div>
           <For each={syncService.elsewhere()}>
             {(space) => (
               <button
-                class="space-row remote"
+                class="tree-row quiet"
                 onClick={() => void fetchSpace(space)}
                 onContextMenu={(e) =>
                   showMenu(e, [
@@ -197,33 +208,44 @@ export default function SpacesSidebar() {
                 }
                 title={`Download “${space.name}” from your other devices`}
               >
-                <Download size={15} class="space-icon" />
-                <span class="space-label">{space.name}</span>
+                <span class="row-icon">
+                  <Download size={15} />
+                </span>
+                <span class="tree-name">{space.name}</span>
                 <Show when={space.shared}>
-                  <Users size={13} class="secondary" />
+                  <Users size={13} />
                 </Show>
               </button>
             )}
           </For>
         </Show>
       </div>
-      <footer class="spaces-footer">
+      <footer class="sidebar-footer">
+        <Show when={workspace()}>
+          <button class="round-button active" title="Back to the space" onClick={() => setSpacesOpen(false)}>
+            <SquareStack size={15} />
+          </button>
+        </Show>
         <button class="sync-status" onClick={() => setOverlay({ type: "settings", tab: "devices" })} title="Devices and syncing">
           <Show when={identity.account} fallback={<><CloudOff size={14} /> <span>Sign in to sync</span></>}>
             <Cloud size={14} />
             <span>{syncService.statusSummary()}</span>
           </Show>
         </button>
-        <button class="icon-button" title="Join a shared space" onClick={async () => {
-          const folder = await commands.joinFromLink();
-          if (folder) openSpace(folder);
-        }}>
+        <button
+          class="round-button"
+          title="Join a shared space"
+          onClick={async () => {
+            const folder = await commands.joinFromLink();
+            if (folder) openSpace(folder);
+          }}
+        >
           <Link size={15} />
         </button>
-        <button class="icon-button" title="Settings" onClick={() => setOverlay({ type: "settings" })}>
+        <button class="round-button" title="Settings" onClick={() => setOverlay({ type: "settings" })}>
           <Settings size={15} />
         </button>
       </footer>
-    </nav>
+    </div>
   );
 }

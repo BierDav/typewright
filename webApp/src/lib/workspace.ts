@@ -1,7 +1,7 @@
 // One open space: its files, buffers, autosave, compilation and previews, like the Mac app's `Workspace`.
 import { batch, createRoot, createSignal, type Accessor } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
-import { compiler, Format, type CompileOutput, type DiagnosticJSON, type FontFaceData } from "./compiler";
+import { compiler, Format, type CompileOutput, type DiagnosticJSON, type FontFaceData, type SvgPage } from "./compiler";
 import { spaceRelativePath } from "./core";
 import { Solveng } from "./editor/solveng";
 import { sharedFontFiles } from "./fonts";
@@ -79,7 +79,7 @@ export class Workspace {
       text: "",
       preview: (saved?.preview ?? null) as string | null,
       expanded: saved?.expanded ?? ([] as string[]),
-      svgPages: null as string[] | null,
+      svgPages: null as SvgPage[] | null,
       pdf: null as Uint8Array | null,
       html: null as string | null,
       markdownHtml: null as string | null,
@@ -751,7 +751,7 @@ export class Workspace {
         diagnostics,
         packageErrors: result.packageErrors,
         duration: result.duration,
-        failure: !result.data && diagnostics.length === 0 ? (result.packageErrors[0] ?? "Compilation failed.") : null,
+        failure: !result.data && !result.pages && diagnostics.length === 0 ? (result.packageErrors[0] ?? "Compilation failed.") : null,
       });
       // A failed compile keeps the last report.
       if (result.solveng && result.solveng !== this.state.solvengReport) {
@@ -759,10 +759,10 @@ export class Workspace {
         this.setState("solvengReport", result.solveng);
       }
       void this.updateSolvengDiagnostics();
+      if (result.pages) this.setState("svgPages", result.pages);
       if (!result.data) return;
       if (mode === "pdf") this.setState("pdf", result.data);
       else if (mode === "html") this.setState("html", new TextDecoder().decode(result.data));
-      else this.setState("svgPages", splitPages(result.data));
     });
   }
 
@@ -846,19 +846,6 @@ export class Workspace {
   mutate(fn: (state: typeof this.state) => void) {
     this.setState(produce(fn));
   }
-}
-
-function splitPages(data: Uint8Array): string[] {
-  const pages: string[] = [];
-  const decoder = new TextDecoder();
-  let start = 0;
-  for (let i = 0; i <= data.length; i++) {
-    if (i === data.length || data[i] === 0) {
-      pages.push(decoder.decode(data.subarray(start, i)));
-      start = i + 1;
-    }
-  }
-  return pages;
 }
 
 function ancestors(path: string): string[] {

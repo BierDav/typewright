@@ -2,8 +2,9 @@ import { createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js"
 import { Portal } from "solid-js/web";
 
 export type MenuItem =
-  | { label: string; action: () => void; destructive?: boolean; disabled?: boolean; shortcut?: string }
-  | { separator: true };
+  | { label: string; action: () => void; destructive?: boolean; disabled?: boolean; shortcut?: string; checked?: boolean }
+  | { separator: true }
+  | { header: string };
 
 type Open = { x: number; y: number; items: MenuItem[] };
 
@@ -58,6 +59,8 @@ export function MenuHost(): JSX.Element {
               {(item) =>
                 "separator" in item ? (
                   <div class="menu-separator" />
+                ) : "header" in item ? (
+                  <div class="menu-header">{item.header}</div>
                 ) : (
                   <button
                     class="menu-item"
@@ -69,6 +72,9 @@ export function MenuHost(): JSX.Element {
                       item.action();
                     }}
                   >
+                    <Show when={m().items.some((i) => "checked" in i)}>
+                      <span class="menu-check">{item.checked ? "✓" : ""}</span>
+                    </Show>
                     <span>{item.label}</span>
                     <Show when={item.shortcut}>
                       <span class="menu-shortcut">{item.shortcut}</span>

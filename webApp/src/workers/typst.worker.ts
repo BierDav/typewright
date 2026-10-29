@@ -114,6 +114,20 @@ async function obtain(spec: string): Promise<void> {
 
 let compiles: Promise<unknown> = Promise.resolve();
 
+/** Splits the bridge's `svg_page_updates`: per page its hash, and its SVG when the last compile didn't send it. */
+function svgUpdates(data: Uint8Array): { key: string; svg: string | null }[] {
+  const pages: { key: string; svg: string | null }[] = [];
+  const decoder = new TextDecoder();
+  let start = 0;
+  for (let i = 0; i <= data.length; i++) {
+    if (i < data.length && data[i] !== 0) continue;
+    const key = decoder.decode(data.subarray(start, start + 32));
+    pages.push({ key, svg: i > start + 32 ? decoder.decode(data.subarray(start + 32, i)) : null });
+    start = i + 1;
+  }
+  return pages;
+}
+
 async function compile(main: string, format: number) {
   compiler!.setMain(main);
   const started = performance.now();
@@ -123,7 +137,10 @@ async function compile(main: string, format: number) {
     const missing = result.missing.filter((spec) => !failed.has(spec));
     if (missing.length === 0 || round >= 8) {
       const errors = result.missing.flatMap((spec) => (failed.has(spec) ? [failed.get(spec)!] : []));
-      return { data: result.data ?? null, diagnostics: result.diagnostics, packageErrors: errors, duration: performance.now() - started, solveng: result.solveng };
+      const data = result.data ?? null;
+      // SVG updates are decoded here, so the page thread only gets the changed pages' text.
+      const pages = format === 2 && data ? svgUpdates(data) : null;
+      return { data: pages ? null : data, pages, diagnostics: result.diagnostics, packageErrors: errors, duration: performance.now() - started, solveng: result.solveng };
     }
     await Promise.all(
       missing.map((spec) =>
@@ -175,6 +192,9 @@ async function handle(request: Request): Promise<unknown> {
       return null;
     case "setText":
       c.setText(r.path, r.text);
+      return null;
+    case "resetSvg":
+      c.resetSvg();
       return null;
     case "removeFile":
       c.removeFile(r.path);

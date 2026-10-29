@@ -2,6 +2,7 @@
 import type { EditorView } from "@codemirror/view";
 import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
+import { setSettings, settings } from "./settings";
 import { Workspace } from "./workspace";
 
 const LAST_SPACE = "typewright.lastSpace";
@@ -11,8 +12,19 @@ export const PENDING_JOIN = "typewright.pendingJoin";
 const [workspace, setWorkspaceSignal] = createSignal<Workspace | null>(null);
 export { workspace };
 
+/** The sidebar shows the list of spaces instead of the open space's files, like the Mac app's selector. */
+export const [spacesOpen, setSpacesOpen] = createSignal(false);
+
+export function toggleSpaces() {
+  if (!settings.sidebarVisible) {
+    setSettings("sidebarVisible", true);
+    setSpacesOpen(true);
+  } else setSpacesOpen((open) => !open);
+}
+
 export function openSpace(folder: string | null) {
   const current = workspace();
+  setSpacesOpen(false);
   if (current?.folder === folder) return;
   current?.dispose();
   setWorkspaceSignal(folder ? new Workspace(folder) : null);

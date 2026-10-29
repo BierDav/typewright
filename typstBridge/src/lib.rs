@@ -73,6 +73,7 @@ pub(crate) fn decode(id: FileId, bytes: FileResult<Bytes>, stale: Option<Source>
 
 /// One SVG per page, separated by NUL bytes, which SVG text can't contain. `cache` keeps the last
 /// compile's pages by layout hash, so unchanged pages aren't rendered again.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn svg_pages(cache: &Mutex<HashMap<u128, Arc<str>>>, doc: &PagedDocument) -> Vec<u8> {
     let mut cache = cache.lock();
     let mut next = HashMap::with_capacity(doc.pages().len());
@@ -203,6 +204,39 @@ pub(crate) fn solveng_report(world: &dyn World, introspector: &dyn typst::intros
         });
     }
     serde_json::to_string(&report).unwrap_or_else(|_| "{}".into())
+}
+
+/// Like `svg_pages`, but each page is its layout hash (32 hex digits) followed by its SVG only when the last
+/// call didn't send it, so the web preview receives and parses just the pages that changed.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn svg_page_updates(cache: &Mutex<HashMap<u128, Arc<str>>>, doc: &PagedDocument) -> Vec<u8> {
+    use std::fmt::Write;
+    let mut cache = cache.lock();
+    let mut next = HashMap::with_capacity(doc.pages().len());
+    let mut out = Vec::new();
+    for (i, page) in doc.pages().iter().enumerate() {
+        let hash = typst::utils::hash128(page);
+        if i > 0 {
+            out.push(0);
+        }
+        let mut id = String::with_capacity(32);
+        let _ = write!(id, "{hash:032x}");
+        out.extend_from_slice(id.as_bytes());
+        if next.contains_key(&hash) {
+            continue;
+        }
+        let svg = match cache.remove(&hash) {
+            Some(svg) => svg,
+            None => {
+                let svg: Arc<str> = Arc::from(selectable_svg(page));
+                out.extend_from_slice(svg.as_bytes());
+                svg
+            }
+        };
+        next.insert(hash, svg);
+    }
+    *cache = next;
+    out
 }
 
 /// typst draws glyphs as paths; invisible text over each run lets the preview select and copy it.

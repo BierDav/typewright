@@ -1,5 +1,6 @@
 import { createSignal, For, type JSX, Match, Show, Switch } from "solid-js";
-import { alert, copyText, isMac, openSpace, prompt, setOverlay, showHistory, showRecentlyDeleted } from "~/lib/app";
+import { alert, copyText, isMac, openSpace, prompt, setOverlay, showHistory, showRecentlyDeleted, toggleSpaces } from "~/lib/app";
+import { setSettings, settings } from "~/lib/settings";
 import * as commands from "~/lib/commands";
 import { pickFiles, readDrop } from "~/lib/drop";
 import { isPreviewable, mimeType } from "~/lib/kinds";
@@ -7,20 +8,24 @@ import { cleanName, download, renameSpace, spacePath, zipSpace } from "~/lib/spa
 import * as fs from "~/lib/storage";
 import * as syncService from "~/lib/sync";
 import { type FileNode, Workspace } from "~/lib/workspace";
-import { ChevronRight, Ellipsis, Eye, File, FileCode, FileImage, FilePlus, FileText, Folder, FolderPlus, Type, Upload } from "./icons";
+import { BookOpen, ChevronRight, Ellipsis, Eye, File, FileCode, FileImage, FileText, Folder, Plus, SquareStack, Type } from "./icons";
 import { type MenuItem, showMenu } from "./Menu";
 import { SyncBadge } from "./SyncBadge";
 
 const DRAG_TYPE = "application/x-typewright-path";
 
-function NodeIcon(props: { node: FileNode; open: boolean }): JSX.Element {
+function NodeIcon(props: { node: FileNode }): JSX.Element {
   return (
     <Switch fallback={<File size={15} />}>
       <Match when={props.node.children}>
         <Folder size={15} class="folder-icon" />
+        <ChevronRight size={13} class="chevron" />
       </Match>
       <Match when={props.node.kind === "typst"}>
-        <span class="typ-icon">t</span>
+        <span class="badge-icon typst">t</span>
+      </Match>
+      <Match when={props.node.kind === "text" && /\.(md|markdown)$/i.test(props.node.name)}>
+        <span class="badge-icon markdown">m</span>
       </Match>
       <Match when={props.node.kind === "image"}>
         <FileImage size={15} />
@@ -28,7 +33,10 @@ function NodeIcon(props: { node: FileNode; open: boolean }): JSX.Element {
       <Match when={props.node.kind === "font"}>
         <Type size={15} />
       </Match>
-      <Match when={props.node.kind === "text" && /\.(md|markdown)$/i.test(props.node.name)}>
+      <Match when={/\.bib$/i.test(props.node.name)}>
+        <BookOpen size={15} />
+      </Match>
+      <Match when={/\.pdf$/i.test(props.node.name)}>
         <FileText size={15} />
       </Match>
       <Match when={props.node.kind === "text"}>
@@ -179,9 +187,15 @@ export default function FileSidebar(props: { workspace: Workspace }) {
     };
   }
 
+  function togglePreview(path: string) {
+    ws.togglePreview(path);
+    if (settings.split === 0) setSettings("split", 0.5);
+  }
+
   function Row(rowProps: { node: FileNode; depth: number }): JSX.Element {
     const node = rowProps.node;
     const open = () => ws.state.expanded.includes(node.path);
+    const previewed = () => ws.state.preview === node.path;
     const folderDrop = node.children ? dropProps(node.path) : dropProps(fs.dirname(node.path));
     return (
       <>
@@ -189,9 +203,11 @@ export default function FileSidebar(props: { workspace: Workspace }) {
           class="tree-row"
           classList={{
             selected: ws.state.selected === node.path,
+            folder: !!node.children,
+            open: open(),
             "drop-target": !!node.children && dropTarget() === node.path,
           }}
-          style={{ "padding-left": `${8 + rowProps.depth * 14}px` }}
+          style={{ "padding-left": `${10 + rowProps.depth * 14}px` }}
           draggable={true}
           onDragStart={(e) => e.dataTransfer?.setData(DRAG_TYPE, node.path)}
           {...folderDrop}
@@ -200,14 +216,28 @@ export default function FileSidebar(props: { workspace: Workspace }) {
           onContextMenu={(e) => showMenu(e, menuFor(node))}
           title={node.path}
         >
-          <span class="disclosure" classList={{ open: open(), hidden: !node.children }}>
-            <ChevronRight size={12} />
+          <span class="row-icon">
+            <NodeIcon node={node} />
           </span>
-          <NodeIcon node={node} open={open()} />
           <span class="tree-name">{node.name}</span>
           <SyncBadge path={ws.repoPath(node.path)} />
-          <Show when={ws.state.preview === node.path}>
-            <Eye size={13} class="tree-badge" />
+          <Show when={node.children}>
+            <button class="row-action" title="More" onClick={(e) => showMenu(e, menuFor(node))}>
+              <Ellipsis size={14} />
+            </button>
+          </Show>
+          <Show when={!node.children && isPreviewable(node.path)}>
+            <button
+              class="row-action"
+              classList={{ active: previewed() }}
+              title={previewed() ? "Hide preview" : "Preview this file"}
+              onClick={(e) => {
+                e.stopPropagation();
+                togglePreview(node.path);
+              }}
+            >
+              <Eye size={14} />
+            </button>
           </Show>
         </div>
         <Show when={node.children && open()}>
@@ -217,26 +247,37 @@ export default function FileSidebar(props: { workspace: Workspace }) {
     );
   }
 
+  function createMenu(): MenuItem[] {
+    return [
+      { label: "New File…", action: () => void newFile() },
+      { label: "New Folder…", action: () => void newFolder() },
+      { separator: true },
+      { label: "Upload Files…", action: () => void upload() },
+      {
+        label: "Upload Folder…",
+        action: async () => {
+          const files = await pickFiles({ directory: true });
+          if (files.length) await ws.importFiles("", files);
+        },
+      },
+    ];
+  }
+
   return (
-    <aside class="file-sidebar">
-      <header class="pane-header">
-        <button class="space-name" title="Rename space" onClick={() => void renameCurrentSpace(ws)}>
-          {ws.name}
-        </button>
-        <SyncBadge path={ws.folder} />
-        <div class="spacer" />
-        <button class="icon-button" title="New file" onClick={() => void newFile()}>
-          <FilePlus size={15} />
-        </button>
-        <button class="icon-button" title="New folder" onClick={() => void newFolder()}>
-          <FolderPlus size={15} />
-        </button>
-        <button class="icon-button" title="Upload files" onClick={() => void upload()}>
-          <Upload size={15} />
-        </button>
-        <button class="icon-button" title="More" onClick={(e) => showMenu(e, spaceMenu())}>
-          <Ellipsis size={15} />
-        </button>
+    <div class="sidebar-content">
+      <header class="sidebar-header">
+        <div class="space-header" classList={{ "drop-target": dropTarget() === "" }} {...dropProps("")} onContextMenu={(e) => showMenu(e, spaceMenu())}>
+          <button class="space-title" title="Spaces" onClick={() => toggleSpaces()} onDblClick={() => void renameCurrentSpace(ws)}>
+            <span class="row-icon">
+              <Folder size={15} class="filled" />
+            </span>
+            <span class="tree-name">{ws.name}</span>
+          </button>
+          <SyncBadge path={ws.folder} />
+          <button class="row-action" title="More" onClick={(e) => showMenu(e, spaceMenu())}>
+            <Ellipsis size={14} />
+          </button>
+        </div>
       </header>
       <div
         class="tree"
@@ -256,7 +297,16 @@ export default function FileSidebar(props: { workspace: Workspace }) {
           </div>
         </Show>
       </div>
-    </aside>
+      <footer class="sidebar-footer">
+        <button class="round-button" title={`Spaces (${isMac ? "⇧⌘S" : "Ctrl+Shift+S"})`} onClick={() => toggleSpaces()}>
+          <SquareStack size={15} />
+        </button>
+        <div class="spacer" />
+        <button class="round-button" title="New file or folder" onClick={(e) => showMenu(e, createMenu())}>
+          <Plus size={16} />
+        </button>
+      </footer>
+    </div>
   );
 }
 

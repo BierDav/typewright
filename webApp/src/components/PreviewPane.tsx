@@ -5,7 +5,8 @@ import { isDark, type RenderMode, setSettings, settings } from "~/lib/settings";
 import type { Workspace } from "~/lib/workspace";
 import { isMarkdown, isPreviewable } from "~/lib/kinds";
 import { basename } from "~/lib/storage";
-import { ChevronDown, EyeOff, FileDown, ZoomIn, ZoomOut } from "./icons";
+import { Ellipsis, ZoomIn, ZoomOut } from "./icons";
+import { type MenuItem, showMenu } from "./Menu";
 
 const ZOOMS = [0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 
@@ -69,7 +70,7 @@ const canShowPdf = typeof navigator === "undefined" || navigator.pdfViewerEnable
 export default function PreviewPane(props: { workspace: Workspace }) {
   const ws = props.workspace;
   const [markdownCss] = createResource(() => compiler.markdownCss().catch(() => ""));
-  let scroller!: HTMLDivElement;
+  let scroller: HTMLDivElement | undefined;
   const [zoom, setZoom] = createSignal<number | "fit">("fit");
   const [width, setWidth] = createSignal(600);
   const [page, setPage] = createSignal(0);
@@ -100,8 +101,7 @@ export default function PreviewPane(props: { workspace: Workspace }) {
   const scale = createMemo(() => {
     const z = zoom();
     if (z !== "fit") return z * (96 / 72);
-    const first = ws.state.svgPages?.[0];
-    const pt = first ? Number(/viewBox="[\d.]+ [\d.]+ ([\d.]+)/.exec(first)?.[1] ?? 595) : 595;
+    const pt = ws.state.svgPages?.[0]?.width ?? 595;
     return Math.max((width() - 48) / pt, 0.1);
   });
 
@@ -113,6 +113,8 @@ export default function PreviewPane(props: { workspace: Workspace }) {
 
   /** A click on a page jumps to the source that made it. */
   async function click(event: MouseEvent, index: number) {
+    // Selecting text isn't a click on the page.
+    if (!getSelection()?.isCollapsed) return;
     const svg = (event.currentTarget as HTMLElement).querySelector("svg");
     if (!svg) return;
     const rect = svg.getBoundingClientRect();
@@ -126,9 +128,11 @@ export default function PreviewPane(props: { workspace: Workspace }) {
     else scrollTo(jump);
   }
 
+  const pageElements = () => scroller?.querySelectorAll<HTMLElement>(".svg-page") ?? [];
+
   function scrollTo(position: { page: number; x: number; y: number }, onlyIfHidden = false) {
-    const pageEl = scroller?.querySelectorAll<HTMLElement>(".svg-page")[position.page];
-    if (!pageEl) return;
+    const pageEl = pageElements()[position.page];
+    if (!pageEl || !scroller) return;
     const top = pageEl.offsetTop + position.y * scale() - scroller.clientHeight / 3;
     const visible = top + scroller.clientHeight / 3 > scroller.scrollTop && top + scroller.clientHeight / 3 < scroller.scrollTop + scroller.clientHeight;
     if (onlyIfHidden && visible) return;
@@ -153,15 +157,28 @@ export default function PreviewPane(props: { workspace: Workspace }) {
       { defer: true },
     ),
   );
+  onCleanup(() => clearTimeout(followTimer));
 
+  // Pages above the middle of the pane, binary searched since documents can be long.
+  let scrollFrame = 0;
   function onScroll() {
-    const pages = scroller.querySelectorAll<HTMLElement>(".svg-page");
-    let index = 0;
-    pages.forEach((p, i) => {
-      if (p.offsetTop - scroller.scrollTop < scroller.clientHeight / 2) index = i;
+    if (scrollFrame) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      const pages = pageElements();
+      if (!scroller || !pages.length) return;
+      const middle = scroller.scrollTop + scroller.clientHeight / 2;
+      let low = 0;
+      let high = pages.length - 1;
+      while (low < high) {
+        const mid = (low + high + 1) >> 1;
+        if (pages[mid].offsetTop <= middle) low = mid;
+        else high = mid - 1;
+      }
+      setPage(low);
     });
-    setPage(index);
   }
+  onCleanup(() => cancelAnimationFrame(scrollFrame));
 
   function setMode(mode: RenderMode) {
     if (mode === settings.renderMode) return;
@@ -171,63 +188,45 @@ export default function PreviewPane(props: { workspace: Workspace }) {
 
   const file = () => ws.state.preview;
   const errors = () => ws.state.diagnostics.filter((d) => d.severity === "error").length;
+  const isTypst = () => !!file()?.endsWith(".typ");
+  const zoomable = () => isTypst() && settings.renderMode === "svg" && !!ws.state.svgPages;
+
+  function moreMenu(): MenuItem[] {
+    const items: MenuItem[] = [];
+    if (isTypst()) {
+      items.push({ header: "Render As" });
+      for (const [mode, label] of [["svg", "SVG"], ["pdf", "PDF"], ["html", "HTML"]] as [RenderMode, string][]) {
+        items.push({ label, checked: settings.renderMode === mode, action: () => setMode(mode) });
+      }
+      items.push({ separator: true });
+    }
+    if (previewable().length > 1) {
+      items.push({ header: "Preview" });
+      for (const f of previewable()) items.push({ label: f.path, checked: f.path === file(), action: () => ws.setPreview(f.path) });
+      items.push({ separator: true });
+    }
+    if (isTypst()) items.push({ label: "Export PDF…", action: () => void commands.exportPDF() });
+    items.push({ label: "Hide Preview", action: () => setSettings("split", 0) });
+    return items;
+  }
 
   return (
     <section class="preview">
-      <header class="pane-header">
-        <div class="preview-title">
-          <select class="plain-select" onChange={(e) => ws.setPreview(e.currentTarget.value || null)} title="Previewed file">
-            <option value="" selected={!file()}>No Preview</option>
-            {/* `selected` per option, as a `value` on the select is set before its options exist. */}
-            <For each={previewable()}>{(f) => <option value={f.path} selected={f.path === file()}>{f.path}</option>}</For>
-          </select>
-          <ChevronDown size={12} />
-        </div>
-        <div class="spacer" />
-        <Show when={file() && !isMarkdown(file()!)}>
-          <div class="segmented" role="radiogroup" aria-label="Render as">
-            <For each={["pdf", "html", "svg"] as RenderMode[]}>
-              {(mode) => (
-                <button classList={{ active: settings.renderMode === mode }} onClick={() => setMode(mode)}>
-                  {mode.toUpperCase()}
-                </button>
-              )}
-            </For>
-          </div>
-        </Show>
-        <Show when={settings.renderMode === "svg" && ws.state.svgPages}>
-          <button class="icon-button" title="Zoom out" onClick={() => step(-1)}>
-            <ZoomOut size={15} />
-          </button>
-          <button class="zoom-label" title="Fit width" onClick={() => setZoom("fit")}>
-            {zoom() === "fit" ? "Fit" : `${Math.round((zoom() as number) * 100)}%`}
-          </button>
-          <button class="icon-button" title="Zoom in" onClick={() => step(1)}>
-            <ZoomIn size={15} />
-          </button>
-        </Show>
-        <Show when={file()?.endsWith(".typ")}>
-          <button class="icon-button" title="Export PDF" onClick={() => void commands.exportPDF()}>
-            <FileDown size={15} />
-          </button>
-        </Show>
-        <button class="icon-button" title="Hide preview" onClick={() => setSettings("split", 0)}>
-          <EyeOff size={15} />
-        </button>
-      </header>
-      <div class="preview-body" classList={{ stale: ws.state.compiling }}>
+      <div class="preview-body">
         <Switch
           fallback={
             <div class="empty-state">
-              <Show when={file()} fallback={<p>Choose a Typst or Markdown file to preview.</p>}>
-                <Show when={ws.state.failure} fallback={<p class="secondary">Compiling…</p>}>
-                  <p class="title">Couldn't compile {basename(file()!)}</p>
-                  <p class="secondary">{ws.state.failure}</p>
-                </Show>
-                <Show when={errors() > 0 && !ws.state.failure}>
-                  <button class="link-button" onClick={() => ws.revealDiagnostic(ws.state.diagnostics[0])}>
-                    {errors()} {errors() === 1 ? "error" : "errors"}; show the first
-                  </button>
+              <Show when={file()} fallback={<p class="secondary">Choose a Typst or Markdown file to preview.</p>}>
+                <Show when={ws.state.failure || errors() > 0} fallback={<div class="spinner" aria-label="Compiling" />}>
+                  <p class="title">Compilation failed</p>
+                  <Show when={ws.state.failure}>
+                    <p class="secondary">{ws.state.failure}</p>
+                  </Show>
+                  <Show when={errors() > 0 && !ws.state.failure}>
+                    <button class="link-button" onClick={() => ws.revealDiagnostic(ws.state.diagnostics[0])}>
+                      {errors()} {errors() === 1 ? "error" : "errors"} in {basename(file()!)}; show the first
+                    </button>
+                  </Show>
                 </Show>
               </Show>
             </div>
@@ -250,19 +249,24 @@ export default function PreviewPane(props: { workspace: Workspace }) {
                 step(e.deltaY < 0 ? 1 : -1);
               }}
             >
+              {/* Keyed by page object: a page whose layout didn't change keeps its parsed SVG. */}
               <For each={ws.state.svgPages!}>
-                {(svg, index) => (
+                {(svgPage, index) => (
                   <div
                     class="svg-page"
-                    style={{ width: `${(Number(/viewBox="[\d.]+ [\d.]+ ([\d.]+)/.exec(svg)?.[1] ?? 595) * scale()).toFixed(1)}px` }}
-                    innerHTML={svg}
+                    style={{
+                      width: `${(svgPage.width * scale()).toFixed(1)}px`,
+                      "aspect-ratio": `${svgPage.width} / ${svgPage.height}`,
+                      "contain-intrinsic-size": `auto ${(svgPage.width * scale()).toFixed(0)}px auto ${(svgPage.height * scale()).toFixed(0)}px`,
+                    }}
+                    innerHTML={svgPage.svg}
                     onClick={(e) => void click(e, index())}
                   />
                 )}
               </For>
               <Show when={marker()}>
                 {(m) => {
-                  const pageEl = () => scroller?.querySelectorAll<HTMLElement>(".svg-page")[m().page];
+                  const pageEl = () => pageElements()[m().page];
                   return (
                     <Show when={pageEl()}>
                       <div class="jump-marker" style={{ top: `${pageEl()!.offsetTop + m().y * scale()}px`, left: `${pageEl()!.offsetLeft + m().x * scale()}px` }} />
@@ -270,9 +274,6 @@ export default function PreviewPane(props: { workspace: Workspace }) {
                   );
                 }}
               </Show>
-            </div>
-            <div class="page-indicator">
-              Page {page() + 1} of {ws.state.svgPages!.length}
             </div>
           </Match>
           <Match when={settings.renderMode === "pdf" && pdfUrl() && !canShowPdf}>
@@ -302,6 +303,32 @@ export default function PreviewPane(props: { workspace: Workspace }) {
             />
           </Match>
         </Switch>
+      </div>
+      {/* Like the Mac app's floating bar: a glass capsule at the bottom, shown while the pointer is over the preview. */}
+      <div class="floating-bar glass-capsule">
+        <Show when={zoomable()}>
+          <button class="icon-button" title="Zoom out" onClick={() => step(-1)}>
+            <ZoomOut size={15} />
+          </button>
+          <button class="zoom-label" title="Fit width" onClick={() => setZoom("fit")}>
+            {zoom() === "fit" ? "Fit" : `${Math.round((zoom() as number) * 100)}%`}
+          </button>
+          <button class="icon-button" title="Zoom in" onClick={() => step(1)}>
+            <ZoomIn size={15} />
+          </button>
+          <span class="bar-label">
+            {page() + 1} / {ws.state.svgPages!.length}
+          </span>
+        </Show>
+        <Show when={ws.state.compiling}>
+          <div class="spinner small" aria-label="Compiling" />
+        </Show>
+        <Show when={zoomable() || ws.state.compiling}>
+          <span class="bar-separator" />
+        </Show>
+        <button class="icon-button" title="More" onClick={(e) => showMenu(e, moreMenu())}>
+          <Ellipsis size={15} />
+        </button>
       </div>
     </section>
   );

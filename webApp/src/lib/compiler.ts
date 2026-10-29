@@ -4,8 +4,13 @@ import TypstWorker from "~/workers/typst.worker.ts?worker";
 
 export type DiagnosticJSON = { path: string; line: number; column: number; length?: number | null; severity: "error" | "warning"; message: string };
 
+/** One SVG page; pages with the same layout are the same object, so the preview keeps their DOM. */
+export type SvgPage = { key: string; svg: string; width: number; height: number };
+
 export type CompileOutput = {
   data: Uint8Array | null;
+  /** The pages of an SVG compile. */
+  pages: SvgPage[] | null;
   diagnostics: DiagnosticJSON[];
   packageErrors: string[];
   duration: number;
@@ -32,6 +37,8 @@ class CompilerClient {
   private files = new Map<string, Uint8Array | string>();
   private fonts: Uint8Array[] = [];
   private index: string | null = null;
+  /** The pages the worker's bridge sent last, by hash; it only sends the ones missing here. */
+  private svgPages = new Map<string, SvgPage>();
   version = "";
 
   private start(): Worker {
@@ -122,7 +129,33 @@ class CompilerClient {
 
   async compile(main: string, format: number): Promise<CompileOutput> {
     const result = await this.post({ op: "compile", main, format });
-    return { ...result, diagnostics: JSON.parse(result.diagnostics) };
+    let pages: SvgPage[] | null = null;
+    if (result.pages) {
+      pages = this.applySvgUpdates(result.pages);
+      // Out of step with the bridge (a crashed worker or a dropped reply): have it send every page again.
+      if (!pages) {
+        await this.post({ op: "resetSvg" });
+        return this.compile(main, format);
+      }
+    }
+    return { ...result, pages, diagnostics: JSON.parse(result.diagnostics) };
+  }
+
+  private applySvgUpdates(updates: { key: string; svg: string | null }[]): SvgPage[] | null {
+    const next = new Map<string, SvgPage>();
+    const pages: SvgPage[] = [];
+    for (const { key, svg } of updates) {
+      let page = next.get(key) ?? this.svgPages.get(key);
+      if (!page && svg !== null) {
+        const box = /viewBox="[-\d.]+ [-\d.]+ ([\d.]+) ([\d.]+)"/.exec(svg.slice(0, 400));
+        page = { key, svg, width: Number(box?.[1] ?? 595), height: Number(box?.[2] ?? 842) };
+      }
+      if (!page) return null;
+      next.set(key, page);
+      pages.push(page);
+    }
+    this.svgPages = next;
+    return pages;
   }
 
   complete(path: string, cursor: number, explicit: boolean): Promise<{ from: number; items: Completion[] } | null> {

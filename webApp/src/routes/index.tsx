@@ -1,10 +1,10 @@
-import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createSignal, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import CommandPalette, { closePalette } from "~/components/CommandPalette";
 import Dialogs from "~/components/Dialogs";
 import Editor from "~/components/Editor";
 import FileSidebar from "~/components/FileSidebar";
 import FileViewer from "~/components/FileViewer";
-import { Eye, EyeOff, Link, PanelLeft, PanelRight, Plus, Search, Upload } from "~/components/icons";
+import { File as FileIcon, Link, Plus, Upload } from "~/components/icons";
 import { MenuHost } from "~/components/Menu";
 import PreviewPane from "~/components/PreviewPane";
 import RecentlyDeleted from "~/components/RecentlyDeleted";
@@ -12,12 +12,12 @@ import FileHistory from "~/components/FileHistory";
 import SearchPanel from "~/components/SearchPanel";
 import SettingsWindow from "~/components/Settings";
 import SpacesSidebar, { importFolder, importZip, newSpace } from "~/components/SpacesSidebar";
-import StatusBar from "~/components/StatusBar";
-import { alert, isMac, lastSpace, openSpace, overlay, PENDING_JOIN, setOverlay, workspace } from "~/lib/app";
+import StatusBar, { Issues } from "~/components/StatusBar";
+import { alert, isMac, lastSpace, openSpace, overlay, PENDING_JOIN, setOverlay, spacesOpen, toggleSpaces, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { compiler } from "~/lib/compiler";
 import { loadIdentity } from "~/lib/identity";
-import { isEditable, isPreviewable } from "~/lib/kinds";
+import { isEditable } from "~/lib/kinds";
 import { setSettings, settings } from "~/lib/settings";
 import { refreshSpaces, spaces } from "~/lib/spaces";
 import * as jj from "~/lib/jj";
@@ -86,83 +86,46 @@ function Space(props: { workspace: Workspace }) {
   const selected = () => ws.state.selected;
 
   return (
-    <div class="space">
-      <Show when={settings.sidebarVisible}>
-        <FileSidebar workspace={ws} />
-      </Show>
-      <div class="content">
-        <div class="split" ref={split}>
-          <section class="editor-pane">
-            <header class="pane-header">
-              <Show when={!settings.sidebarVisible || !settings.spacesVisible}>
-                <button class="icon-button" title="Show sidebar" onClick={() => setSettings({ sidebarVisible: true, spacesVisible: true })}>
-                  <PanelLeft size={15} />
-                </button>
-              </Show>
-              <div class="breadcrumb">
-                <Show when={selected()} fallback={<span class="secondary">No file selected</span>}>
-                  <For each={selected()!.split("/")}>
-                    {(part, i) => (
-                      <>
-                        <Show when={i() > 0}>
-                          <span class="secondary">/</span>
-                        </Show>
-                        <span classList={{ current: i() === selected()!.split("/").length - 1 }}>{part}</span>
-                      </>
-                    )}
-                  </For>
-                </Show>
+    <div class="split" ref={split}>
+      <section class="editor-pane">
+        <div class="editor-body">
+          <div class="editor-host" classList={{ hidden: !editable() }}>
+            <Editor workspace={ws} />
+          </div>
+          <Switch>
+            <Match when={selected() && !editable() && ws.state.selectedKind}>
+              <FileViewer workspace={ws} path={selected()!} />
+            </Match>
+            <Match when={!selected() && ws.state.loaded}>
+              <div class="empty-state">
+                <FileIcon size={40} class="empty-icon" />
+                <p class="title">No file selected</p>
+                <p class="secondary">Pick a file in the sidebar, or press {isMac ? "⌘K" : "Ctrl+K"} to search.</p>
               </div>
-              <div class="spacer" />
-              <Show when={selected() && isPreviewable(selected()!)}>
-                <button
-                  class="icon-button"
-                  classList={{ active: ws.state.preview === selected() }}
-                  title={ws.state.preview === selected() ? "Hide preview" : "Preview this file"}
-                  onClick={() => {
-                    ws.togglePreview(selected()!);
-                    if (settings.split === 0) setSettings("split", 0.5);
-                  }}
-                >
-                  {ws.state.preview === selected() ? <EyeOff size={15} /> : <Eye size={15} />}
-                </button>
-              </Show>
-              <button class="icon-button" title={`Find in ${ws.name}`} onClick={() => setOverlay({ type: "search", allSpaces: false })}>
-                <Search size={15} />
-              </button>
-              <Show when={settings.split === 0}>
-                <button class="icon-button" title="Show preview" onClick={() => setSettings("split", 0.5)}>
-                  <PanelRight size={15} />
-                </button>
-              </Show>
-            </header>
-            <div class="editor-body">
-              <div class="editor-host" classList={{ hidden: !editable() }}>
-                <Editor workspace={ws} />
-              </div>
-              <Switch>
-                <Match when={selected() && !editable() && ws.state.selectedKind}>
-                  <FileViewer workspace={ws} path={selected()!} />
-                </Match>
-                <Match when={!selected() && ws.state.loaded}>
-                  <div class="empty-state">
-                    <p class="title">No file selected</p>
-                    <p class="secondary">Pick a file in the sidebar, or press {isMac ? "⌘K" : "Ctrl+K"} to search.</p>
-                  </div>
-                </Match>
-              </Switch>
-            </div>
-          </section>
-          <Show when={settings.split > 0}>
-            <Divider container={() => split} />
-            <div class="preview-pane" style={{ width: `${settings.split * 100}%` }}>
-              <PreviewPane workspace={ws} />
-            </div>
-          </Show>
+            </Match>
+          </Switch>
+          <Issues workspace={ws} />
         </div>
         <StatusBar workspace={ws} />
-      </div>
+      </section>
+      <Show when={settings.split > 0 && ws.state.preview}>
+        <Divider container={() => split} />
+        <div class="preview-pane" style={{ width: `${settings.split * 100}%` }}>
+          <PreviewPane workspace={ws} />
+        </div>
+      </Show>
     </div>
+  );
+}
+
+/** The one sidebar, floating over the window like the Mac app's: the space's files, or the list of spaces. */
+function Sidebar() {
+  return (
+    <aside class="sidebar">
+      <Show when={workspace() && !spacesOpen()} fallback={<SpacesSidebar />}>
+        <FileSidebar workspace={workspace()!} />
+      </Show>
+    </aside>
   );
 }
 
@@ -180,7 +143,7 @@ export default function Home() {
     } else if (key === "KeyP" && !event.altKey && !event.shiftKey) setOverlay({ type: "palette" });
     else if (key === "Comma") setOverlay({ type: "settings" });
     else if (key === "KeyF" && event.shiftKey && !event.altKey) setOverlay({ type: "search", allSpaces: false });
-    else if (key === "KeyS" && event.shiftKey && !event.altKey) setSettings("spacesVisible", (v) => !v);
+    else if (key === "KeyS" && event.shiftKey && !event.altKey) toggleSpaces();
     // Edits save on their own, so ⌘S toggles the sidebar like in the Mac app.
     else if (key === "KeyS" && !event.shiftKey) setSettings("sidebarVisible", (v) => !v);
     else if (key === "KeyI" && event.altKey && workspace()?.state.selected) setOverlay({ type: "palette", page: `move:${workspace()!.state.selected}` });
@@ -229,8 +192,8 @@ export default function Home() {
 
   return (
     <div class="app" classList={{ ready: ready() }}>
-      <Show when={settings.spacesVisible}>
-        <SpacesSidebar />
+      <Show when={settings.sidebarVisible || !workspace()}>
+        <Sidebar />
       </Show>
       <main class="main">
         <Show when={workspace()} keyed fallback={<Show when={ready()}><Welcome /></Show>}>

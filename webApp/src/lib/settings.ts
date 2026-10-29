@@ -32,7 +32,6 @@ export type Settings = {
   /** Labels this device's cursor on other devices. */
   deviceName: string;
   sidebarVisible: boolean;
-  spacesVisible: boolean;
   /** Width of the preview as a share of the window. */
   split: number;
 };
@@ -53,7 +52,6 @@ const defaults: Settings = {
   historyRetention: DEFAULT_RETENTION,
   deviceName: defaultDeviceName(),
   sidebarVisible: true,
-  spacesVisible: true,
   split: 0.5,
 };
 

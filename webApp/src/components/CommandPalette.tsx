@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, type JSX, on, onCleanup, onMount, Show, untrack } from "solid-js";
-import { editorView, openSpace, overlay, setOverlay, shortcut, showHistory, showRecentlyDeleted, workspace } from "~/lib/app";
+import { editorView, openSpace, overlay, setOverlay, shortcut, showHistory, showRecentlyDeleted, spacesOpen, toggleSpaces, workspace } from "~/lib/app";
 import * as commands from "~/lib/commands";
 import { fuzzyScore } from "~/lib/core";
 import { symbolAt } from "~/lib/editor/refactor";
@@ -309,7 +309,7 @@ async function rootItems(): Promise<Item[]> {
     items.push({ id: `space:${folder}`, title: `Open ${folder}`, section: "Spaces", icon: "space", action: { run: () => openSpace(folder) } });
   }
   items.push(
-    { id: "spaces.toggle", title: settings.spacesVisible ? "Hide Spaces" : "Show Spaces", section: "Spaces", shortcut: shortcut("⇧⌘S"), action: { run: () => setSettings("spacesVisible", (v) => !v) } },
+    { id: "spaces.toggle", title: spacesOpen() ? "Back to the Space" : "Show Spaces", section: "Spaces", shortcut: shortcut("⇧⌘S"), action: { run: () => toggleSpaces() } },
     { id: "spaces.new", title: "New Space…", section: "Spaces", action: { run: () => void newSpace() } },
     { id: "spaces.folder", title: "Import Folder as Space…", section: "Spaces", keywords: ["open", "upload"], action: { run: () => void importFolder() } },
     { id: "spaces.zip", title: "Import Zip as Space…", section: "Spaces", keywords: ["open", "upload"], action: { run: () => void importZip() } },
