@@ -12,6 +12,10 @@ files:
   - package.json
   - web/**
 asar: true
+# The browser returns passkey sign-ins through this scheme (main.js).
+protocols:
+  - name: Typewright Passkey Sign-In
+    schemes: [typewright-desktop]
 
 # Made ahead by scripts/make-icon-desktopApp.sh: electron-builder's own converter needs Node.
 mac:

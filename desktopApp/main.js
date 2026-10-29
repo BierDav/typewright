@@ -12,8 +12,8 @@ const devServer = process.env.TYPEWRIGHT_DESKTOP_URL;
 // One fixed origin, so spaces stored in the browser storage survive updates.
 const ORIGIN = "app://typewright";
 const isMac = process.platform === "darwin";
-// Centred in the sidebar's 44 px header, which starts 8 px from the window's edge.
-const TRAFFIC_LIGHTS = { x: 22, y: 22 };
+// In the sidebar's top corner, as far from its edges as its rounding (the sidebar starts 8 px in).
+const TRAFFIC_LIGHTS = { x: 20, y: 20 };
 
 // Lets tests drive a development build over the DevTools protocol.
 if (process.env.TYPEWRIGHT_DEBUG_PORT && !app.isPackaged) app.commandLine.appendSwitch("remote-debugging-port", process.env.TYPEWRIGHT_DEBUG_PORT);
@@ -33,6 +33,60 @@ async function serve(request) {
   // Wasm compiles in streaming only with its own type.
   if (target.endsWith(".wasm")) return new Response(response.body, { headers: { "content-type": "application/wasm" } });
   return response;
+}
+
+// MARK: - Passkeys
+
+// Electron can't use passkeys of the web app's domain, so they run in the default browser on its page
+// (webApp/src/routes/passkey.tsx), which returns the account through a `typewright-desktop://` link encrypted to a one-time key.
+const HANDOFF_SCHEME = "typewright-desktop";
+const PASSKEY_PAGE = process.env.TYPEWRIGHT_PASSKEY_PAGE ?? (devServer ? new URL("passkey", devServer).href : "https://bierdav.github.io/typewright/passkey");
+const subtle = globalThis.crypto.subtle;
+/** The one sign-in waiting for its link; a new one replaces it. */
+let pendingPasskey = null;
+
+const base64url = (bytes) => Buffer.from(bytes).toString("base64url");
+
+async function passkey(mode, name) {
+  pendingPasskey?.resolve(null);
+  const keys = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveKey"]);
+  const state = base64url(globalThis.crypto.getRandomValues(new Uint8Array(16)));
+  const request = { v: 1, mode, name: String(name ?? "").slice(0, 64), key: base64url(new Uint8Array(await subtle.exportKey("raw", keys.publicKey))), state };
+  const result = new Promise((resolve) => {
+    // Gives up after a while, so a sign-in abandoned in the browser doesn't keep the button busy.
+    const timer = setTimeout(() => finish(null), 10 * 60 * 1000);
+    const finish = (value) => {
+      clearTimeout(timer);
+      if (pendingPasskey?.state === state) pendingPasskey = null;
+      resolve(value);
+    };
+    pendingPasskey = { state, privateKey: keys.privateKey, resolve: finish };
+  });
+  await shell.openExternal(`${PASSKEY_PAGE}#${base64url(Buffer.from(JSON.stringify(request)))}`);
+  return result;
+}
+
+async function receivePasskey(url) {
+  const pending = pendingPasskey;
+  if (!pending) return;
+  try {
+    const reply = JSON.parse(Buffer.from(new URL(url).hash.slice(1), "base64url").toString());
+    if (reply.state !== pending.state) return;
+    const browser = await subtle.importKey("raw", Buffer.from(reply.key, "base64url"), { name: "ECDH", namedCurve: "P-256" }, false, []);
+    const key = await subtle.deriveKey({ name: "ECDH", public: browser }, pending.privateKey, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv: Buffer.from(reply.iv, "base64url"), additionalData: Buffer.from(pending.state) }, key, Buffer.from(reply.data, "base64url"));
+    const { secret, name } = JSON.parse(Buffer.from(plain).toString());
+    if (!/^[0-9a-f]{64}$/.test(secret)) return;
+    pending.resolve({ secret, name: String(name ?? "") });
+    const [window] = windows;
+    if (window) {
+      if (window.isMinimized()) window.restore();
+      window.focus();
+    }
+    app.focus({ steal: true });
+  } catch (err) {
+    console.error("Passkey link", err);
+  }
 }
 
 // MARK: - Window bounds
@@ -82,6 +136,8 @@ function createWindow() {
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#1e1e1e" : "#ececec",
     // On macOS the content reaches the top, and the window buttons sit inside the sidebar's corner.
     ...(isMac ? { titleBarStyle: "hidden", trafficLightPosition: TRAFFIC_LIGHTS } : {}),
+    // Packaged builds take theirs from the bundle; Windows and Linux development runs need it here.
+    ...(!isMac && !app.isPackaged ? { icon: path.join(here, "build/icons/512x512.png") } : {}),
     webPreferences: { contextIsolation: true, sandbox: true, spellcheck: true, preload: path.join(here, "preload.cjs") },
   });
   if (saved?.maximized) window.maximize();
@@ -143,11 +199,25 @@ ipcMain.on("traffic-lights", (event, visible) => {
   if (isMac) BrowserWindow.fromWebContents(event.sender)?.setWindowButtonVisibility(visible);
 });
 
+ipcMain.handle("passkey", (_event, mode, name) => (isMac && (mode === "create" || mode === "get") ? passkey(mode, name) : null));
+
+// macOS delivers the browser's link here, also when it launched the app.
+app.on("open-url", (event, url) => {
+  if (!url.startsWith(`${HANDOFF_SCHEME}://`)) return;
+  event.preventDefault();
+  void receivePasskey(url);
+});
+
 ipcMain.on("theme", (_event, theme) => {
   if (["system", "light", "dark"].includes(theme)) nativeTheme.themeSource = theme;
 });
 
+// Packaged builds declare the scheme in Info.plist; a development run registers Electron itself.
+if (isMac && !app.isPackaged) app.setAsDefaultProtocolClient(HANDOFF_SCHEME, process.execPath, [path.resolve(here)]);
+
 app.whenReady().then(() => {
+  // A development run is Electron's own bundle, which would show Electron's icon.
+  if (!app.isPackaged && isMac) app.dock?.setIcon(path.join(here, "build/icons/1024x1024.png"));
   protocol.handle("app", serve);
   menu();
   createWindow();

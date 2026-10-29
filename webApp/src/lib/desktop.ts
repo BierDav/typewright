@@ -5,6 +5,8 @@ type Desktop = {
   setTrafficLights(visible: boolean): void;
   /** Lets the window's own chrome (title bar, scroll bars, menus) follow the app's theme. */
   setTheme(theme: "system" | "light" | "dark"): void;
+  /** Runs a passkey in the default browser and returns the account it gives (macOS only); null when cancelled. */
+  passkey?(mode: "create" | "get", name: string): Promise<{ secret: string; name: string } | null>;
 };
 
 export const desktop: Desktop | undefined = typeof window === "undefined" ? undefined : (window as unknown as { typewrightDesktop?: Desktop }).typewrightDesktop;

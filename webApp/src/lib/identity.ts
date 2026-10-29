@@ -2,6 +2,7 @@
 // from, or by an account key copied over by hand. It matches the Mac app's `SyncIdentity` (relying party,
 // salt, derivation and key format), so the same passkey or key signs in to the same account in both.
 import { createStore } from "solid-js/store";
+import { desktop } from "./desktop";
 
 /** The Mac app's relying party; set `VITE_PASSKEY_DOMAIN` for other deployments. */
 const PASSKEY_DOMAIN: string = import.meta.env.VITE_PASSKEY_DOMAIN || "bierdav.github.io";
@@ -31,6 +32,8 @@ export function unhex(text: string): Uint8Array {
 
 /** The relying party this page can use: the Mac app's when served from its domain, else this host. */
 export function relyingParty(): string {
+  // The desktop app's passkeys run in the browser, on the hosted web app's page.
+  if (desktop?.passkey) return PASSKEY_DOMAIN;
   const host = location.hostname;
   return host === PASSKEY_DOMAIN || host.endsWith(`.${PASSKEY_DOMAIN}`) ? PASSKEY_DOMAIN : host;
 }
@@ -41,6 +44,7 @@ export function sharesMacPasskeys(): boolean {
 }
 
 export function passkeysSupported(): boolean {
+  if (desktop?.passkey) return true;
   return typeof PublicKeyCredential !== "undefined" && window.isSecureContext;
 }
 
@@ -137,33 +141,55 @@ async function run(body: () => Promise<{ prf: ArrayBuffer; name: string }>) {
   }
 }
 
+/** The account a passkey gives, without signing in here: the page the desktop app sends to the browser uses it. */
+export async function passkeyAccount(mode: "create" | "get", name = ""): Promise<{ secret: Uint8Array; name: string }> {
+  const result = mode === "create" ? await createCredential(name.trim()) : await assert();
+  return { secret: await deriveAccount(result.prf), name: result.name };
+}
+
+/** The desktop app runs the passkey in the default browser, on the relying party's domain. */
+async function runInBrowser(mode: "create" | "get", name = "") {
+  setIdentity({ working: true, error: null });
+  try {
+    const result = await desktop!.passkey!(mode, name.trim());
+    if (result) await adopt(unhex(result.secret), result.name, "passkey");
+  } catch (err) {
+    // Dismissing the sheet isn't an error worth showing.
+    if ((err as DOMException)?.name !== "NotAllowedError") setIdentity("error", (err as Error).message);
+  } finally {
+    setIdentity("working", false);
+  }
+}
+
 /** Creates the account's passkey, named `name` (like an email address) in the password manager. */
 export function createPasskey(rawName: string) {
-  const name = rawName.trim();
-  return run(async () => {
-    const salt = await prfSalt();
-    // The name rides along in the user handle, so signing in on another device recovers it.
-    const userID = new Uint8Array([...random(16), ...encoder.encode(name).subarray(0, 48)]);
-    const credential = (await navigator.credentials.create({
-      publicKey: {
-        rp: { id: relyingParty(), name: "Typewright" },
-        user: { id: userID, name: name || "Typewright", displayName: name || "Typewright" },
-        challenge: random(32),
-        pubKeyCredParams: [
-          { type: "public-key", alg: -7 },
-          { type: "public-key", alg: -257 },
-        ],
-        authenticatorSelection: { residentKey: "required", userVerification: "required" },
-        extensions: { prf: { eval: { first: salt } } } as AuthenticationExtensionsClientInputs,
-      },
-    })) as PublicKeyCredential | null;
-    if (!credential) throw new Error("No passkey was created.");
-    const results = credential.getClientExtensionResults() as PrfResults;
-    if (results.prf?.results?.first) return { prf: results.prf.results.first, name };
-    if (results.prf?.enabled === false) throw new Error("This passkey can't derive keys (no PRF support).");
-    // Some authenticators only evaluate the PRF when signing in.
-    return assert();
-  });
+  if (desktop?.passkey) return runInBrowser("create", rawName);
+  return run(() => createCredential(rawName.trim()));
+}
+
+async function createCredential(name: string): Promise<{ prf: ArrayBuffer; name: string }> {
+  const salt = await prfSalt();
+  // The name rides along in the user handle, so signing in on another device recovers it.
+  const userID = new Uint8Array([...random(16), ...encoder.encode(name).subarray(0, 48)]);
+  const credential = (await navigator.credentials.create({
+    publicKey: {
+      rp: { id: relyingParty(), name: "Typewright" },
+      user: { id: userID, name: name || "Typewright", displayName: name || "Typewright" },
+      challenge: random(32),
+      pubKeyCredParams: [
+        { type: "public-key", alg: -7 },
+        { type: "public-key", alg: -257 },
+      ],
+      authenticatorSelection: { residentKey: "required", userVerification: "required" },
+      extensions: { prf: { eval: { first: salt } } } as AuthenticationExtensionsClientInputs,
+    },
+  })) as PublicKeyCredential | null;
+  if (!credential) throw new Error("No passkey was created.");
+  const results = credential.getClientExtensionResults() as PrfResults;
+  if (results.prf?.results?.first) return { prf: results.prf.results.first, name };
+  if (results.prf?.enabled === false) throw new Error("This passkey can't derive keys (no PRF support).");
+  // Some authenticators only evaluate the PRF when signing in.
+  return assert();
 }
 
 async function assert(): Promise<{ prf: ArrayBuffer; name: string }> {
@@ -182,5 +208,6 @@ async function assert(): Promise<{ prf: ArrayBuffer; name: string }> {
 }
 
 export function signInWithPasskey() {
+  if (desktop?.passkey) return runInBrowser("get");
   return run(assert);
 }

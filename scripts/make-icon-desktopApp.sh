@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Makes the desktop app's icons from the web app's logo (macOS: sips and iconutil), so packaging converts nothing.
+# Makes the desktop app's icons from the Mac app's 1024 px icon (macOS: sips and iconutil), so packaging converts nothing.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-src="$root/webApp/public/logo.png"
+src="$root/macApp/Sources/Typewright/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png"
 out="$root/desktopApp/build"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$out/icons" "$tmp/icon.iconset"
 
 # Linux: one PNG per size, named the way electron-builder looks them up.
-for size in 16 24 32 48 64 128 256 512; do
+for size in 16 24 32 48 64 128 256 512 1024; do
   sips -z $size $size "$src" --out "$out/icons/${size}x${size}.png" >/dev/null
 done
 
@@ -17,7 +17,7 @@ done
 for size in 16 32 128 256 512; do
   sips -z $size $size "$src" --out "$tmp/icon.iconset/icon_${size}x${size}.png" >/dev/null
   double=$((size * 2))
-  [ $double -le 512 ] && sips -z $double $double "$src" --out "$tmp/icon.iconset/icon_${size}x${size}@2x.png" >/dev/null
+  [ $double -le 1024 ] && sips -z $double $double "$src" --out "$tmp/icon.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$tmp/icon.iconset" -o "$out/icon.icns"
 
