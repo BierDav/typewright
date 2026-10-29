@@ -75,6 +75,8 @@ struct SpaceState: Codable {
     /// The file the preview last showed, kept while the preview is hidden.
     var lastPreview: String?
     var split = 0.5
+    /// Whether Markdown files show their source next to the block editor.
+    var markdownSource = false
     var editors: [String: EditorState] = [:]
     var previews: [String: PreviewState] = [:]
     var positions: [String: DocumentPosition] = [:]
@@ -90,6 +92,7 @@ struct SpaceState: Codable {
         previewMode = try c.decodeIfPresent(PreviewMode.self, forKey: .previewMode)
         lastPreview = try c.decodeIfPresent(String.self, forKey: .lastPreview)
         split = try c.decodeIfPresent(Double.self, forKey: .split) ?? 0.5
+        markdownSource = try c.decodeIfPresent(Bool.self, forKey: .markdownSource) ?? false
         editors = try c.decodeIfPresent([String: EditorState].self, forKey: .editors) ?? [:]
         previews = try c.decodeIfPresent([String: PreviewState].self, forKey: .previews) ?? [:]
         expanded = try c.decodeIfPresent([String].self, forKey: .expanded) ?? []

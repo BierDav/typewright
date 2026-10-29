@@ -78,7 +78,7 @@ struct GeneralSettings: View {
             } header: {
                 Text("Preview")
             } footer: {
-                Text("Zooming Markdown previews changes this size. HTML previews use browser zoom.")
+                Text("Pinching the Markdown editor changes this size. HTML previews use browser zoom.")
                     .foregroundStyle(.secondary)
             }
 

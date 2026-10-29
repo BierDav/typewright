@@ -672,6 +672,34 @@ pub unsafe extern "C" fn tw_markdown_html(text: *const u8, len: usize) -> *mut c
     CString::new(html).unwrap_or_default().into_raw()
 }
 
+/// The Markdown editor's blocks, see `markdown::blocks`.
+///
+/// # Safety
+/// `text` must point to `len` bytes of UTF-8. Free the result with `tw_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_markdown_blocks(text: *const u8, len: usize) -> *mut c_char {
+    CString::new(markdown::blocks(&bytes(text, len)).replace('\0', "")).unwrap_or_default().into_raw()
+}
+
+/// One block of Markdown rendered for the editor.
+///
+/// # Safety
+/// `text` must point to `len` bytes of UTF-8. Free the result with `tw_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_markdown_block_html(text: *const u8, len: usize) -> *mut c_char {
+    CString::new(markdown::block_html(&bytes(text, len)).replace('\0', "")).unwrap_or_default().into_raw()
+}
+
+/// A typst document calculating solveng cells (a JSON array of strings) in order, a page each, importing `package`.
+///
+/// # Safety
+/// `cells` must point to `len` bytes of UTF-8 and `package` be a valid C string. Free the result with `tw_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tw_markdown_notebook(cells: *const u8, len: usize, package: *const c_char) -> *mut c_char {
+    let cells: Vec<String> = serde_json::from_str(&bytes(cells, len)).unwrap_or_default();
+    CString::new(markdown::notebook(&cells, unsafe { str(package) }).replace('\0', "")).unwrap_or_default().into_raw()
+}
+
 /// Free the result with `tw_string_free`.
 #[unsafe(no_mangle)]
 pub extern "C" fn tw_markdown_code_css() -> *mut c_char {

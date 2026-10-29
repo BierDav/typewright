@@ -76,6 +76,30 @@ final class BuiltinCompiler: @unchecked Sendable {
         } onCancel: { cancellation.cancel() }
     }
 
+    /// `main`'s pages as SVG, or nil when it fails, and its diagnostics; for Markdown's solveng cells.
+    func svg(main: String, buffers: [String: String]) async -> (pages: [String]?, diagnostics: [Diagnostic]) {
+        await withCheckedContinuation { cont in
+            queue.async { [self] in
+                load(main: main, buffers: buffers)
+                let result = tw_world_compile(world, TWFormatSVG)
+                defer { tw_result_free(result) }
+                let pages = result.data.map { data in
+                    Data(bytes: data, count: result.len).split(separator: 0, omittingEmptySubsequences: false)
+                        .map { String(decoding: $0, as: UTF8.self) }
+                }
+                cont.resume(returning: (pages, Self.diagnostics(result)))
+            }
+        }
+    }
+
+    private static func diagnostics(_ result: TWResult) -> [Diagnostic] {
+        let all = (try? JSONDecoder().decode([Entry].self, from: Data(String(cString: result.diagnostics).utf8))) ?? []
+        return all.map {
+            Diagnostic(path: $0.path, line: $0.line, column: $0.column,
+                       severity: Diagnostic.Severity(rawValue: $0.severity) ?? .error, message: $0.message, length: $0.length)
+        }
+    }
+
     private final class Cancellation: @unchecked Sendable {
         private let lock = NSLock()
         private var cancelled = false

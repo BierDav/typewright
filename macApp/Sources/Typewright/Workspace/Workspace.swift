@@ -79,8 +79,6 @@ final class Workspace: EditorLanguage {
     }
     private(set) var document: PDFDocument?
     private(set) var html: String?
-    /// The previewed Markdown file as HTML.
-    private(set) var markdownHTML: String?
     private(set) var diagnostics: [Diagnostic] = []
     /// Universe packages imported at an older version; shown while the package list could be fetched.
     var packageDiagnostics: [Diagnostic] {
@@ -105,7 +103,10 @@ final class Workspace: EditorLanguage {
     @ObservationIgnored let find = FindModel()
     @ObservationIgnored let preview = PreviewController()
     @ObservationIgnored let htmlPreview = HTMLPreviewController()
-    @ObservationIgnored let markdownPreview = HTMLPreviewController(markdown: true)
+    /// Markdown files are edited as blocks; their source shows in the preview's place.
+    @ObservationIgnored private(set) lazy var markdownEditor = MarkdownEditorController(workspace: self)
+    /// Whether a Markdown file's source shows next to its block editor.
+    private(set) var showsMarkdownSource = false
     /// Shows a selected PDF file instead of the compiled document.
     @ObservationIgnored let filePreview = PreviewController()
     @ObservationIgnored private var filePreviewData: Data?
@@ -182,11 +183,13 @@ final class Workspace: EditorLanguage {
         if saved == nil {
             previewFile = initial?.pathExtension == "typ" ? initial : defaultMain()
         } else {
-            previewFile = resolve(state.preview)
+            // Markdown was previewed before it got its own editor.
+            previewFile = resolve(state.preview).flatMap { Self.isPreviewable($0) ? $0 : nil }
         }
+        showsMarkdownSource = state.markdownSource
         previewMode = state.previewMode ?? (previewFile == nil ? .hidden : saved == nil ? .following : .pinned)
         if previewMode == .following { previewFile = selectedFile.flatMap { Self.isPreviewable($0) ? $0 : nil } }
-        lastPreviewFile = resolve(state.lastPreview) ?? previewFile
+        lastPreviewFile = resolve(state.lastPreview).flatMap { Self.isPreviewable($0) ? $0 : nil } ?? previewFile
         followPreviewMode()
         if fontFolders != fontDirs { updateFonts() }
         restorePreviews(for: previewFile)
@@ -254,16 +257,34 @@ final class Workspace: EditorLanguage {
         reloadTree()
     }
 
-    /// Whether the previewed file is Markdown, which renders without a compiler.
-    var previewIsMarkdown: Bool { previewFile.map(MarkdownRenderer.isMarkdown) ?? false }
+    /// Typst files can be previewed; Markdown is edited as it looks, with its source beside it.
+    nonisolated static func isPreviewable(_ url: URL) -> Bool { url.pathExtension == "typ" }
 
-    /// Typst and Markdown files can be previewed.
-    nonisolated static func isPreviewable(_ url: URL) -> Bool { url.pathExtension == "typ" || MarkdownRenderer.isMarkdown(url) }
+    /// Whether the shown file is Markdown, edited in blocks.
+    var showsMarkdown: Bool { selectedFile.map(MarkdownRenderer.isMarkdown) ?? false }
+
+    func toggleMarkdownSource() {
+        showsMarkdownSource.toggle()
+        schedulePersist()
+    }
+
+    func setMarkdownSource(_ shown: Bool) {
+        guard shown != showsMarkdownSource else { return }
+        toggleMarkdownSource()
+    }
+
+    /// The block editor changed the shown file; through the source editor when it's open, so its caret stays.
+    func markdownEditorDidChange(_ new: String) {
+        guard new != text, selectedKind?.isEditable == true else { return }
+        let edit = textDifference(old: text, new: new)
+        let change = LiveResult.Edit(location: Int(edit.range.location), length: Int(edit.range.length), text: edit.newText)
+        if showsMarkdownSource, live.applyEdits?([change]) == true { return }
+        textDidChange(new, live: false)
+    }
 
     /// Whether the compiled output for the current render mode is available.
     var hasOutput: Bool {
-        if previewIsMarkdown { return markdownHTML != nil }
-        return switch renderMode {
+        switch renderMode {
         case .pdf, .svg: document != nil
         case .html: html != nil
         }
@@ -499,6 +520,8 @@ final class Workspace: EditorLanguage {
     }
 
     func togglePreviewVisibility() {
+        // A Markdown file's source takes the preview's place.
+        if showsMarkdown { return toggleMarkdownSource() }
         switch previewMode {
         case .hidden:
             previewMode = .following
@@ -514,6 +537,7 @@ final class Workspace: EditorLanguage {
 
     /// Double-clicks move an existing preview; the explicit command also opens it.
     func previewSelectedFile(ifEnabled: Bool = false) {
+        if !ifEnabled, showsMarkdown { return toggleMarkdownSource() }
         guard !ifEnabled || previewMode != .hidden,
               let file = selectedFile, Self.isPreviewable(file) else { return }
         if previewMode == .hidden { previewMode = .following }
@@ -536,10 +560,8 @@ final class Workspace: EditorLanguage {
         if fontFolders != fontDirs { updateFonts() }
         document = nil
         html = nil
-        markdownHTML = nil
         preview.clear()
         htmlPreview.clear()
-        markdownPreview.clear()
         failureLog = nil
         diagnostics = []
         lastDuration = nil
@@ -583,12 +605,6 @@ final class Workspace: EditorLanguage {
     private func capturePreviewState(mode: RenderMode? = nil) {
         guard let main = previewFile else { return }
         var position = positions[main] ?? DocumentPosition()
-        if previewIsMarkdown {
-            guard markdownHTML != nil, markdownPreview.pendingRestore == nil else { return }
-            position.flow = markdownPreview.position().flow
-            positions[main] = position
-            return
-        }
         // Only a preview that already shows this file's output, and isn't about to jump elsewhere, knows where it is.
         switch mode ?? renderMode {
         case .pdf, .svg:
@@ -609,7 +625,7 @@ final class Workspace: EditorLanguage {
 
     /// Takes on the format the previewed file was last shown in.
     private func followPreviewMode() {
-        guard let file = previewFile, !previewIsMarkdown else { return }
+        guard let file = previewFile else { return }
         let mode = (positions[file]?.mode ?? UserDefaults.standard.string(forKey: "renderMode").flatMap(RenderMode.init) ?? .pdf).migrated
         guard mode != renderMode else { return }
         isFollowingFile = true
@@ -624,7 +640,6 @@ final class Workspace: EditorLanguage {
         preview.pendingRestore = nil
         preview.pendingPosition = position
         htmlPreview.pendingRestore = position
-        markdownPreview.pendingRestore = position
     }
 
     private func schedulePersist() {
@@ -649,7 +664,8 @@ final class Workspace: EditorLanguage {
         for (url, s) in previewStates { if let key = relative(url) { state.previews[key] = s } }
         for (url, s) in positions { if let key = relative(url) { state.positions[key] = s } }
         state.expanded = expanded.compactMap(relative).sorted()
-        if let file = previewFile.flatMap(relative), !previewIsMarkdown {
+        state.markdownSource = showsMarkdownSource
+        if let file = previewFile.flatMap(relative) {
             state.positions[file, default: DocumentPosition()].mode = renderMode
         }
         return WorkspaceSession(state: state, buffers: buffers, dirty: dirty)
@@ -1135,7 +1151,6 @@ final class Workspace: EditorLanguage {
         // External compilers only see the disk, so every edit is saved right away.
         if case .binary = CompilerManager.shared.active {
             try? newText.write(to: url, atomically: true, encoding: .utf8)
-            if previewIsMarkdown { scheduleCompile(delay: 0) }
             scheduleSolvengCheck(delay: 0.25)
             return
         }
@@ -1196,7 +1211,6 @@ final class Workspace: EditorLanguage {
         if FileKind(url: url) == .typst { languageClient()?.change(url, text: new) }
         if case .binary = CompilerManager.shared.active {
             try? new.write(to: url, atomically: true, encoding: .utf8)
-            if previewIsMarkdown { scheduleCompile(delay: 0) }
             scheduleSolvengCheck(delay: 0.25)
             return
         }
@@ -1964,10 +1978,6 @@ final class Workspace: EditorLanguage {
     }
 
     private func compileOnce() async {
-        if let previewFile, previewIsMarkdown {
-            stopWatcher()
-            return await renderMarkdown(previewFile)
-        }
         guard let previewFile, let compiler = CompilerManager.shared.active else {
             stopWatcher()
             return
@@ -1985,16 +1995,6 @@ final class Workspace: EditorLanguage {
             }
             startWatcher(binary: binary, main: previewFile)
         }
-    }
-
-    private func renderMarkdown(_ url: URL) async {
-        let current = generation
-        let source = bufferText(url) ?? ""
-        let start = Date()
-        let html = await Task.detached { MarkdownRenderer.html(source) }.value
-        guard current == generation else { return }
-        markdownHTML = html
-        lastDuration = Date().timeIntervalSince(start)
     }
 
     private func compileBuiltin(main: URL) async {
@@ -2137,7 +2137,8 @@ final class Workspace: EditorLanguage {
         return Self.flatten(tree).first { $0.isTypst }?.url
     }
 
-    private func relative(_ url: URL) -> String? {
+    /// `url`'s path in the space.
+    func relative(_ url: URL) -> String? {
         spaceRelativePath(path: url.standardizedFileURL.path, root: root.path)
     }
 

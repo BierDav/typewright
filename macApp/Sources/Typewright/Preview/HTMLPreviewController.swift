@@ -4,11 +4,9 @@ import Observation
 import UniformTypeIdentifiers
 import WebKit
 
-/// Owns the web view for typst's HTML output, or rendered Markdown, and patches only the changed blocks.
+/// Owns the web view for typst's HTML output and patches only the changed blocks.
 @MainActor @Observable
 final class HTMLPreviewController: NSObject, WKNavigationDelegate {
-    /// Shows Markdown with GitHub's look instead of typst's HTML; it never has pages.
-    let isMarkdown: Bool
     private(set) var zoomScale: CGFloat = 1
     @ObservationIgnored private var zoomTimer: Timer?
 
@@ -49,17 +47,15 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
 
     /// HTML uses browser zoom and a scroll fraction in either mode.
     func position() -> DocumentPosition {
-        DocumentPosition(zoom: isMarkdown ? nil : Double(zoomScale), flow: scrollFraction, pan: panFraction)
+        DocumentPosition(zoom: Double(zoomScale), flow: scrollFraction, pan: panFraction)
     }
 
     /// Applies the pending state when the document it's meant for is already shown.
     private func restoreIfShown() {
         guard isReady, !isSending, let pending, pending == sent, let state = pendingRestore else { return }
         pendingRestore = nil
-        if !isMarkdown {
-            zoomScale = CGFloat(state.zoom ?? 1)
-            applyZoom(animated: false)
-        }
+        zoomScale = CGFloat(state.zoom ?? 1)
+        applyZoom(animated: false)
         scrollFraction = state.flow
         panFraction = state.pan
         view.callAsyncJavaScript(ScrollReporter.restoreScript,
@@ -70,10 +66,8 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
     @ObservationIgnored private var sent: String?
     @ObservationIgnored private var isSending = false
     @ObservationIgnored nonisolated(unsafe) private var magnifyMonitor: Any?
-    @ObservationIgnored nonisolated(unsafe) private var textSizeObserver: NSObjectProtocol?
 
-    init(markdown: Bool = false) {
-        isMarkdown = markdown
+    override init() {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(fontHandler, forURLScheme: FontSchemeHandler.scheme)
         config.setURLSchemeHandler(LocalFileSchemeHandler(), forURLScheme: LocalFileSchemeHandler.scheme)
@@ -85,8 +79,6 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             self?.scrollFraction = fraction
             self?.panFraction = pan
         }
-        // Let the surrounding material show through Markdown; HTML gets a browser's canvas.
-        if markdown { view.setValue(false, forKey: "drawsBackground") }
         view.underPageBackgroundColor = .clear
         view.navigationDelegate = self
         applyAppearance()
@@ -98,24 +90,14 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
                 // ⌘-scroll zooms like pinching.
                 let factor = event.type == .magnify ? 1 + event.magnification : event.commandZoomFactor
                 guard let factor else { return false }
-                if !self.isMarkdown {
-                    self.setScale(self.zoomScale * factor, animated: false)
-                } else {
-                    PreviewTextSize.shared.set(PreviewTextSize.shared.size * factor, animated: false)
-                }
+                self.setScale(self.zoomScale * factor, animated: false)
                 return true
             }
             return handled ? nil : event
         }
-        textSizeObserver = NotificationCenter.default.addObserver(forName: PreviewTextSize.didChange, object: nil,
-                                                                  queue: .main) { [weak self] note in
-            let animated = note.userInfo?[PreviewTextSize.animatedKey] as? Bool ?? true
-            MainActor.assumeIsolated { self?.applyTextSize(animated: animated) }
-        }
     }
 
     deinit {
-        if let textSizeObserver { NotificationCenter.default.removeObserver(textSizeObserver) }
         if let magnifyMonitor { NSEvent.removeMonitor(magnifyMonitor) }
     }
 
@@ -144,24 +126,12 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
         view.callAsyncJavaScript("tw.update(html)", arguments: ["html": ""], in: nil, in: .page)
     }
 
-    func zoomIn() {
-        if !isMarkdown { setScale(zoomScale * 1.25) } else { PreviewTextSize.shared.size = (textSize * 1.1).rounded() }
-    }
+    func zoomIn() { setScale(zoomScale * 1.25) }
 
-    func zoomOut() {
-        if !isMarkdown { setScale(zoomScale / 1.25) } else { PreviewTextSize.shared.size = (textSize / 1.1).rounded() }
-    }
+    func zoomOut() { setScale(zoomScale / 1.25) }
 
-    /// Resets HTML to actual size, or Markdown to its standard text size.
-    func resetZoom() {
-        if !isMarkdown {
-            setScale(1)
-        } else {
-            PreviewTextSize.shared.size = PreviewTextSize.standard
-        }
-    }
-
-    var textSize: Double { PreviewTextSize.shared.size }
+    /// Resets to actual size.
+    func resetZoom() { setScale(1) }
 
     private func setScale(_ value: CGFloat, animated: Bool = true) {
         zoomScale = min(max(value, 0.1), 8)
@@ -187,11 +157,6 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
                 if t >= 1 { timer.invalidate() }
             }
         }
-    }
-
-    private func applyTextSize(animated: Bool = true) {
-        guard isReady, isMarkdown else { return }
-        view.callAsyncJavaScript("tw.setTextSize(px, animated)", arguments: ["px": textSize, "animated": animated], in: nil, in: .page)
     }
 
     /// Forcing light appearance makes `prefers-color-scheme` light inside the page.
@@ -237,41 +202,18 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
 
     /// typst's HTML is shown as a browser would show it; styling it for screens is the document's job (letmeout).
     private var shell: String {
-        let style = isMarkdown ? "<style>\(MarkdownRenderer.style + MarkdownRenderer.codeCSS)</style>" : ""
-        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\(style)"
-            + "<script>\(Self.script)\ntw.markdown = \(isMarkdown);</script>"
-            + "</head><body class=\"\(isMarkdown ? "markdown-body" : "")\"></body></html>"
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><script>\(Self.script)</script></head><body></body></html>"
     }
 
     /// Keeps the rendered top-level blocks and swaps only the range that differs from the new output.
     private static let script = """
         window.tw = {
-          root: { nodes: [], sources: [], shells: [], kids: new Map() }, head: [], headSource: null, markdown: false, mermaid: null,
+          root: { nodes: [], sources: [], shells: [], kids: new Map() }, head: [], headSource: null,
           htmlAttrs: [], bodyAttrs: [], pin: null, pinning: null,
 
           atBottom() {
             const tolerance = 1 + 1 / devicePixelRatio;
             return Math.abs(Math.max(document.documentElement.scrollHeight - innerHeight, 0) - scrollY) <= tolerance;
-          },
-
-          // Eases the reflowing text to its new size, keeping the same spot of the document in view.
-          setTextSize(px, animated) {
-            const root = document.documentElement;
-            const start = parseFloat(root.style.getPropertyValue('--tw-text')) || px;
-            const max = () => Math.max(root.scrollHeight - innerHeight, 0);
-            const fraction = max() > 0 ? scrollY / max() : 0;
-            const began = performance.now();
-            this.pin = null;
-            cancelAnimationFrame(this.textFrame);
-            const step = now => {
-              const t = animated ? Math.min((now - began) / 200, 1) : 1;
-              root.style.setProperty('--tw-text', (start + (px - start) * (1 - Math.pow(1 - t, 3))) + 'px');
-              scrollTo(0, fraction * max());
-              if (t < 1) this.textFrame = requestAnimationFrame(step);
-              else if (window.twReport) twReport();
-            };
-            // Pinches and scrolls already come in small steps, so they apply right away.
-            if (animated) this.textFrame = requestAnimationFrame(step); else step(began);
           },
 
           setFonts(css) {
@@ -293,8 +235,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             if (doc.head.innerHTML !== this.headSource) {
               this.headSource = doc.head.innerHTML;
               this.head.forEach(n => n.remove());
-              this.head = this.runScripts([...doc.head.children].filter(n => !this.markdown || n.tagName !== 'SCRIPT')
-                .map(n => document.head.appendChild(document.adoptNode(n))));
+              this.head = this.runScripts([...doc.head.children].map(n => document.head.appendChild(document.adoptNode(n))));
             }
             // Plan every swap first, so the marks are taken from the page as it was.
             const swaps = [];
@@ -313,7 +254,6 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
               this.setPin({ bottom: true });
               this.holdPin();
             } else this.keepMark(marks, added);
-            if (this.markdown) this.renderDiagrams(added);
             if (window.twReport) twReport();
           },
 
@@ -471,9 +411,8 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             if (Math.abs(delta) > 0.5) scrollBy({ top: delta, left: 0, behavior: 'instant' });
           },
 
-          // Parsed scripts never run, so typst's are swapped for fresh copies once in the page; GitHub runs none.
+          // Parsed scripts never run, so typst's are swapped for fresh copies once in the page.
           runScripts(nodes) {
-            if (this.markdown) return nodes;
             const fresh = old => {
               const s = document.createElement('script');
               for (const a of old.attributes) s.setAttribute(a.name, a.value);
@@ -489,20 +428,7 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
             });
           },
 
-          // Mermaid is fetched on first use; GitHub draws these diagrams too.
-          renderDiagrams(added) {
-            const nodes = added.filter(n => n.nodeType === Node.ELEMENT_NODE).flatMap(n => n.matches('pre.mermaid') ? [n] : [...n.querySelectorAll('pre.mermaid')]);
-            if (!nodes.length) return;
-            this.mermaid ??= import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs').then(m => {
-              const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-              m.default.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default' });
-              return m.default;
-            });
-            this.mermaid.then(m => m.run({ nodes })).catch(() => {});
-          },
-
           applyAttributes() {
-            if (this.markdown) return;
             // Copy root attributes too, so exported selectors and inherited styles still work.
             for (const [element, attrs] of [[document.documentElement, this.htmlAttrs], [document.body, this.bodyAttrs]]) {
               const names = new Set(attrs.map(([name]) => name));
@@ -525,7 +451,6 @@ final class HTMLPreviewController: NSObject, WKNavigationDelegate {
         // The fresh shell is empty, whatever an older one was sent.
         sent = nil
         applyZoom(animated: false)
-        applyTextSize()
         applyFonts()
         send()
     }
@@ -598,7 +523,7 @@ struct HTMLFontFace: Sendable {
 }
 
 /// Serves `twlocal://file/<absolute path>` from disk, so the page's relative images and files load.
-private final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
+final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
     static let scheme = "twlocal"
 
     static func url(for directory: URL) -> URL? {

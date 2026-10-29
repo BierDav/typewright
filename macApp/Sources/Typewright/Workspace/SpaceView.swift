@@ -92,8 +92,15 @@ struct SpaceView: View {
             .frame(width: vertical ? nil : 1, height: vertical ? 1 : nil)
         return stack {
             if !leadingPreview { separator }
-            PreviewPane(workspace: workspace)
-                .opacity(faded ? 0.4 : 1)
+            Group {
+                // A Markdown file's source takes the preview's place; its blocks are the main editor.
+                if workspace.showsMarkdown, let file = workspace.selectedFile {
+                    codeEditor(file).overlay(alignment: .top) { topFade }
+                } else {
+                    PreviewPane(workspace: workspace)
+                }
+            }
+            .opacity(faded ? 0.4 : 1)
             if leadingPreview { separator }
         }
         // Part of the pane so it slides out with it; centered on the separator, reaching into the editor too.
@@ -106,11 +113,12 @@ struct SpaceView: View {
         .transition(.move(edge: previewPosition == .top ? .top : previewPosition == .bottom ? .bottom : .trailing))
     }
 
-    /// Only Typst and Markdown files get the split view; other files use the full width.
+    /// Only Typst files get the preview; Markdown files get their source on request; other files use the full width.
     private var showsPreview: Bool {
+        if workspace.showsMarkdown { return workspace.showsMarkdownSource }
         guard workspace.previewFile != nil else { return false }
-        guard let file = workspace.selectedFile, let kind = workspace.selectedKind else { return true }
-        return kind == .typst || MarkdownRenderer.isMarkdown(file)
+        guard let kind = workspace.selectedKind else { return true }
+        return kind == .typst
     }
 
     @ViewBuilder
@@ -177,7 +185,7 @@ struct SpaceView: View {
                         dragStart = nil
                         dragSplit = nil
                         if total - length < closeLength {
-                            workspace.setPreview(nil)
+                            if workspace.showsMarkdown { workspace.setMarkdownSource(false) } else { workspace.setPreview(nil) }
                         } else {
                             workspace.split = Double(length / max(total, 1))
                         }
@@ -231,45 +239,12 @@ struct SpaceView: View {
     private var editor: some View {
         VStack(spacing: 0) {
             if let file = workspace.selectedFile {
-                CodeEditor(
-                    documentID: workspace.revision,
-                    text: workspace.text,
-                    fontSize: fontSize,
-                    glidingCursor: glidingCursor,
-                    wrapColumn: wrapGuide ? wrapColumn : 0,
-                    vim: vimBindings,
-                    concealsMath: concealMath,
-                    autoClose: autoClose,
-                    find: workspace.selectedKind?.isEditable == true ? workspace.find : nil,
-                    highlights: workspace.selectedKind == .typst,
-                    markdown: workspace.selectedFile.map(MarkdownRenderer.isMarkdown) ?? false,
-                    comments: commentSyntax,
-                    diagnostics: fileDiagnostics,
-                    reveal: workspace.reveal,
-                    state: workspace.editorState(for: file),
-                    topInset: Self.fadeHeight - 10,
-                    onChange: workspace.textDidChange,
-                    onStateChange: workspace.editorStateDidChange,
-                    language: workspace.selectedKind == .typst ? workspace : nil,
-                    live: workspace.live,
-                    solvengRevision: workspace.solvengRevision,
-                    onVimModeChange: { vimMode = $0 },
-                    onJump: workspace.recordJump(from:),
-                    onPasteImage: workspace.pasteImage(from:),
-                    onDidUndo: workspace.editorDidUndo
-                )
-                .overlay(alignment: .bottomTrailing) {
-                    if workspace.previewFile != nil { issuesButton }
+                if workspace.showsMarkdown {
+                    MarkdownEditorView(controller: workspace.markdownEditor, file: file, text: workspace.text)
+                        .background(Color(nsColor: .textBackgroundColor))
+                } else {
+                    codeEditor(file)
                 }
-                .overlay(alignment: .topTrailing) {
-                    if workspace.find.isVisible && workspace.selectedKind?.isEditable == true {
-                        FindBar(find: workspace.find)
-                            .padding(.top, Self.fadeHeight)
-                            .padding(.trailing, 16)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-                }
-                .animation(.smooth(duration: 0.2), value: workspace.find.isVisible)
             } else {
                 ContentUnavailableView("No file selected", systemImage: "doc")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -288,12 +263,15 @@ struct SpaceView: View {
                         .help("Also editing this file")
                 }
                 Spacer()
-                if let previewed = workspace.previewFile {
-                    Label(previewed.lastPathComponent, systemImage: "eye").help("Previewed file")
-                }
-                Text(compilers.activeDescription)
-                if let ms = workspace.lastDuration {
-                    Text("\(Int(ms * 1000)) ms").monospacedDigit()
+                // Markdown has no preview to compile.
+                if !workspace.showsMarkdown {
+                    if let previewed = workspace.previewFile {
+                        Label(previewed.lastPathComponent, systemImage: "eye").help("Previewed file")
+                    }
+                    Text(compilers.activeDescription)
+                    if let ms = workspace.lastDuration {
+                        Text("\(Int(ms * 1000)) ms").monospacedDigit()
+                    }
                 }
             }
             .font(.caption)
@@ -301,6 +279,48 @@ struct SpaceView: View {
             .padding(.horizontal, 10)
             .frame(height: 24)
         }
+    }
+
+    private func codeEditor(_ file: URL) -> some View {
+        CodeEditor(
+            documentID: workspace.revision,
+            text: workspace.text,
+            fontSize: fontSize,
+            glidingCursor: glidingCursor,
+            wrapColumn: wrapGuide ? wrapColumn : 0,
+            vim: vimBindings,
+            concealsMath: concealMath,
+            autoClose: autoClose,
+            find: workspace.selectedKind?.isEditable == true ? workspace.find : nil,
+            highlights: workspace.selectedKind == .typst,
+            markdown: workspace.selectedFile.map(MarkdownRenderer.isMarkdown) ?? false,
+            comments: commentSyntax,
+            diagnostics: fileDiagnostics,
+            reveal: workspace.reveal,
+            state: workspace.editorState(for: file),
+            topInset: Self.fadeHeight - 10,
+            onChange: workspace.textDidChange,
+            onStateChange: workspace.editorStateDidChange,
+            language: workspace.selectedKind == .typst ? workspace : nil,
+            live: workspace.live,
+            solvengRevision: workspace.solvengRevision,
+            onVimModeChange: { vimMode = $0 },
+            onJump: workspace.recordJump(from:),
+            onPasteImage: workspace.pasteImage(from:),
+            onDidUndo: workspace.editorDidUndo
+        )
+        .overlay(alignment: .bottomTrailing) {
+            if workspace.previewFile != nil && !workspace.showsMarkdown { issuesButton }
+        }
+        .overlay(alignment: .topTrailing) {
+            if workspace.find.isVisible && workspace.selectedKind?.isEditable == true {
+                FindBar(find: workspace.find)
+                    .padding(.top, Self.fadeHeight)
+                    .padding(.trailing, 16)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .animation(.smooth(duration: 0.2), value: workspace.find.isVisible)
     }
 }
 
@@ -313,7 +333,8 @@ extension SpaceView {
         } else {
             Text("\(workspace.wordCount) words")
         }
-        if workspace.selectedKind?.isEditable == true {
+        // The block editor has no lines; the caret is the source editor's.
+        if workspace.selectedKind?.isEditable == true && (!workspace.showsMarkdown || workspace.showsMarkdownSource) {
             Group {
                 if caret.characters == 0 {
                     Text("Ln \(caret.line), Col \(caret.column)")

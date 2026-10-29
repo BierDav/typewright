@@ -650,7 +650,12 @@ struct CommandPalette: View {
                                          section: "File", keywords: ["format code", "prettify", "typstyle", "reformat"],
                                          action: .run { ws.formatSelected() }))
             }
-            if Workspace.isPreviewable(file) {
+            if ws.showsMarkdown {
+                items.append(PaletteItem(id: "preview", title: ws.showsMarkdownSource ? "Hide Editor" : "Show Editor",
+                                         icon: "chevron.left.forwardslash.chevron.right", shortcut: keys.previewCurrentFile.display,
+                                         section: "File", keywords: ["markdown source", "code", "raw", "preview"],
+                                         action: .run { ws.toggleMarkdownSource() }))
+            } else if Workspace.isPreviewable(file) {
                 let previewed = ws.previewFile == file
                 items.append(PaletteItem(id: "preview", title: previewed ? ws.previewMode.nextTitle : "Preview \(name)",
                                          icon: previewed ? ws.previewMode.icon : "eye",
@@ -719,10 +724,12 @@ struct CommandPalette: View {
         }
         items.append(PaletteItem(id: "space.search", title: "Find in \(ws.name)", icon: "text.magnifyingglass", shortcut: keys.findInSpace.display,
                                  section: "Space", action: .run { DispatchQueue.main.async { state.overlay = .search(allSpaces: false) } }))
-        items.append(PaletteItem(id: "preview.toggle", title: ws.previewMode.nextTitle,
-                                 icon: ws.previewMode.icon, shortcut: keys.togglePreview.display,
-                                 section: "Space", keywords: ["preview pane", "toggle preview"],
-                                 action: .run { ws.togglePreviewVisibility() }))
+        if !ws.showsMarkdown {
+            items.append(PaletteItem(id: "preview.toggle", title: ws.previewMode.nextTitle,
+                                     icon: ws.previewMode.icon, shortcut: keys.togglePreview.display,
+                                     section: "Space", keywords: ["preview pane", "toggle preview"],
+                                     action: .run { ws.togglePreviewVisibility() }))
+        }
         if ws.previewMode == .hidden, let file = ws.selectedFile, Workspace.isPreviewable(file) {
             items.append(PaletteItem(id: "preview.pin", title: "Pin Preview to \(file.lastPathComponent)", icon: "pin", section: "Space",
                                      keywords: ["pin preview", "show preview"], action: .run { ws.setPreview(file) }))

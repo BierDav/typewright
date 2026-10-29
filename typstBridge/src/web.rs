@@ -538,6 +538,21 @@ pub fn markdown_html(text: &str) -> String {
     markdown::to_html(text)
 }
 
+#[wasm_bindgen(js_name = markdownBlocks)]
+pub fn markdown_blocks(text: &str) -> String {
+    markdown::blocks(text)
+}
+
+#[wasm_bindgen(js_name = markdownBlockHtml)]
+pub fn markdown_block_html(text: &str) -> String {
+    markdown::block_html(text)
+}
+
+#[wasm_bindgen(js_name = markdownNotebook)]
+pub fn markdown_notebook(cells: Vec<String>, package: &str) -> String {
+    markdown::notebook(&cells, package)
+}
+
 #[wasm_bindgen(js_name = markdownCodeCss)]
 pub fn markdown_code_css() -> String {
     markdown::code_css()

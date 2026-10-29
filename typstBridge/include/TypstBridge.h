@@ -108,5 +108,12 @@ void tw_bytes_free(uint8_t *_Nonnull data, size_t len);
 
 /// GitHub flavored Markdown as HTML, math as MathML and code with syntect classes; free with `tw_string_free`.
 char *_Nonnull tw_markdown_html(const uint8_t *_Nullable text, size_t len);
+/// The Markdown editor's blocks as JSON; free with `tw_string_free`.
+char *_Nonnull tw_markdown_blocks(const uint8_t *_Nullable text, size_t len);
+/// One block of Markdown rendered for the editor; free with `tw_string_free`.
+char *_Nonnull tw_markdown_block_html(const uint8_t *_Nullable text, size_t len);
+/// A typst document calculating solveng cells (JSON array of strings) a page each, importing `package` (empty for
+/// `@preview/solveng`); free with `tw_string_free`.
+char *_Nonnull tw_markdown_notebook(const uint8_t *_Nullable cells, size_t len, const char *_Nonnull package);
 /// CSS for the code classes in `tw_markdown_html`, light and dark; free with `tw_string_free`.
 char *_Nonnull tw_markdown_code_css(void);
