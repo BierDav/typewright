@@ -1,6 +1,6 @@
 // Hosts the typst compiler (`typstBridge` built for wasm) off the main thread. Packages a compile asks
 // for come from origin storage (`packages/<namespace>/<name>/<version>/`) or Typst Universe.
-import { libraryFolder, storageRoot } from "~/lib/disk";
+import { acceptDiskWorker, libraryFolder, storageRoot } from "~/lib/disk";
 import init, * as typst from "~/wasm/typst/typst.js";
 import wasmUrl from "~/wasm/typst/typst_bg.wasm?url";
 
@@ -264,6 +264,7 @@ async function handle(request: Request): Promise<unknown> {
 }
 
 self.onmessage = async (event: MessageEvent<Request>) => {
+  if (acceptDiskWorker(event.data)) return;
   const request = event.data;
   try {
     const value = await handle(request);

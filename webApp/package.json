@@ -12,6 +12,7 @@
   "dependencies": {
     "@solidjs/router": "^1.0.0",
     "@solidjs/start": "2.0.6",
+    "@tauri-apps/api": "^2",
     "fflate": "^0.8.3",
     "lucide-solid": "^1.60.0",
     "monaco-editor": "^0.57.0",

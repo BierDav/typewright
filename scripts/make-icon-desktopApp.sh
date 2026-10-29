@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Makes the desktop app's icons from the Mac app's 1024 px icon (macOS: sips and iconutil), so packaging converts nothing.
+# Makes the desktop app's icons from the Mac app's 1024 px icon (macOS: sips and iconutil), for Tauri packaging.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 src="$root/macApp/Sources/Typewright/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png"
@@ -8,7 +8,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$out/icons" "$tmp/icon.iconset"
 
-# Linux: one PNG per size, named the way electron-builder looks them up.
+# PNG icons for Linux and the Tauri bundle.
 for size in 16 24 32 48 64 128 256 512 1024; do
   sips -z $size $size "$src" --out "$out/icons/${size}x${size}.png" >/dev/null
 done

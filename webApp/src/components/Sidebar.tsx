@@ -1,5 +1,5 @@
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
-import { desktop } from "~/lib/desktop";
+import { desktop, type ScrollPhase } from "~/lib/desktop";
 import { closeSpaces, dialogs, SPACES_EXTRA, floatingSidebar, isMac, overlay, setFloatingSidebar, setSpacesOpen, setSwipe, spacesOpen, spacesProgress, swipe, toggleSidebar, workspace } from "~/lib/app";
 import { setSettings, settings } from "~/lib/settings";
 import FileSidebar from "./FileSidebar";
@@ -36,14 +36,24 @@ function ResizeHandle() {
     setResizing(true);
     const startX = event.clientX;
     const startWidth = settings.sidebarWidth;
-    const move = (e: PointerEvent) => setSettings("sidebarWidth", Math.round(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + e.clientX - startX))));
+    let width = startWidth;
+    let frame = 0;
+    const move = (e: PointerEvent) => {
+      width = Math.round(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + e.clientX - startX)));
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; setSettings("sidebarWidth", width); });
+    };
     const end = () => {
+      cancelAnimationFrame(frame);
+      setSettings("sidebarWidth", width);
       el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", end);
+      el.removeEventListener("pointercancel", end);
       document.body.classList.remove("resizing");
       setResizing(false);
     };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", end, { once: true });
+    el.addEventListener("pointercancel", end, { once: true });
   }
   return <div class="sidebar-resize" onPointerDown={start} onDblClick={() => setSettings("sidebarWidth", DEFAULT_WIDTH)} role="separator" aria-orientation="vertical" title="Drag to resize" />;
 }
@@ -54,93 +64,80 @@ function rubber(progress: number): number {
   return progress > 1 ? 1 + band(progress - 1) : progress < 0 ? -band(-progress) : progress;
 }
 
-/**
- * Horizontal two-finger swipes, like the Mac app's: right over the sidebar reveals the spaces list, left returns to
- * the space, and the list follows the fingers both ways. Browsers report no gesture phases, so lifting the fingers is
- * read from momentum (deltas shrinking frame by frame): the swipe settles right away, toward a flick's direction, and
- * the rest of the momentum is swallowed. Without momentum it settles once the events pause.
- */
+/** Native phases keep a resting finger from looking like a release; browsers settle after wheel silence. */
 function useSpacesSwipe(sidebar: () => HTMLElement | undefined, shown: () => boolean) {
   let active = false;
-  /** null until the gesture's direction is known. */
   let tracking: boolean | null = null;
-  let dx = 0;
-  let dy = 0;
-  let start = 0;
-  /** The last horizontal deltas, to spot momentum. */
-  let recent: number[] = [];
-  /** Settled on momentum; its remaining events (no larger than this) are swallowed. */
-  let coasting: number | null = null;
+  let dx = 0, dy = 0, start = 0;
+  let velocity = 0, lastTime = 0;
   let endTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function settle(open: boolean) {
-    if (open) setSpacesOpen(true);
-    else closeSpaces();
-    setSwipe(null);
-  }
-
-  function finish() {
-    if (tracking && coasting === null) settle((swipe() ?? start) > 0.5);
+  function finish(cancelled = false) {
+    if (tracking) {
+      const projected = start + dx / (settings.sidebarWidth + SPACES_EXTRA) + velocity * 0.15 / (settings.sidebarWidth + SPACES_EXTRA);
+      const open = cancelled ? start > 0.5 : projected > 0.5;
+      if (open) setSpacesOpen(true);
+      else closeSpaces();
+      setSwipe(null);
+    }
     active = false;
     tracking = null;
-    coasting = null;
+    velocity = 0;
+  }
+
+  function begin(target: Node | null): boolean {
+    if (!workspace() || overlay() || !shown() || (!sidebar()?.contains(target) && !spacesOpen())) return false;
+    active = true;
+    tracking = null;
+    dx = dy = velocity = 0;
+    start = spacesOpen() ? 1 : 0;
+    lastTime = performance.now();
+    return true;
+  }
+
+  function move(x: number, y: number) {
+    const time = performance.now(), elapsed = Math.max((time - lastTime) / 1000, 0.001);
+    velocity += (x / elapsed - velocity) * (1 - Math.exp(-elapsed / 0.06));
+    lastTime = time;
+    dx += x;
+    dy += y;
+    if (tracking === null && Math.abs(dx) + Math.abs(dy) >= 6) tracking = Math.abs(dx) > Math.abs(dy) * 1.5;
+    if (tracking) setSwipe(rubber(start + dx / (settings.sidebarWidth + SPACES_EXTRA)));
+  }
+
+  function nativeScroll(event: ScrollPhase) {
+    if (event.momentum) return;
+    if (event.phase & 1) {
+      if (active) finish(true);
+      if (!begin(document.elementFromPoint(event.x, event.y))) return;
+    }
+    if (!active) return;
+    if (event.phase & (8 | 16)) {
+      if (performance.now() - lastTime > 100) velocity = 0;
+      finish(!!(event.phase & 16));
+    } else move(event.dx, event.dy);
   }
 
   function onWheel(event: WheelEvent) {
-    // Pinch zoom arrives as wheel events with Ctrl held; mouse wheels scroll by lines.
-    if (!workspace() || overlay() || !shown() || event.ctrlKey || event.deltaMode !== 0) return;
-    if (coasting !== null) {
-      const size = Math.abs(event.deltaX);
-      clearTimeout(endTimer);
-      endTimer = setTimeout(finish, 60);
-      if (size <= coasting + 1 && Math.abs(event.deltaY) <= size + 1) {
-        coasting = size;
-        event.preventDefault();
-        return;
-      }
-      // Growing again: fresh fingers, a new swipe.
-      active = false;
-      coasting = null;
-    }
-    if (!active) {
-      // Over the document, only an open list follows a swipe.
-      if (!sidebar()?.contains(event.target as Node) && !spacesOpen()) return;
-      active = true;
-      tracking = null;
-      dx = dy = 0;
-      recent = [];
-      start = spacesOpen() ? 1 : 0;
-    }
-    clearTimeout(endTimer);
-    endTimer = setTimeout(finish, 60);
-    // Fingers moving right give a positive distance, with natural scrolling.
-    const limit = settings.sidebarWidth + SPACES_EXTRA;
-    dx = Math.max((-start - 0.35) * limit, Math.min((1 - start + 0.35) * limit, dx - event.deltaX));
-    dy += event.deltaY;
-    if (tracking === null) {
-      if (Math.abs(dx) + Math.abs(dy) < 6) return;
-      tracking = Math.abs(dx) > Math.abs(dy) * 1.5;
-    }
-    if (!tracking) return;
-    event.preventDefault();
-    recent.push(Math.abs(event.deltaX));
-    if (recent.length > 4) recent.shift();
-    const decaying =
-      recent.length === 4 && recent.every((size, i) => i === 0 || size <= recent[i - 1]) && recent[3] < recent[0] * 0.85;
-    if (decaying) {
-      // A flick goes where it was thrown; a slow release to the nearer side.
-      const progress = swipe() ?? start;
-      settle(recent[0] >= 6 ? event.deltaX < 0 : progress > 0.5);
-      coasting = recent[3];
+    if (event.ctrlKey || event.deltaMode !== 0 || !workspace() || overlay() || !shown()) return;
+    if (desktop?.scrollPhases) {
+      if ((active && tracking) || Math.abs(event.deltaX) > Math.abs(event.deltaY) * 1.5 && (sidebar()?.contains(event.target as Node) || spacesOpen())) event.preventDefault();
       return;
     }
-    setSwipe(rubber(start + dx / limit));
+    if (!active && !begin(event.target as Node)) return;
+    clearTimeout(endTimer);
+    endTimer = setTimeout(() => { velocity = 0; finish(); }, 180);
+    move(-event.deltaX, event.deltaY);
+    if (tracking) event.preventDefault();
   }
 
+  const subscription = desktop?.scrollPhases?.(nativeScroll);
   addEventListener("wheel", onWheel, { passive: false });
   onCleanup(() => {
     removeEventListener("wheel", onWheel);
+    void subscription?.then((stop) => stop());
     clearTimeout(endTimer);
+    if (active) finish(true);
   });
 }
 
@@ -173,9 +170,9 @@ export default function Sidebar() {
 
   createEffect(on(held, (now) => (now ? show() : floatingSidebar() && scheduleHide()), { defer: true }));
   createEffect(on(pinned, (now) => now && setHovering(false), { defer: true }));
-  // The window buttons live in the sidebar's corner, so they come and go with it.
-  createEffect(() => desktop?.setTrafficLights(shown()));
-  onCleanup(() => clearTimeout(hideTimer));
+  const hideNativeButtons = () => desktop?.hoverButtons({ x: 0, y: 0, width: 0, height: 0 });
+  createEffect(() => { if (!shown()) hideNativeButtons(); });
+  onCleanup(() => { clearTimeout(hideTimer); hideNativeButtons(); });
   let aside: HTMLElement | undefined;
   useSpacesSwipe(() => aside, shown);
   // Without a space the list always shows.
@@ -209,6 +206,16 @@ export default function Sidebar() {
             if (e.key === "Escape" && !pinned() && !held()) setFloatingSidebar(false);
           }}
         >
+          <Show when={desktop?.platform === "darwin"}>
+            <div class="window-controls" role="group" aria-label="Window controls" onPointerEnter={event => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              desktop?.hoverButtons({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+            }}>
+              <button class="window-control close" aria-label="Close window" onClick={() => desktop?.windowControl("close")}></button>
+              <button class="window-control minimize" aria-label="Minimize window" onClick={() => desktop?.windowControl("minimize")}></button>
+              <button class="window-control zoom" aria-label="Zoom window" onClick={() => desktop?.windowControl("zoom")}></button>
+            </div>
+          </Show>
           {/* Both stay mounted, so the list slides in over the files and back out. */}
           <Show when={workspace()} keyed>
             {(ws) => (

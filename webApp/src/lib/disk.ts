@@ -1,7 +1,5 @@
-// The desktop app keeps the library in a real folder instead of the origin private file system, so other programs
-// (agents, editors) can work on spaces by path. These handles give `storage.ts`, the jj host and the typst worker
-// OPFS's API over that folder: workers reach the disk through Node (Electron's `nodeIntegrationInWorker`), the page
-// through the preload's bridge (`desktopApp/preload.cjs`, the same operations), both limited to the folder.
+// Browser storage handles over the desktop library; all desktop operations run in Rust.
+import { nativeConfig, invokeNative, listenNative } from "./native";
 
 export type DiskStat = { dir: boolean; size: number; mtime: number };
 
@@ -262,121 +260,92 @@ export class DiskDirectoryHandle {
   }
 }
 
-// MARK: - Backends
-
-type NodeRequire = (id: string) => unknown;
-type NodeFs = typeof import("node:fs");
-type NodePath = typeof import("node:path");
-
-/** Node's `require` in an Electron worker; absent in browsers. */
-function nodeRequire(): NodeRequire | null {
-  const req = (globalThis as { require?: NodeRequire }).require;
-  return typeof req === "function" ? req : null;
-}
-
-/** The library folder, when this runs in the desktop app's worker. */
-function workerLibrary(): string | null {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  return nodeRequire() && proc?.env?.TYPEWRIGHT_LIBRARY ? proc.env.TYPEWRIGHT_LIBRARY : null;
-}
-
-/** Node's file system, for workers (the preload has its own copy of these few lines). */
-function nodeBackend(library: string): DiskBackend {
-  const req = nodeRequire()!;
-  const fs = req("fs") as NodeFs;
-  const path = req("path") as NodePath;
-  const abs = (rel: string) => path.join(library, toDisk(rel));
-  const wrap = async <T>(body: () => Promise<T>): Promise<T> => {
-    try {
-      return await body();
-    } catch (err) {
-      throw new Error((err as { code?: string }).code ?? String(err));
-    }
-  };
-  return {
-    stat: (rel) =>
-      wrap(async () => {
-        try {
-          const info = await fs.promises.stat(abs(rel));
-          return { dir: info.isDirectory(), size: info.size, mtime: info.mtimeMs };
-        } catch (err) {
-          if ((err as { code?: string }).code === "ENOENT") return null;
-          throw err;
-        }
-      }),
-    list: (rel) => wrap(async () => (await fs.promises.readdir(abs(rel), { withFileTypes: true })).map((e) => ({ name: e.name, dir: e.isDirectory() || (e.isSymbolicLink() && fs.statSync(path.join(abs(rel), e.name)).isDirectory()) }))),
-    read: (rel) => wrap(async () => new Uint8Array(await fs.promises.readFile(abs(rel)))),
-    write: (rel, data) => wrap(() => fs.promises.writeFile(abs(rel), data)),
-    mkdir: (rel) => wrap(async () => void (await fs.promises.mkdir(abs(rel), { recursive: true }))),
-    remove: (rel, recursive) => wrap(() => fs.promises.rm(abs(rel), { recursive, force: false })),
-    rename: (from, to) => wrap(() => fs.promises.rename(abs(from), abs(to))),
-    openSync(rel) {
-      let fd: number;
-      try {
-        fd = fs.openSync(abs(rel), "r+");
-      } catch (err) {
-        throw new Error((err as { code?: string }).code ?? String(err));
-      }
-      const view = (b: ArrayBufferView) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
-      return {
-        read: (buffer, at) => fs.readSync(fd, view(buffer), 0, buffer.byteLength, at),
-        write: (buffer, at) => fs.writeSync(fd, view(buffer), 0, buffer.byteLength, at),
-        truncate: (size) => fs.ftruncateSync(fd, size),
-        size: () => fs.fstatSync(fd).size,
-        flush: () => fs.fsyncSync(fd),
-        close: () => fs.closeSync(fd),
-      };
-    },
-  };
-}
+// MARK: - Native bridge
 
 type DesktopStorage = DiskBackend & { library: string };
+let workerStorage: DesktopStorage | null = null;
 
-function pageBackend(): DesktopStorage | null {
-  if (typeof window === "undefined") return null;
-  return (window as unknown as { typewrightDesktop?: { storage?: DesktopStorage } }).typewrightDesktop?.storage ?? null;
-}
+const nativeStorage: DesktopStorage | null = nativeConfig ? {
+  library: nativeConfig.library,
+  stat: (path) => invokeNative("disk_op", { op: "stat", path }),
+  list: (path) => invokeNative("disk_op", { op: "list", path }),
+  read: async (path) => new Uint8Array(await invokeNative<ArrayBuffer>("disk_read", { path })),
+  write: (path, data) => invokeNative("disk_write", data, { headers: { "x-typewright-path": encodeURIComponent(path) } }),
+  mkdir: (path) => invokeNative("disk_op", { op: "mkdir", path }),
+  remove: (path, recursive) => invokeNative("disk_op", { op: "remove", path, recursive }),
+  rename: (path, to) => invokeNative("disk_op", { op: "rename", path, to }),
+} : null;
 
-/** The desktop app's library folder (absolute), or null in the browser. */
-export function libraryFolder(): string | null {
-  return pageBackend()?.library ?? workerLibrary();
-}
-
-let diskRoot: DiskDirectoryHandle | null | undefined;
-
-/** The storage root: the desktop app's library folder, or the origin private file system. */
-export async function storageRoot(): Promise<FileSystemDirectoryHandle> {
-  if (diskRoot === undefined) {
-    const page = pageBackend();
-    const library = workerLibrary();
-    diskRoot = page ? new DiskDirectoryHandle(page, "", "") : library ? new DiskDirectoryHandle(nodeBackend(library), "", "") : null;
-  }
-  return diskRoot ? (diskRoot as unknown as FileSystemDirectoryHandle) : navigator.storage.getDirectory();
-}
-
-/** Reports changes other programs make in the desktop app's library folder. */
-export function watchLibrary(listener: (paths: string[]) => void) {
-  (pageBackend() as (DesktopStorage & { watch?(listener: (paths: string[]) => void): void }) | null)?.watch?.(listener);
-}
-
-/** Once, copies what the desktop app kept in browser storage before it used the folder; files on disk win. */
-export async function migrateBrowserStorage() {
-  const disk = pageBackend();
-  if (!disk || (await disk.stat(".migrated"))) return;
-  const opfs = await navigator.storage.getDirectory();
-  async function copy(dir: FileSystemDirectoryHandle, rel: string) {
-    for await (const [name, handle] of (dir as unknown as DiskDirectoryHandle).entries()) {
-      const path = rel ? `${rel}/${name}` : name;
-      // The jj host's mtimes belong to browser storage; without them every file is checked once.
-      if (path === "jj-host") continue;
-      if (handle.kind === "directory") {
-        await disk!.mkdir(path);
-        await copy(handle as unknown as FileSystemDirectoryHandle, path);
-      } else if (!(await disk!.stat(path))) {
-        await disk!.write(path, new Uint8Array(await (await (handle as unknown as FileSystemFileHandle).getFile()).arrayBuffer()));
+/** Workers ask the page to call Tauri; no Node, OPFS or synchronous IPC is needed. */
+export function connectDiskWorker(worker: Worker) {
+  if (!nativeStorage) return;
+  const { port1, port2 } = new MessageChannel();
+  port1.onmessage = async ({ data: { id, op, args } }) => {
+    try {
+      let value: unknown;
+      switch (op) {
+        case "stat": value = await nativeStorage.stat(args[0]); break;
+        case "list": value = await nativeStorage.list(args[0]); break;
+        case "read": value = await nativeStorage.read(args[0]); break;
+        case "write": value = await nativeStorage.write(args[0], args[1]); break;
+        case "mkdir": value = await nativeStorage.mkdir(args[0]); break;
+        case "remove": value = await nativeStorage.remove(args[0], args[1]); break;
+        case "rename": value = await nativeStorage.rename(args[0], args[1]); break;
+        default: throw new Error("Unknown disk operation");
       }
+      port1.postMessage({ id, value });
+    } catch (error) {
+      port1.postMessage({ id, error: String((error as Error)?.message ?? error) });
     }
-  }
-  await copy(opfs, "");
-  await disk.write(".migrated", new TextEncoder().encode("Spaces from the browser storage were copied here.\n"));
+  };
+  worker.postMessage({ diskPort: port2, library: nativeStorage.library }, [port2]);
+}
+
+export function acceptDiskWorker(message: unknown): boolean {
+  const data = message as { diskPort?: MessagePort; library?: string };
+  if (!data.diskPort || !data.library) return false;
+  const port = data.diskPort;
+  let next = 0;
+  const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+  port.onmessage = ({ data }) => {
+    const request = pending.get(data.id);
+    pending.delete(data.id);
+    if (data.error) request?.reject(new Error(data.error));
+    else request?.resolve(data.value);
+  };
+  const call = <T>(op: string, ...args: unknown[]): Promise<T> => new Promise((resolve, reject) => {
+    const id = ++next;
+    pending.set(id, { resolve, reject });
+    port.postMessage({ id, op, args });
+  });
+  workerStorage = {
+    library: data.library,
+    stat: (path) => call("stat", path),
+    list: (path) => call("list", path),
+    read: (path) => call("read", path),
+    write: (path, data) => call("write", path, data),
+    mkdir: (path) => call("mkdir", path),
+    remove: (path, recursive) => call("remove", path, recursive),
+    rename: (from, to) => call("rename", from, to),
+  };
+  return true;
+}
+
+/** The desktop library's absolute path, or null in the browser. */
+export function libraryFolder(): string | null {
+  return (nativeStorage ?? workerStorage)?.library ?? null;
+}
+
+let diskRoot: DiskDirectoryHandle | undefined;
+
+/** Desktop always uses the native library; the web app keeps browser storage. */
+export async function storageRoot(): Promise<FileSystemDirectoryHandle> {
+  const backend = nativeStorage ?? workerStorage;
+  if (!backend) return navigator.storage.getDirectory();
+  diskRoot ??= new DiskDirectoryHandle(backend, "", "");
+  return diskRoot as unknown as FileSystemDirectoryHandle;
+}
+
+export function watchLibrary(listener: (paths: string[]) => void) {
+  if (nativeConfig) void listenNative<string[]>("library-changed", listener);
 }

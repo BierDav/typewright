@@ -2,6 +2,7 @@
 // from, or by an account key copied over by hand. It matches the Mac app's `SyncIdentity` (relying party,
 // salt, derivation and key format), so the same passkey or key signs in to the same account in both.
 import { createStore } from "solid-js/store";
+import { invokeNative } from "./native";
 import { desktop } from "./desktop";
 
 /** The Mac app's relying party; set `VITE_PASSKEY_DOMAIN` for other deployments. */
@@ -62,7 +63,12 @@ export function onIdentityChange(prepare: (account: Uint8Array) => Promise<void>
 
 async function adopt(secret: Uint8Array, name: string, kind: Kind) {
   await prepareChange?.(secret);
-  localStorage.setItem(KEY, JSON.stringify({ secret: hex(secret), name, kind } satisfies Stored));
+  const stored = JSON.stringify({ secret: hex(secret), name, kind } satisfies Stored);
+  if (desktop?.platform === "darwin" && kind !== "temporary") {
+    const result = await invokeNative<{ error?: string } | null>("native_account", { request: stored });
+    if (result?.error) throw new Error(result.error);
+  }
+  localStorage.setItem(KEY, stored);
   setIdentity({ account: secret, name, kind, fingerprint: await fingerprintOf(secret), error: null });
 }
 
@@ -92,7 +98,8 @@ export async function signInWithKey(text: string) {
 
 export async function loadIdentity() {
   try {
-    const stored = JSON.parse(localStorage.getItem(KEY) ?? "null") as Stored | null;
+    const native = desktop?.platform === "darwin" ? await invokeNative<Stored | null>("native_account", { request: "load" }) : null;
+    const stored = native ?? JSON.parse(localStorage.getItem(KEY) ?? "null") as Stored | null;
     if (stored?.secret?.length === 64) {
       const account = unhex(stored.secret);
       // Accounts from before account keys were all passkeys.
@@ -102,6 +109,7 @@ export async function loadIdentity() {
 }
 
 export function signOut() {
+  if (desktop?.platform === "darwin") void invokeNative("native_account", { request: "clear" });
   localStorage.removeItem(KEY);
   setIdentity({ account: null, name: null, kind: null, fingerprint: null });
 }

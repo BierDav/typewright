@@ -1,5 +1,6 @@
 // Talks to the typst worker. It mirrors the files and fonts it handed over, so a worker whose
 // module trapped (typst panicked) is replaced without the page noticing.
+import { connectDiskWorker } from "./disk";
 import TypstWorker from "~/workers/typst.worker.ts?worker";
 
 export type DiagnosticJSON = { path: string; line: number; column: number; length?: number | null; severity: "error" | "warning"; message: string };
@@ -43,6 +44,7 @@ class CompilerClient {
 
   private start(): Worker {
     const worker = new TypstWorker();
+    connectDiskWorker(worker);
     worker.onmessage = (event: MessageEvent) => {
       const { id, ok, value, error, fatal } = event.data;
       const pending = this.pending.get(id);

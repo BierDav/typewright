@@ -180,6 +180,23 @@ async function complete(context: LanguageContext, doc: string, pos: number, expl
     indexRequested = true;
     await compiler.packageIndex().catch(() => (indexRequested = false));
   }
+  const packageMatch = /"(@[\w/:.-]*)$/.exec(doc.slice(0, pos));
+  if (packageMatch) {
+    const [installed, universe] = await Promise.all([
+      compiler.installedPackages().catch(() => []), compiler.packageIndex().catch(() => []),
+    ]);
+    const local = new Set(installed);
+    const specs = [...new Set([...installed, ...universe.map(p => `@preview/${p.name}:${p.version}`)])];
+    specs.sort((a, b) => a.split(":")[0].localeCompare(b.split(":")[0]) || b.localeCompare(a, undefined, { numeric: true }));
+    const latest = new Map<string, string>();
+    for (const spec of specs) if (!latest.has(spec.split(":")[0])) latest.set(spec.split(":")[0], spec);
+    return { from: pos - packageMatch[1].length, items: specs.map((spec, i) => ({
+      label: spec, kind: Kind.Module, insert: spec, snippet: false, boost: -i / specs.length,
+      detail: local.has(spec) ? (spec.startsWith("@preview/") ? "Downloaded" : "Local package")
+        : latest.get(spec.split(":")[0]) === spec ? "Typst Universe · Latest" : "Typst Universe",
+    })) };
+
+  }
   const params = await parameters(doc, around, pos).catch(() => null);
   if (cancelled()) return null;
   if (!explicit && !params && !/[\w#.@"<(:/]$/.test(before)) return solveng;

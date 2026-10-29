@@ -1,4 +1,5 @@
 import { initVimMode } from "monaco-vim";
+import { connectedSelection } from "~/lib/editor/selection";
 import { createEffect, on, onCleanup, onMount } from "solid-js";
 import { isMac, setEditorView, shortcut } from "~/lib/app";
 import * as commands from "~/lib/commands";
@@ -245,6 +246,7 @@ export default function Editor(props: { workspace: Workspace }) {
       overflowWidgetsDomNode: overflow,
       occurrencesHighlight: "off",
       selectionHighlight: true,
+      roundedSelection: false,
       wordBasedSuggestions: "off",
       quickSuggestions: { other: true, comments: false, strings: true },
       quickSuggestionsDelay: 60,
@@ -276,6 +278,7 @@ export default function Editor(props: { workspace: Workspace }) {
     const action = (id: string, keybindings: number[], run: () => void, precondition = "editorTextFocus") =>
       editor!.addAction({ id: `typewright.${id}`, label: id, keybindings, precondition, run });
     disposables.push(
+      connectedSelection(editor),
       ...registerTypst(context),
       registerColors(),
       registerFolding(),

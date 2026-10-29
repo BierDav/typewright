@@ -1,0 +1,43 @@
+[package]
+name = "typewright-desktop"
+version = "0.0.0"
+edition = "2024"
+publish = false
+authors = ["David Emanuel Bieregger <ad@bos.at>"]
+description = "Write Typst with a live preview"
+license = "Apache-2.0"
+homepage = "https://github.com/BierDav/typewright"
+
+[build-dependencies]
+serde_json = "1"
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+notify = "8"
+percent-encoding = "2"
+tempfile = "3"
+tokio = { version = "1", features = ["sync"] }
+jj_bridge = { path = "../jjBridge" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSWindow", "NSView", "NSButton"] }
+block2 = "0.6"
+
+[patch.crates-io]
+jj-core = { path = "../jjBridge/vendor/jj-core" }
+jj-lib = { path = "../jjBridge/vendor/jj-lib" }
+gix-tempfile = { path = "../jjBridge/vendor/gix-tempfile" }
+memmap2 = { path = "../jjBridge/vendor/memmap2" }
+
+[target.'cfg(windows)'.dependencies]
+junction = "1"

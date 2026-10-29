@@ -171,17 +171,28 @@ jobs:
         with:
           name: desktop-web
           path: desktopApp/web
-      - name: Install rpm tooling
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y rpm
+        run: sudo apt-get update && sudo apt-get install -y rpm libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Prepare native passkey profile
+        if: runner.os == 'macOS'
+        env:
+          PROFILE: ${{ secrets.DESKTOP_PROVISIONING_PROFILE }}
+        run: |
+          if [ -n "$PROFILE" ]; then
+            echo "$PROFILE" | base64 --decode > "$RUNNER_TEMP/Desktop.provisionprofile"
+            echo "TYPEWRIGHT_DESKTOP_PROVISIONING_PROFILE=$RUNNER_TEMP/Desktop.provisionprofile" >> "$GITHUB_ENV"
+          fi
       - name: Build
         shell: bash
         env:
           # macOS builds are signed and notarized with the Mac app's Developer ID.
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.DEVELOPER_ID_P12 || '' }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.DEVELOPER_ID_P12_PASSWORD || '' }}
+          APPLE_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.DEVELOPER_ID_P12 || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.DEVELOPER_ID_P12_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.DEVELOPER_ID_IDENTITY || '' }}
           APPLE_ID: ${{ runner.os == 'macOS' && secrets.NOTARY_APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ runner.os == 'macOS' && secrets.NOTARY_PASSWORD || '' }}
+          APPLE_PASSWORD: ${{ runner.os == 'macOS' && secrets.NOTARY_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.NOTARY_TEAM_ID || '' }}
         run: scripts/build-desktopApp.sh '${{ needs.release.outputs.version }}' --skip-web
       - name: Attach to the release
@@ -190,7 +201,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          # Publish the PWA DMG, Windows installers, and Linux AppImages.
+          # Publish the desktop DMG, Windows installers and Linux AppImages.
           # The native macOS app DMG is uploaded by the release job above.
           files=(desktopApp/dist/Typewright-*.{dmg,exe,AppImage})
           if [ "${#files[@]}" -eq 0 ]; then

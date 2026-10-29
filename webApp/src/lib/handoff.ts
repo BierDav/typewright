@@ -1,5 +1,5 @@
 // The desktop app's passkeys run in the browser on the relying party's domain; this page hands the account back
-// through a `typewright-desktop://passkey#…` link, encrypted to a key only the waiting app holds (desktopApp/main.js).
+// through a `typewright-desktop://passkey#…` link, encrypted to a key only the waiting app holds (lib/desktop.ts).
 
 export const HANDOFF_SCHEME = "typewright-desktop";
 

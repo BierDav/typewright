@@ -1,4 +1,4 @@
-import { createEffect, createRoot } from "solid-js";
+import { createEffect, createRoot, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { desktop } from "./desktop";
 
@@ -96,8 +96,12 @@ createRoot(() => {
   });
 });
 
+const systemAppearance = typeof matchMedia === "undefined" ? null : matchMedia("(prefers-color-scheme: dark)");
+const [systemDark, setSystemDark] = createSignal(systemAppearance?.matches ?? false);
+systemAppearance?.addEventListener("change", event => setSystemDark(event.matches));
+
 /** Whether the page shows dark, following the system unless a theme is picked. */
 export function isDark(): boolean {
   if (settings.theme !== "system") return settings.theme === "dark";
-  return matchMedia("(prefers-color-scheme: dark)").matches;
+  return systemDark();
 }

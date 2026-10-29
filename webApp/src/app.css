@@ -461,6 +461,7 @@ select {
   width: 0;
 }
 
+body.resizing .sidebar,
 body.resizing .sidebar-dock {
   transition: none;
 }
@@ -488,7 +489,7 @@ body.resizing .sidebar-dock {
   background: var(--sidebar-glass);
   -webkit-backdrop-filter: blur(30px) saturate(1.6);
   backdrop-filter: blur(30px) saturate(1.6);
-  box-shadow: 0.5px 0 0 var(--glass-border), 8px 0 24px rgba(0, 0, 0, 0.08);
+
 }
 
 body.swiping .sidebar,
@@ -2616,7 +2617,7 @@ fieldset.plain:disabled {
 /* Motion stays for meaning only when it's asked to be reduced. */
 /* MARK: Desktop app on macOS */
 
-/* The corner radius of Electron's window on macOS 26 (a titled window without a toolbar). */
+/* Matches the desktop window rounding on macOS. */
 .desktop-mac {
   --window-radius: 16px;
 }
@@ -2707,3 +2708,42 @@ fieldset.plain:disabled {
   direction: rtl;
   font-size: 11px;
 }
+
+/* Join the selection before rounding, rather than rounding every cursor's row. */
+.tw-connected-selection .selected-text { background: transparent !important; }
+.tw-selection-shape {
+  z-index: 0;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  fill: rgba(128, 128, 128, 0.33);
+}
+.tw-connected-selection:has(.focused) .tw-selection-shape { fill: rgba(128, 128, 128, 0.4); }
+
+/* Inside the card so window controls travel with its transform. */
+.window-controls {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+}
+
+.window-control {
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--secondary) 45%, transparent);
+  color: #0009;
+  font: bold 12px/1 system-ui;
+}
+
+.window-control:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

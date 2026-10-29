@@ -59,6 +59,9 @@ const FONT_SCRIPT = `<script>(() => {
 
 /** typst's HTML with the font script at the start of its head. */
 function htmlPage(html: string): string {
+  const dark = settings.previewDark && isDark();
+  html = html.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi, (_, start, css, end) =>
+    start + css.replace(/\(prefers-color-scheme:\s*(dark|light)\)/gi, (_: string, scheme: string) => scheme.toLowerCase() === (dark ? "dark" : "light") ? "(min-width: 0px)" : "(max-width: -1px)") + end);
   const head = /<head[^>]*>/i.exec(html);
   if (!head) return FONT_SCRIPT + html;
   const at = head.index + head[0].length;

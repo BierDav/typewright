@@ -4,6 +4,7 @@
 // while changes keep coming. Edits it hasn't seen yet (made while no tab ran it) wait in localStorage.
 import { createEffect, createRoot } from "solid-js";
 import { createStore } from "solid-js/store";
+import { nativeConfig, invokeNative } from "./native";
 import JJWorker from "~/workers/jj.worker.ts?worker";
 import type { Arg, Request, Response } from "~/workers/jj.worker";
 import { type RetentionPolicy, settings } from "./settings";
@@ -53,7 +54,7 @@ export const [repository, setRepository] = createStore({
   /** Conflicted files, repo-relative. */
   conflicted: [] as string[],
   /** "asyncify" where the browser lacks JSPI: a larger, slower build of the module. */
-  mode: null as "jspi" | "asyncify" | null,
+  mode: null as "jspi" | "asyncify" | "native" | null,
 });
 
 type Pending = { resolve: (value: any) => void; reject: (err: Error) => void };
@@ -132,12 +133,26 @@ function startWorker(): Worker {
 }
 
 function post(request: DistributiveOmit<Request, "id">): Promise<any> {
+  if (nativeConfig) return postNative(request);
   const w = worker ?? startWorker();
   const id = nextId++;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     w.postMessage({ id, ...request });
   });
+}
+
+async function postNative(request: DistributiveOmit<Request, "id">): Promise<any> {
+  const wire = request.op === "mergeNode" ? { ...request,
+    objects: request.objects.map(([name, data]) => [name, Array.from(data)]),
+    lfs: request.lfs.map(([name, data]) => [name, Array.from(data)]),
+  } : request;
+  const response = await invokeNative<{ ok: boolean; value?: any; error?: string; busy?: boolean }>("repository", {
+    request: { ...wire, utcOffset: -new Date().getTimezoneOffset() },
+  });
+  if (!response.ok) throw Object.assign(new Error(response.error), { busy: response.busy });
+  if (request.op === "nodeObjects") return response.value.map(([name, data]: [string, number[]]) => [name, new Uint8Array(data)]);
+  return response.value;
 }
 
 type DistributiveOmit<T, K extends keyof any> = T extends unknown ? Omit<T, K> : never;

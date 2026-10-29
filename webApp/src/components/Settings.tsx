@@ -391,7 +391,10 @@ function Packages() {
     }
   }
 
-  const [linked, { refetch: refreshLinked }] = createResource(() => desktop?.packageLinks() ?? Promise.resolve([]));
+  const [linked, { refetch: refreshLinked }] = createResource(async () => {
+    try { return await desktop?.packageLinks() ?? []; }
+    catch (error) { setMessage(`Couldn’t load linked packages: ${String((error as Error).message ?? error)}`); return []; }
+  });
   const [cloning, setCloning] = createSignal(false);
   const [cloneMessage, setCloneMessage] = createSignal<string | null>(null);
 

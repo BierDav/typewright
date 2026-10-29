@@ -54,7 +54,7 @@ scripts/build-webApp-wasm.sh
 cd webApp && bun install && bun run dev
 ```
 
-The desktop app runs with `scripts/run-desktopApp.sh`; `scripts/build-desktopApp.sh <version>` builds its installers for the current platform.
+The cross-platform desktop app uses Tauri and stores spaces and history in the native filesystem. It runs with `scripts/run-desktopApp.sh`; `scripts/build-desktopApp.sh <version>` builds its installers for the current platform. Linux builds require WebKitGTK 4.1, Ayatana AppIndicator and librsvg development packages. macOS builds require Xcode. Existing desktop libraries are reused; sign in again and set preferences after migrating from Electron.
 
 ## License
 

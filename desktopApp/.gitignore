@@ -2,3 +2,4 @@ node_modules/
 # The web app's build, copied in by scripts/build-desktopApp.sh.
 web/
 dist/
+gen/
