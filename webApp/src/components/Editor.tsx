@@ -5,7 +5,8 @@ import * as commands from "~/lib/commands";
 import { registerColors } from "~/lib/editor/colors";
 import { registerFolding } from "~/lib/editor/folding";
 import { typstHighlighting } from "~/lib/editor/highlight";
-import { registerTypst, typstEditor } from "~/lib/editor/language";
+import { carets } from "~/lib/editor/carets";
+import { goToDefinition, registerTypst, typstEditor } from "~/lib/editor/language";
 import { liveEditing } from "~/lib/editor/live";
 import { applyTheme, type CodeEditor, edit, monaco, range, select, selection } from "~/lib/editor/monaco";
 import { fenceClosing } from "~/lib/editor/solveng";
@@ -263,6 +264,8 @@ export default function Editor(props: { workspace: Workspace }) {
       scrollbar: { useShadows: false, verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
       tabSize: 2,
       links: false,
+      // ⌥-drag selects a column, like the Mac app; carets.ts takes ⌘-click.
+      multiCursorModifier: "ctrlCmd",
       ...wrapOptions(),
     });
     typstKey = editor.createContextKey("typewright.typst", false);
@@ -277,7 +280,11 @@ export default function Editor(props: { workspace: Workspace }) {
       registerColors(),
       registerFolding(),
       ...typing(editor, () => syntaxOf(current)),
-      ...typstEditor(editor, context, () => languageOf(current ?? "") === "typst"),
+      ...typstEditor(editor, context),
+      // ⌘-click (Ctrl-click elsewhere) opens the definition.
+      ...carets(editor, (offset) => {
+        if (editor && languageOf(current ?? "") === "typst") void goToDefinition(editor, context, offset);
+      }),
       fenceClosing(editor),
       action("format", [KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyL], () => void commands.formatDocument()),
       action("rename", [KeyMod.Shift | KeyCode.F6, KeyCode.F2], () => commands.rename(), "editorTextFocus && typewright.typst"),

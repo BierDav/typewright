@@ -377,23 +377,13 @@ export function registerTypst(context: LanguageContext): monaco.IDisposable[] {
   return [monaco.languages.registerCompletionItemProvider("typst", completionProvider(context)), monaco.languages.registerHoverProvider("typst", hoverProvider(context))];
 }
 
-/** Keys and pointer gestures for typst in `editor`, while `active()`. */
-export function typstEditor(editor: CodeEditor, context: LanguageContext, active: () => boolean): monaco.IDisposable[] {
+/** Keys for typst in `editor`; ⌘-click goes to definitions through `carets`. */
+export function typstEditor(editor: CodeEditor, context: LanguageContext): monaco.IDisposable[] {
   const { KeyCode } = monaco;
   const when = "editorTextFocus && typewright.typst";
   return [
     occurrences(editor, context),
     editor.addAction({ id: "typewright.docs", label: "Show Documentation", keybindings: [KeyCode.F1], precondition: when, run: () => void showDocs(editor, context) }),
     editor.addAction({ id: "typewright.definition", label: "Go to Definition", keybindings: [KeyCode.F12], precondition: when, run: () => void goToDefinition(editor, context) }),
-    // ⌘-click (Ctrl-click elsewhere) opens the definition.
-    editor.onMouseDown((event) => {
-      const e = event.event;
-      if (!active() || !(e.metaKey || e.ctrlKey) || !e.leftButton || !event.target.position) return;
-      const model = editor.getModel();
-      if (!model) return;
-      e.preventDefault();
-      e.stopPropagation();
-      void goToDefinition(editor, context, model.getOffsetAt(event.target.position));
-    }),
   ];
 }

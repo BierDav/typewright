@@ -84,7 +84,7 @@ jobs:
         run: |
           flags=(--generate-notes --target "$GITHUB_SHA")
           [ "${{ inputs.channel }}" != "stable" ] && flags+=(--prerelease)
-          gh release create "v$VERSION" "dist/Typewright-$VERSION.zip" --title "Typewright $VERSION" "${flags[@]}"
+          gh release create "v$VERSION" "dist/Typewright-$VERSION-macos.dmg" --title "Typewright $VERSION" "${flags[@]}"
 
       - name: Update Homebrew tap
         env:
@@ -190,5 +190,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          files=(desktopApp/dist/Typewright-*.{dmg,zip,exe,AppImage,deb,rpm})
+          # Publish the PWA DMG, Windows installers, and Linux AppImages.
+          # The native macOS app DMG is uploaded by the release job above.
+          files=(desktopApp/dist/Typewright-*.{dmg,exe,AppImage})
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No desktop installers were produced."
+            exit 1
+          fi
           gh release upload "v${{ needs.release.outputs.version }}" "${files[@]}" --clobber

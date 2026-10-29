@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds a universal Typewright.app and zips it into dist/.
+# Builds a universal Typewright.app and packages it into a DMG in dist/.
 # Signed with Developer ID and the passkey entitlement when TYPEWRIGHT_SIGN_IDENTITY and
 # TYPEWRIGHT_PROVISIONING_PROFILE (a .provisionprofile path) are set, ad-hoc otherwise (no passkeys, no sync).
 # Notarized when TYPEWRIGHT_NOTARY_APPLE_ID, TYPEWRIGHT_NOTARY_PASSWORD and TYPEWRIGHT_NOTARY_TEAM are set too,
@@ -19,8 +19,9 @@ xcodebuild -project "$root/macApp/Typewright.xcodeproj" -scheme Typewright -conf
 
 mkdir -p "$root/dist"
 app="$dd/Build/Products/Release/Typewright.app"
-zip="$root/dist/Typewright-$version.zip"
-rm -f "$zip"
+zip="${RUNNER_TEMP:-$root/dist}/Typewright-$version.zip"
+dmg="$root/dist/Typewright-$version-macos.dmg"
+rm -f "$zip" "$dmg"
 # Extensions are signed on their own first: they need their sandbox entitlements, which --deep would drop.
 appex="$app/Contents/PlugIns/TypewrightQuickLook.appex"
 appex_entitlements="$root/macApp/Resources/QuickLook.entitlements"
@@ -63,5 +64,5 @@ else
   codesign --force --sign - --options runtime "$app"
 fi
 
-ditto -c -k --keepParent "$app" "$zip"
-shasum -a 256 "$zip" | cut -d' ' -f1
+hdiutil create -volname Typewright -srcfolder "$app" -ov -format UDZO "$dmg" >/dev/null
+shasum -a 256 "$dmg" | cut -d' ' -f1

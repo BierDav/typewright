@@ -7,7 +7,7 @@ cask "$name" do
   version "$version"
   sha256 "$sha"
 
-  url "https://github.com/BierDav/typewright/releases/download/v#{version}/Typewright-#{version}.zip"
+  url "https://github.com/BierDav/typewright/releases/download/v#{version}/Typewright-#{version}-macos.dmg"
   name "Typewright"
   desc "Native Typst editor with live preview"
   homepage "https://github.com/BierDav/typewright"

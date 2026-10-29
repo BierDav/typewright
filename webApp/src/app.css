@@ -1351,6 +1351,11 @@ button.issue:hover:not(:disabled) {
   text-decoration: underline wavy var(--red);
 }
 
+/* Column selection mode (⇧⌘8), as the Mac app shows it. */
+.tw-column-mode .monaco-editor .view-lines {
+  cursor: crosshair;
+}
+
 .tw-remote-caret {
   display: block;
   position: relative;
