@@ -50,10 +50,10 @@ export default function StatusBar(props: { workspace: Workspace }) {
       </Show>
       <div class="spacer" />
       <Show when={ws.state.preview}>
-        <button class="status-item status-button" title={`${ws.state.previewMode === "pinned" ? "Pinned" : "Following the selection"} · ${PREVIEW_NEXT[ws.state.previewMode]}`} onClick={() => ws.cyclePreview()}>
+        <button class="status-button labelled" title={`${ws.state.previewMode === "pinned" ? "Pinned" : "Following the selection"} · ${PREVIEW_NEXT[ws.state.previewMode]}`} onClick={() => ws.cyclePreview()}>
           <Show when={ws.state.previewMode === "pinned"} fallback={<Eye size={12} />}>
             <Pin size={12} />
-          </Show>{" "}
+          </Show>
           {basename(ws.state.preview!)}
         </button>
         <Show when={ws.state.preview!.endsWith(".typ") && compiler.version}>

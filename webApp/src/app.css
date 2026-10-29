@@ -960,6 +960,14 @@ button.tree-row,
   color: var(--text);
 }
 
+/* A labelled one, like the previewed file's. */
+.status-button.labelled {
+  width: auto;
+  gap: 4px;
+  padding: 0 4px;
+  font: inherit;
+}
+
 .issues-button {
   position: absolute;
   right: 16px;
